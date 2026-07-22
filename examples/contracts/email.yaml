@@ -1,0 +1,12 @@
+belay_contract: "0.1"
+tool: email.send
+summary: Sends an email to one or more recipients
+reversibility: irreversible
+effects:
+  - type: send
+    resource: email.message
+    count: "1"
+    recipients: "1"
+provenance:
+  declared_by: integrator
+  verified: false

@@ -20,6 +20,28 @@ def test_examples_fs_yaml_loads_successfully() -> None:
     assert contract_set.resolve("does.not_exist") is None
 
 
+def test_examples_crm_yaml_loads_successfully() -> None:
+    contract_set = load_contract_set([EXAMPLES_DIR / "crm.yaml"])
+    for tool in (
+        "crm.get",
+        "crm.create",
+        "crm.update",
+        "crm.delete",
+        "crm.export_records",
+        "crm.import_records",
+        "crm.bulk_delete",
+    ):
+        assert contract_set.resolve(tool) is not None, tool
+
+
+def test_examples_email_yaml_loads_and_is_irreversible_with_no_undo() -> None:
+    contract_set = load_contract_set([EXAMPLES_DIR / "email.yaml"])
+    contract = contract_set.resolve("email.send")
+    assert contract is not None
+    assert contract.reversibility == "irreversible"
+    assert contract.undo is None
+
+
 def test_resolve_returns_none_for_unknown_tool() -> None:
     contract_set = load_contract_set([EXAMPLES_DIR / "fs.yaml"])
     assert contract_set.resolve("nope") is None
