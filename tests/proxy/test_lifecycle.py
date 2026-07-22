@@ -170,28 +170,38 @@ def _irreversible_send_contract() -> Contract:
     )
 
 
-async def test_default_policy_pauses_irreversible_tools_but_does_not_block_in_e4() -> None:
-    # E4: PolicyEngine can produce `pause`, but blocking on it is ApprovalStage's
-    # job (E5, still a stub) -- so the call still completes, with the verdict
-    # visible in the ledger's `policy_evaluated` event.
+async def test_default_policy_pauses_irreversible_tools_and_blocks_execution() -> None:
+    # E5: PolicyEngine's `pause` now really parks the call in the approval
+    # queue (spec §7) -- the executor is never called and the agent gets a
+    # structured `pending_approval` result instead.
     ledger = LedgerStore()
     session_id = "s_pause"
     cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    called = False
+
+    async def executor(tool: str, args: dict) -> dict:
+        nonlocal called
+        called = True
+        return {"ok": True}
+
     lifecycle = Lifecycle(
         contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
     )
     lifecycle.start_session()
 
     result = await lifecycle.govern_and_execute(
-        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=executor
     )
-    assert result == {"ok": True, "tool": "mail.send"}
+    assert result["status"] == "pending_approval"
+    assert "approval_id" in result
+    assert called is False
 
     events = ledger.read(session_id)
     evaluated = [e for e in events if e.type == "policy_evaluated"]
     assert len(evaluated) == 1
     assert evaluated[0].payload["verdict"] == "pause"
     assert evaluated[0].payload["reasons"] == ["defaults.irreversible"]
+    assert any(e.type == "approval_requested" for e in events)
 
 
 async def test_deny_verdict_blocks_execution_and_never_calls_the_executor() -> None:
@@ -261,3 +271,54 @@ async def test_irreversible_relaxation_is_recorded_as_config_override() -> None:
     ]
     assert len(overrides) == 1
     assert overrides[0].payload["rules"] == ["tools[0]"]
+
+
+async def test_paused_then_approved_via_queue_lets_execution_continue() -> None:
+    """spec §7 end-to-end: pause -> approve (as the CLI would) -> retried call executes."""
+    ledger = LedgerStore()
+    session_id = "s_approve_flow"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    lifecycle = Lifecycle(
+        contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
+    )
+    lifecycle.start_session()
+
+    first = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert first["status"] == "pending_approval"
+
+    assert lifecycle.approval_stage is not None
+    lifecycle.approval_stage.queue.approve(first["approval_id"], approved_by="jairo")
+
+    # The agent retries the identical call; same args -> same plan_id (the
+    # planner is deterministic over (tool, args, session)) -> now proceeds.
+    second = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert second == {"ok": True, "tool": "mail.send"}
+
+
+async def test_paused_then_rejected_raises_approval_rejected_with_reason() -> None:
+    ledger = LedgerStore()
+    session_id = "s_reject_flow"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    lifecycle = Lifecycle(
+        contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
+    )
+    lifecycle.start_session()
+
+    first = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert lifecycle.approval_stage is not None
+    lifecycle.approval_stage.queue.reject(
+        first["approval_id"], rejected_by="jairo", reason="not now"
+    )
+
+    with pytest.raises(BelayError) as excinfo:
+        await lifecycle.govern_and_execute(
+            "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+        )
+    assert excinfo.value.code == "approval_rejected"
+    assert excinfo.value.detail["reason"] == "not now"

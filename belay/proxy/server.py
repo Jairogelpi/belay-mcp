@@ -4,9 +4,10 @@ Belay is an MCP server toward the agent. `BelayProxyServer` lists the
 upstream's tools verbatim and, on every `call_tool`, runs the request
 through `belay.proxy.lifecycle.Lifecycle` (resolve -> plan -> policy ->
 approval -> execute) before delegating the actual call to the upstream
-client. L1 (E3): plan/policy/approval are no-ops; every call still emits
-its ledger events, and `contract_missing` surfaces as a structured MCP tool
-error rather than a raw traceback.
+client. Every call emits its ledger events; `contract_missing` and other
+spec §11 errors surface as structured MCP tool errors rather than a raw
+traceback, and a `pause` verdict (spec §7) surfaces as a structured,
+non-error `pending_approval` result instead of either.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 from belay.contracts.model import ContractSet
 from belay.errors import BelayError
 from belay.ledger.store import LedgerStore
+from belay.policy.model import PolicyDoc, default_policy
 from belay.proxy.lifecycle import Lifecycle
 from belay.proxy.upstream import UpstreamClient
 
@@ -35,6 +37,7 @@ class BelayProxyServer:
         ledger: LedgerStore,
         session_id: str,
         unsafe_passthrough_tools: frozenset[str] = frozenset(),
+        policy: PolicyDoc | None = None,
     ) -> None:
         self._upstream = upstream
         self.lifecycle = Lifecycle(
@@ -42,6 +45,7 @@ class BelayProxyServer:
             unsafe_passthrough_tools=unsafe_passthrough_tools,
             ledger=ledger,
             session_id=session_id,
+            policy=policy if policy is not None else default_policy(),
         )
         self._server: Server[Any, Any] = Server("belay")
         self._register_handlers()
@@ -72,8 +76,19 @@ class BelayProxyServer:
                     content=[TextContent(type="text", text=json.dumps(exc.to_dict()))],
                     isError=True,
                 )
-            assert isinstance(result, CallToolResult)
-            return result
+            if isinstance(result, CallToolResult):
+                return result
+            # A structured, non-error status payload (spec §7.3
+            # `pending_approval`) -- not a raw error, not the upstream's
+            # result shape either. `structuredContent` is set too so MCP
+            # clients that validate against the tool's declared
+            # `outputSchema` (an open object schema for every example tool)
+            # still accept it.
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(result))],
+                structuredContent=result,
+                isError=False,
+            )
 
     async def run_stdio(self) -> None:
         """Serve over stdio (E3's minimum required transport, spec Appendix C)."""

@@ -50,8 +50,12 @@ provenance:
 ---
 belay_contract: "0.1"
 tool: fs.read_file
-summary: Reads a file's contents (read-only, cannot be undone because nothing changed)
-reversibility: irreversible
+summary: Reads a file's contents (read-only; declared reversible with a no-op undo, since nothing changed)
+reversibility: reversible
+undo:
+  tool: fs.read_file
+  args:
+    path: "$args.path"
 effects:
   - type: read
     resource: fs.file

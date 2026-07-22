@@ -49,6 +49,12 @@ class LedgerStore:
         self._engine = engine if engine is not None else create_engine(db_url, future=True)
         Base.metadata.create_all(self._engine)
 
+    @property
+    def engine(self) -> Engine:
+        """The underlying SQLAlchemy engine, so other stores (e.g. `ApprovalQueue`)
+        can share the same SQLite file without re-parsing a `db_url`."""
+        return self._engine
+
     def append(
         self,
         session_id: str,

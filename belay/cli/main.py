@@ -10,8 +10,13 @@ from __future__ import annotations
 import sys
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from belay.approvals.queue import ApprovalQueue
+    from belay.ledger.store import LedgerStore
 
 app = typer.Typer(
     name="belay",
@@ -102,6 +107,11 @@ def wrap(
 @app.command()
 def run(
     config: str = typer.Option("belay.wrap.json", "--config", "-c", help="Wrap config path."),
+    policy: str = typer.Option(
+        "",
+        "--policy",
+        help="Policy document path (spec §6.1); default is the out-of-the-box policy.",
+    ),
 ) -> None:
     """Start the Belay MCP proxy over stdio (spec §3, Appendix C)."""
     import os
@@ -110,12 +120,14 @@ def run(
 
     from belay.contracts.loader import load_contract_set
     from belay.ledger.store import LedgerStore
+    from belay.policy.model import default_policy, load_policy
     from belay.proxy.config import WrapConfig
     from belay.proxy.server import BelayProxyServer
     from belay.proxy.upstream import connect_stdio
 
     wrap_config = WrapConfig.load(config)
     contract_set = load_contract_set(wrap_config.contracts)
+    policy_doc = load_policy(policy) if policy else default_policy()
     ledger = LedgerStore(f"sqlite:///{Path(wrap_config.db).resolve().as_posix()}")
     session_id = f"s_{uuid.uuid4().hex[:12]}"
 
@@ -129,6 +141,7 @@ def run(
                 ledger,
                 session_id,
                 unsafe_passthrough_tools=frozenset(wrap_config.unsafe_passthrough),
+                policy=policy_doc,
             )
             proxy.lifecycle.start_session()
             await proxy.run_stdio()
@@ -172,6 +185,122 @@ def plan_command(
 
     result_plan = anyio.run(_main)
     typer.echo(result_plan.model_dump_json(indent=2))
+
+
+approvals_app = typer.Typer(
+    name="approvals",
+    help="Approval queue operations (spec §7). CLI-only: never exposed to the agent (spec §12).",
+    no_args_is_help=True,
+)
+app.add_typer(approvals_app, name="approvals")
+
+
+def _approval_queue(db: str) -> ApprovalQueue:
+    from belay.approvals.queue import ApprovalQueue
+
+    return ApprovalQueue(db_url=f"sqlite:///{Path(db).resolve().as_posix()}")
+
+
+def _ledger_for(db: str) -> LedgerStore:
+    from belay.ledger.store import LedgerStore
+
+    return LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
+
+
+@approvals_app.command("list")
+def approvals_list(
+    db: str = typer.Option("belay.db", "--db", help="Ledger/approvals SQLite file path."),
+) -> None:
+    """List every approval item, oldest first (spec §7.1)."""
+    queue = _approval_queue(db)
+    items = queue.list()
+    if not items:
+        typer.echo("no approval items")
+        return
+    for item in items:
+        typer.echo(
+            f"{item.approval_id}  {item.state:9s}  plan={item.plan_id}  "
+            f"tool={item.plan.get('tool')}  session={item.session_id}  "
+            f"expires_at={item.expires_at.isoformat()}"
+        )
+
+
+@approvals_app.command("approve")
+def approvals_approve(
+    approval_id: str = typer.Argument(..., help="Approval item id (spec §7.1)."),
+    reason: str = typer.Option("", "--reason", help="Optional human-readable reason."),
+    by: str = typer.Option(
+        "",
+        "--by",
+        help="Authenticated approver identity (spec §12); defaults to the OS user.",
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger/approvals SQLite file path."),
+) -> None:
+    """Approve a pending item (spec §7.1: `pending -> approved`)."""
+    import getpass
+
+    from belay.errors import BelayError
+
+    approver = by or getpass.getuser()
+    queue = _approval_queue(db)
+    try:
+        item = queue.approve(approval_id, approved_by=approver, reason=reason or None)
+    except BelayError as exc:
+        typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
+        raise typer.Exit(code=1) from exc
+
+    _ledger_for(db).append(
+        item.session_id,
+        "approval_resolved",
+        {
+            "approval_id": item.approval_id,
+            "plan_id": item.plan_id,
+            "state": "approved",
+            "approved_by": approver,
+            "reason": reason or None,
+        },
+        step_seq=item.step_seq,
+    )
+    typer.echo(f"{item.approval_id} approved by {approver}")
+
+
+@approvals_app.command("reject")
+def approvals_reject(
+    approval_id: str = typer.Argument(..., help="Approval item id (spec §7.1)."),
+    reason: str = typer.Option("", "--reason", help="Optional human-readable reason."),
+    by: str = typer.Option(
+        "",
+        "--by",
+        help="Authenticated approver identity (spec §12); defaults to the OS user.",
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger/approvals SQLite file path."),
+) -> None:
+    """Reject a pending item (spec §7.1: `pending -> rejected`)."""
+    import getpass
+
+    from belay.errors import BelayError
+
+    approver = by or getpass.getuser()
+    queue = _approval_queue(db)
+    try:
+        item = queue.reject(approval_id, rejected_by=approver, reason=reason or None)
+    except BelayError as exc:
+        typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
+        raise typer.Exit(code=1) from exc
+
+    _ledger_for(db).append(
+        item.session_id,
+        "approval_resolved",
+        {
+            "approval_id": item.approval_id,
+            "plan_id": item.plan_id,
+            "state": "rejected",
+            "rejected_by": approver,
+            "reason": reason or None,
+        },
+        step_seq=item.step_seq,
+    )
+    typer.echo(f"{item.approval_id} rejected by {approver}")
 
 
 def main() -> None:

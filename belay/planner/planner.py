@@ -23,18 +23,30 @@ Dry-run adapters v0.1 (plan.md E4):
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from belay.canonical import canonical_bytes
+from belay.canonical import canonical_bytes, sha256_hex
 from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract
 from belay.errors import BelayError
 from belay.planner.model import EffectEstimate, Plan, PlanningSession
 
 DEFAULT_PLAN_TTL_SECONDS = 600  # 10 minutes (spec §5.4 default)
+
+
+def _plan_id(session_id: str, tool: str, args: dict[str, Any]) -> str:
+    """Deterministic over `(session_id, tool, args)` (spec §5.4/§12).
+
+    A polling retry of the exact same call (spec §7.3's `poll_after_ms`)
+    binds to the same `plan_id` and can pick up an already-resolved
+    approval item; a genuine re-plan with different args (§12's
+    "bait-and-switch via re-planning") gets a different `plan_id`, so any
+    approval bound to the old one is never found for the new one.
+    """
+    digest = sha256_hex(canonical_bytes({"session_id": session_id, "tool": tool, "args": args}))
+    return f"p_{digest[:16]}"
 
 
 def _contract_effects(contract: Contract) -> tuple[list[EffectEstimate], list[dict[str, Any]]]:
@@ -129,7 +141,7 @@ class Planner:
         now = self.clock.now()
         expires = now + timedelta(seconds=self.plan_ttl_seconds)
         return Plan(
-            plan_id=f"p_{uuid.uuid4().hex[:16]}",
+            plan_id=_plan_id(session.session_id, tool, args),
             session_id=session.session_id,
             tool=tool,
             args=args,

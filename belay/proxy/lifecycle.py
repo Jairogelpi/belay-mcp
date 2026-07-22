@@ -2,10 +2,11 @@
 
 E3 implemented the L1 slice normatively: **resolve** (contract lookup + the
 default rule of §4.6) and **execute** (passthrough), with a ledger event at
-every stage transition (§9.1). E4 replaces `PlanStage`/`PolicyStage`'s bodies
-with the real `Planner`/`PolicyEngine` (spec §5, §6); E5 (approvals) and E6
-(saga step lifecycle) do the same for `ApprovalStage` without changing
-`Lifecycle`'s shape or call sites.
+every stage transition (§9.1). E4 replaced `PlanStage`/`PolicyStage`'s bodies
+with the real `Planner`/`PolicyEngine` (spec §5, §6). E5 does the same for
+`ApprovalStage` (spec §7): a `pause` verdict now really parks the action in
+`belay.approvals.queue.ApprovalQueue` and the agent gets back a structured
+`pending_approval` result instead of the call completing anyway.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from belay.approvals.queue import ApprovalQueue
 from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
@@ -94,11 +96,67 @@ class PolicyStage:
         return self._engine.evaluate(plan, self._policy)
 
 
-class ApprovalStage:
-    """L1 stub for spec §7 (approvals land in E5): nothing ever pauses yet."""
+@dataclass(frozen=True)
+class PendingApproval:
+    """The structured, non-error shape the agent gets back while parked (spec §7.3)."""
 
-    async def maybe_park(self, verdict: str, plan: dict[str, Any]) -> None:
-        return None
+    approval_id: str
+    poll_after_ms: int = 5_000
+
+
+@dataclass(frozen=True)
+class ApprovalCheck:
+    """Outcome of gating one call against the approval queue for its `plan_id`."""
+
+    proceed: bool
+    created: bool
+    pending: PendingApproval | None = None
+
+
+class ApprovalStage:
+    """Gates a `pause` verdict through `belay.approvals.queue.ApprovalQueue` (spec §7).
+
+    Bound to `plan_id` (spec §12 approver binding): a re-plan of the same
+    logical call produces a new `Plan` with a new `plan_id`, so any approval
+    item tied to the old `plan_id` is simply never found again -- it is
+    invalidated by construction, not by an extra invalidation step.
+
+    This class only ever *reads* queue state (`for_plan`) or *creates* a new
+    pending item (`request`) on the agent's behalf. It has no `approve`/
+    `reject` call sites -- those live only in `belay/cli/main.py`'s
+    `approvals` subcommands, so the agent-facing proxy has no code path that
+    can approve or reject anything (spec §12 no-self-approval).
+    """
+
+    def __init__(self, queue: ApprovalQueue | None = None) -> None:
+        self.queue = queue or ApprovalQueue()
+
+    def check(self, verdict: str, plan: Plan, session_id: str, step_seq: int) -> ApprovalCheck:
+        if verdict != "pause":
+            return ApprovalCheck(proceed=True, created=False)
+
+        existing = self.queue.for_plan(plan.plan_id)
+        if existing is None:
+            item = self.queue.request(
+                session_id, plan.plan_id, plan.model_dump(mode="json"), step_seq=step_seq
+            )
+            return ApprovalCheck(
+                proceed=False, created=True, pending=PendingApproval(item.approval_id)
+            )
+
+        if existing.state == "approved":
+            return ApprovalCheck(proceed=True, created=False)
+        if existing.state == "rejected":
+            raise BelayError(
+                "approval_rejected",
+                {"approval_id": existing.approval_id, "reason": existing.reason},
+            )
+        if existing.state == "expired":
+            raise BelayError("approval_expired", {"approval_id": existing.approval_id})
+        # still pending
+        return ApprovalCheck(
+            proceed=False, created=False, pending=PendingApproval(existing.approval_id)
+        )
 
 
 Executor = Callable[[str, dict[str, Any]], Awaitable[Any]]
@@ -123,7 +181,7 @@ class Lifecycle:
     native_dry_run: NativeDryRunCaller | None = None
     plan_stage: PlanStage | None = None
     policy_stage: PolicyStage | None = None
-    approval_stage: ApprovalStage = field(default_factory=ApprovalStage)
+    approval_stage: ApprovalStage | None = None
     _step_seq: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -131,6 +189,13 @@ class Lifecycle:
             self.plan_stage = PlanStage(Planner(clock=self.clock))
         if self.policy_stage is None:
             self.policy_stage = PolicyStage(PolicyEngine(clock=self.clock), self.policy)
+        if self.approval_stage is None:
+            # Share the ledger's SQLite file (spec §7): the CLI's `belay
+            # approvals` subcommands run as a separate process and must see
+            # the same queue.
+            self.approval_stage = ApprovalStage(
+                ApprovalQueue(engine=self.ledger.engine, clock=self.clock)
+            )
 
     def start_session(self) -> None:
         """Emit `session_started` / `contract_set_pinned`, fixing this session's `set_hash`."""
@@ -246,9 +311,30 @@ class Lifecycle:
             )
             raise deny_exc
 
-        # `pause` parks the action in the approval queue (spec §7); E5 fills
-        # this in. Until then it is observed but never blocks execution.
-        await self.approval_stage.maybe_park(policy_result.verdict, plan.model_dump(mode="json"))
+        # `pause` parks the action in the approval queue (spec §7). A
+        # `rejected`/`expired` item raises (handled like any other §11 error
+        # at the proxy boundary); a still-`pending` or newly created item
+        # returns a structured `pending_approval` result instead of
+        # proceeding to execute (spec §7.3) -- this is the one legitimate
+        # early return from `govern_and_execute` that isn't an exception.
+        assert self.approval_stage is not None
+        check = self.approval_stage.check(policy_result.verdict, plan, self.session_id, step_seq)
+        if check.created:
+            assert check.pending is not None
+            self.ledger.append(
+                self.session_id,
+                "approval_requested",
+                {"approval_id": check.pending.approval_id, "plan_id": plan.plan_id},
+                step_seq=step_seq,
+                set_hash=self.contract_set.set_hash,
+            )
+        if not check.proceed:
+            assert check.pending is not None
+            return {
+                "status": "pending_approval",
+                "approval_id": check.pending.approval_id,
+                "poll_after_ms": check.pending.poll_after_ms,
+            }
 
         self.ledger.append(
             self.session_id,
