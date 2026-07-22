@@ -6,10 +6,13 @@ Belay is an MCP proxy that sits between an agent and its tool servers. It
 turns "the agent can call anything" into "every tool call is declared,
 previewable, gated, and — when it goes wrong — reversible."
 
-> Status: early scaffolding (E0 of the [implementation plan](docs/plan.md)).
-> The protocol is specified in [`docs/spec.md`](docs/spec.md) (Belay
-> Specification 0.1); most of it is not implemented yet. This README
-> describes the target shape of v0.1.0 and is updated as each entrega lands.
+> Status: **L1 preview** (E3 of the [implementation plan](docs/plan.md)).
+> Contracts (§4), the event ledger (§9), and a real L1 MCP proxy (§3, §4.6,
+> Appendix C) work end to end: `belay wrap` + `belay run` front a real
+> upstream MCP server over stdio, resolving contracts, applying the default
+> rule, and recording every call to the ledger. Plans, policy, approvals,
+> sagas, and rewind (§5-§8, §10) land in E4-E7. The protocol is specified in
+> [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
 
 ## Why
 
@@ -66,14 +69,22 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## Quickstart (target shape — subcommands land in E3+)
+## Quickstart
 
 ```bash
 belay wrap examples/fs-server --contracts examples/contracts/fs.yaml
 belay run &
-# any standard MCP client now talks to Belay instead of fs-server directly
+# any standard MCP client now talks to Belay instead of fs-server directly:
+# tools with a contract or readOnlyHint pass through, everything else is
+# refused with contract_missing (spec §4.6) — logged to belay.db either way.
 belay verify belay.db
 ```
+
+`belay wrap`/`belay run` implement L1: contract resolution, the default
+rule, and passthrough execution with full ledger recording, over stdio.
+Plan/policy/approval stages exist as documented no-op stubs
+(`belay/proxy/lifecycle.py`) ready for E4-E6 to fill in — see
+[ADR 0003](docs/adr/0003-e3-proxy-l1.md).
 
 The full 3-minute demo — an agent attempts a bulk delete, gets paused,
 a human approves a narrowed version, something still goes wrong, and
