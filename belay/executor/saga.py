@@ -69,7 +69,20 @@ def _materialize(value: Any, scope: Scope) -> Any:
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
-    """Coerce an upstream result into a plain dict for use as `$state`/`$result`."""
+    """Coerce an upstream result into a plain dict for use as `$state`/`$result`.
+
+    A real MCP `CallToolResult` (spec Appendix C: the proxy's executor calls
+    the upstream client directly and gets one back) carries the tool's actual
+    return value nested under `.structuredContent`, not at its own top level
+    -- unwrap that first, so `$result.<path>`/`$state.<as>.<path>` resolve
+    against the tool's real output instead of the MCP envelope. Falls back to
+    a defensive `.get("result", content)` the way FastMCP sometimes nests a
+    single return value, mirroring `examples/crm-mock`'s own test harness.
+    """
+    structured = getattr(value, "structuredContent", None)
+    if isinstance(structured, dict):
+        nested = structured.get("result", structured)
+        return dict(nested) if isinstance(nested, dict) else {"value": nested}
     if isinstance(value, dict):
         return value
     if hasattr(value, "model_dump"):
@@ -266,35 +279,17 @@ class SagaExecutor:
     ) -> dict[str, Any] | None:
         """Execute one step's materialized compensation, if it has one.
 
-        Each execution is its own mini-step (spec §10.2): journaled via the
-        `compensation_executed`/`compensation_failed` events, replaying the
-        frozen args verbatim -- never re-evaluating the undo expression.
+        Delegates to `belay.rewind.service.compensate_one` (E7): one shared
+        mini-step code path (journaled via `compensation_executed`/
+        `compensation_failed`) for both this in-saga auto-unwind and the
+        real `belay rewind` command, replaying the frozen args verbatim --
+        never re-evaluating the undo expression.
         """
-        comp = step.compensation
-        if not comp.get("reversible"):
-            return None
-        try:
-            result = await executor(comp["tool"], comp["args"])
-        except Exception as exc:
-            self.ledger.append(
-                session_id,
-                "compensation_failed",
-                {"step_seq": step.step_seq, "tool": comp["tool"], "error": str(exc)},
-                step_seq=step.step_seq,
-            )
-            raise
-        self.ledger.append(
-            session_id,
-            "compensation_executed",
-            {
-                "step_seq": step.step_seq,
-                "tool": comp["tool"],
-                "args": comp["args"],
-                "result": _as_dict(result),
-            },
-            step_seq=step.step_seq,
+        from belay.rewind.service import compensate_one
+
+        return await compensate_one(
+            self.ledger, session_id, step.step_seq, step.compensation, executor
         )
-        return _as_dict(result)
 
     async def run_saga(
         self,

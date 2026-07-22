@@ -303,6 +303,106 @@ def approvals_reject(
     typer.echo(f"{item.approval_id} rejected by {approver}")
 
 
+@app.command(name="rewind")
+def rewind_command(
+    session_id: str = typer.Argument(..., help="Session to rewind (spec §10.1)."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the honest rewind plan without executing anything."
+    ),
+    by: str = typer.Option(
+        "", "--by", help="Authenticated operator identity; defaults to the OS user."
+    ),
+    skip_and_continue: bool = typer.Option(
+        False,
+        "--skip-and-continue",
+        help="Explicit opt-in: don't halt on the first failed/paused compensation (recorded).",
+    ),
+    to_step: int = typer.Option(
+        -1,
+        "--to-step",
+        help="Rewind only steps with step_seq > this value (default: -1, meaning all).",
+    ),
+    config: str = typer.Option("belay.wrap.json", "--config", "-c", help="Wrap config path."),
+    policy: str = typer.Option(
+        "", "--policy", help="Policy document path (spec §6.1); default is the built-in policy."
+    ),
+) -> None:
+    """Rewind a session's committed steps in reverse `step_seq` order (spec §10)."""
+    import getpass
+    import os
+
+    import anyio
+
+    from belay.contracts.loader import load_contract_set
+    from belay.ledger.store import LedgerStore
+    from belay.policy.model import default_policy, load_policy
+    from belay.proxy.config import WrapConfig
+    from belay.proxy.upstream import connect_stdio
+    from belay.rewind.service import RewindReport, RewindService
+
+    wrap_config = WrapConfig.load(config)
+    contract_set = load_contract_set(wrap_config.contracts)
+    policy_doc = load_policy(policy) if policy else default_policy()
+    ledger = LedgerStore(f"sqlite:///{Path(wrap_config.db).resolve().as_posix()}")
+    approver = by or getpass.getuser()
+    service = RewindService(ledger=ledger, policy=policy_doc, contract_set=contract_set)
+    resolved_to_step = None if to_step < 0 else to_step
+
+    async def _no_upstream(
+        tool: str, args: dict[str, object]
+    ) -> dict[str, object]:  # pragma: no cover - defensive
+        raise AssertionError("dry-run must never call upstream")
+
+    async def _main() -> RewindReport:
+        if dry_run:
+            return await service.rewind(
+                session_id, _no_upstream, to_step=resolved_to_step, dry_run=True, by=approver
+            )
+        async with connect_stdio(
+            wrap_config.upstream.command, wrap_config.upstream.args, env=dict(os.environ)
+        ) as upstream:
+
+            async def executor(tool: str, args: dict[str, object]) -> dict[str, object]:
+                result = await upstream.call_tool(tool, args)
+                if result.isError:
+                    raise RuntimeError(str(result.content))
+                content = result.structuredContent or {}
+                return dict(content.get("result", content)) if isinstance(content, dict) else {}
+
+            return await service.rewind(
+                session_id,
+                executor,
+                to_step=resolved_to_step,
+                dry_run=False,
+                by=approver,
+                skip_and_continue=skip_and_continue,
+            )
+
+    report = anyio.run(_main)
+
+    if report.dry_run:
+        typer.echo(f"rewind plan for {session_id} (dry run -- nothing executed):")
+        for step in report.plan.steps:
+            typer.echo(f"  step {step.step_seq}: {step.tool} -> {step.status}")
+        remaining = (
+            len(report.plan.irreversible)
+            + len(report.plan.conditional_unmet)
+            + len(report.plan.indeterminate)
+        )
+        typer.echo(
+            f"{len(report.plan.reversible)} compensation(s), {remaining} irreversible/indeterminate"
+        )
+        return
+
+    for outcome in report.outcomes:
+        typer.echo(f"  step {outcome.step_seq}: {outcome.tool} -> {outcome.status}")
+    if report.fully_rewound:
+        typer.echo("compensation executed · verification passed · session fully compensated")
+    else:
+        typer.echo("session NOT fully rewound -- see step statuses above")
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     app()
 

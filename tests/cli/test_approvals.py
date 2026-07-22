@@ -58,6 +58,7 @@ def _pause_write_policy(tmp_path: Path) -> Path:
     return policy_path
 
 
+@pytest.mark.slow
 async def test_paused_action_lists_via_cli_then_approve_lets_it_proceed(tmp_path: Path) -> None:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
@@ -125,6 +126,7 @@ async def test_paused_action_lists_via_cli_then_approve_lets_it_proceed(tmp_path
     assert "coherence: OK" in verify_result.stdout
 
 
+@pytest.mark.slow
 async def test_rejected_action_never_proceeds_and_reports_reason(tmp_path: Path) -> None:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()

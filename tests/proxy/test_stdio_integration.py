@@ -26,6 +26,7 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.mark.slow
 async def test_real_client_belay_fs_server_over_stdio(tmp_path: Path) -> None:
     from belay.contracts.loader import load_contract_set
     from belay.proxy.config import UpstreamCommand, WrapConfig
@@ -85,6 +86,7 @@ async def test_real_client_belay_fs_server_over_stdio(tmp_path: Path) -> None:
     assert events_ok.set_hash  # sanity: the contract set used still loads post-hoc
 
 
+@pytest.mark.slow
 async def test_undeclared_destructive_tool_is_refused_over_real_stdio(tmp_path: Path) -> None:
     """A tool with `destructiveHint` and no contract stays refused end-to-end."""
     import yaml

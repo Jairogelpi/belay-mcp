@@ -98,3 +98,22 @@ effects:
 provenance:
   declared_by: integrator
   verified: false
+---
+belay_contract: "0.1"
+tool: crm.bulk_delete
+summary: Deletes every record with last_seen before a cutoff year
+reversibility: reversible
+capture:
+  tool: crm.export_records
+  args: {}
+  as: before
+undo:
+  tool: crm.import_records
+  args:
+    records: "$state.before.records"
+effects:
+  - type: delete
+    resource: crm.record
+provenance:
+  declared_by: integrator
+  verified: false

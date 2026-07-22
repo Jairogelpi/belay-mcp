@@ -256,6 +256,12 @@ class Lifecycle:
         executor: Executor,
     ) -> Any:
         """Run one call through resolve -> plan -> policy -> (approval) -> execute (spec §3)."""
+        from belay.rewind.service import is_fenced
+
+        if is_fenced(self.ledger, self.session_id):
+            # spec §10.1: a fenced session is closed to new steps.
+            raise BelayError("session_fenced", {"session_id": self.session_id})
+
         self._step_seq += 1
         step_seq = self._step_seq
         unsafe = tool in self.unsafe_passthrough_tools

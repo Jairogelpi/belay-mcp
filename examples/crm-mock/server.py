@@ -63,5 +63,18 @@ def export_records() -> dict[str, Any]:
     return {"records": {rid: dict(fields) for rid, fields in _records.items()}}
 
 
+@mcp.tool(name="crm.bulk_delete", annotations=ToolAnnotations(destructiveHint=True))
+def bulk_delete(before_year: int) -> dict[str, Any]:
+    """Delete every record with `last_seen < before_year` (plan.md §10 demo tool)."""
+    to_delete = [
+        rid
+        for rid, fields in _records.items()
+        if isinstance(fields.get("last_seen"), int) and fields["last_seen"] < before_year
+    ]
+    for rid in to_delete:
+        del _records[rid]
+    return {"deleted_ids": to_delete, "count": len(to_delete)}
+
+
 if __name__ == "__main__":
     mcp.run()
