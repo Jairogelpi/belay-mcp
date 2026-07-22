@@ -136,6 +136,44 @@ def run(
     anyio.run(_main)
 
 
+@app.command(name="plan")
+def plan_command(
+    tool: str = typer.Argument(..., help="Tool name to plan (spec §5.1)."),
+    args: str = typer.Option("{}", "--args", help="JSON-encoded tool arguments."),
+    config: str = typer.Option("belay.wrap.json", "--config", "-c", help="Wrap config path."),
+    policy: str = typer.Option(
+        "",
+        "--policy",
+        help="Policy document path (spec §6.1); default is the out-of-the-box policy.",
+    ),
+) -> None:
+    """Plan one tool call without executing it, printing the full Plan (spec §5.1)."""
+    import json as jsonlib
+
+    import anyio
+
+    from belay.contracts.loader import load_contract_set
+    from belay.planner.model import Plan, PlanningSession
+    from belay.planner.planner import Planner
+    from belay.policy.engine import PolicyEngine
+    from belay.policy.model import default_policy, load_policy
+    from belay.proxy.config import WrapConfig
+
+    wrap_config = WrapConfig.load(config)
+    contract_set = load_contract_set(wrap_config.contracts)
+    policy_doc = load_policy(policy) if policy else default_policy()
+    tool_args = jsonlib.loads(args)
+    session = PlanningSession(session_id="cli", contract=contract_set.resolve(tool))
+
+    async def _main() -> Plan:
+        raw_plan = await Planner().plan(tool, tool_args, session)
+        result = PolicyEngine().evaluate(raw_plan, policy_doc)
+        return raw_plan.with_policy(result.verdict, result.reasons, result.requires_approval)
+
+    result_plan = anyio.run(_main)
+    typer.echo(result_plan.model_dump_json(indent=2))
+
+
 def main() -> None:
     app()
 

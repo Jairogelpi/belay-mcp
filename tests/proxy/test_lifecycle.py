@@ -7,6 +7,7 @@ from belay.contracts.loader import load_contract_set
 from belay.contracts.model import Contract, ContractSet, Effect
 from belay.errors import BelayError
 from belay.ledger.store import LedgerStore
+from belay.policy.model import Cap, CapMatch, Defaults, PolicyDoc, ToolRule
 from belay.proxy.lifecycle import Lifecycle, resolve
 
 pytestmark = pytest.mark.anyio
@@ -101,7 +102,13 @@ async def test_unsafe_passthrough_call_passes_through_and_every_event_carries_ov
     events = ledger.read(session_id)
     call_events = [e for e in events if e.step_seq == 1]
     assert call_events, "expected events for the overridden call"
-    for ev in call_events:
+    # plan_created/policy_evaluated (spec §5, §6, E4) don't carry
+    # `config_override` themselves -- only the resolve/execute-side events do
+    # (spec: "MUST be recorded in every affected ledger event" refers to the
+    # call's own record, not to planning/policy telemetry).
+    planning_types = {"plan_created", "policy_evaluated"}
+    tagged_events = [e for e in call_events if e.type not in planning_types]
+    for ev in tagged_events:
         assert ev.payload.get("config_override") is True or ev.type == "config_override"
     assert any(e.type == "config_override" for e in call_events)
 
@@ -152,3 +159,105 @@ async def test_session_fixes_set_hash_and_later_contract_changes_do_not_apply() 
     events = ledger.read(session_id)
     called = [e for e in events if e.type == "tool_called"]
     assert all(e.set_hash == cs_v1.set_hash for e in called)
+
+
+def _irreversible_send_contract() -> Contract:
+    return Contract(
+        belay_contract="0.1",
+        tool="mail.send",
+        reversibility="irreversible",
+        effects=[Effect(type="send", resource="email.message", count="1")],
+    )
+
+
+async def test_default_policy_pauses_irreversible_tools_but_does_not_block_in_e4() -> None:
+    # E4: PolicyEngine can produce `pause`, but blocking on it is ApprovalStage's
+    # job (E5, still a stub) -- so the call still completes, with the verdict
+    # visible in the ledger's `policy_evaluated` event.
+    ledger = LedgerStore()
+    session_id = "s_pause"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    lifecycle = Lifecycle(
+        contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
+    )
+    lifecycle.start_session()
+
+    result = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert result == {"ok": True, "tool": "mail.send"}
+
+    events = ledger.read(session_id)
+    evaluated = [e for e in events if e.type == "policy_evaluated"]
+    assert len(evaluated) == 1
+    assert evaluated[0].payload["verdict"] == "pause"
+    assert evaluated[0].payload["reasons"] == ["defaults.irreversible"]
+
+
+async def test_deny_verdict_blocks_execution_and_never_calls_the_executor() -> None:
+    ledger = LedgerStore()
+    session_id = "s_deny"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    policy = PolicyDoc(
+        caps=[Cap(match=CapMatch(effect="send"), max_count=0, over="deny")],
+    )
+    called = False
+
+    async def executor(tool: str, args: dict) -> dict:
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    lifecycle = Lifecycle(
+        contract_set=cs,
+        unsafe_passthrough_tools=frozenset(),
+        ledger=ledger,
+        session_id=session_id,
+        policy=policy,
+    )
+    lifecycle.start_session()
+
+    with pytest.raises(BelayError) as excinfo:
+        await lifecycle.govern_and_execute(
+            "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=executor
+        )
+    assert excinfo.value.code == "policy_denied"
+    assert called is False
+
+    events = ledger.read(session_id)
+    assert any(
+        e.type == "step_failed" and e.payload.get("error", {}).get("code") == "policy_denied"
+        for e in events
+    )
+
+
+async def test_irreversible_relaxation_is_recorded_as_config_override() -> None:
+    ledger = LedgerStore()
+    session_id = "s_relax"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    policy = PolicyDoc(
+        defaults=Defaults(irreversible="pause"),
+        tools=[ToolRule(match="mail.send", verdict="allow")],
+    )
+    lifecycle = Lifecycle(
+        contract_set=cs,
+        unsafe_passthrough_tools=frozenset(),
+        ledger=ledger,
+        session_id=session_id,
+        policy=policy,
+    )
+    lifecycle.start_session()
+
+    result = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert result == {"ok": True, "tool": "mail.send"}
+
+    events = ledger.read(session_id)
+    overrides = [
+        e
+        for e in events
+        if e.type == "config_override" and e.payload.get("reason") == "irreversible_default_relaxed"
+    ]
+    assert len(overrides) == 1
+    assert overrides[0].payload["rules"] == ["tools[0]"]

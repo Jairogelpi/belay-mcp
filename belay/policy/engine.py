@@ -1,4 +1,138 @@
 """PolicyEngine.evaluate(plan, policy) -> verdict + reasons.
 
-Spec §6.2, §6.3, §6.4. Implemented in E4.
+Spec §6.2, §6.3, §6.4.
+
+Evaluation model (spec §6.2): each dimension below independently produces at
+most one `(verdict, rule_id)` -- "first match wins" within that dimension's
+rule list -- except `caps`, where every cap is an independent constraint and
+each breached cap fires on its own. The final verdict is the most restrictive
+across every dimension that fired (`deny > pause > allow`); `reasons` carries
+every rule id that fired, not just the one that decided the final verdict.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, time
+from fnmatch import fnmatch
+
+from belay.clock import Clock, SystemClock
+from belay.planner.model import EffectEstimate, Plan
+from belay.policy.model import Cap, CapMatch, PolicyDoc, PolicyResult, Verdict
+
+_SEVERITY: dict[Verdict, int] = {"allow": 0, "pause": 1, "deny": 2}
+
+
+def _matches(match: CapMatch, effect: EffectEstimate) -> bool:
+    if match.effect is not None and match.effect != effect.type:
+        return False
+    return match.resource is None or fnmatch(effect.resource, match.resource)
+
+
+def _parse_time(text: str) -> time:
+    hour, minute = text.split(":")
+    return time(int(hour), int(minute))
+
+
+def _in_window(now: datetime, between: tuple[str, str]) -> bool:
+    start, end = _parse_time(between[0]), _parse_time(between[1])
+    current = now.time()
+    if start <= end:
+        return start <= current < end
+    return current >= start or current < end  # window wraps past midnight
+
+
+def _evaluate_cap(cap: Cap, plan: Plan) -> Verdict | None:
+    matching = [e for e in plan.effects if _matches(cap.match, e)]
+    if not matching:
+        return None
+
+    if cap.max_count is not None:
+        counted = [e.upper_bound() for e in matching]
+        total = sum(c for c in counted if c is not None)
+        if total > cap.max_count:
+            return cap.over
+
+    if cap.max_recipients is not None:
+        recipients = [e.recipients_upper_bound() for e in matching]
+        total_recipients = sum(r for r in recipients if r is not None)
+        if total_recipients > cap.max_recipients:
+            return cap.over
+
+    if cap.max_amount is not None:
+        total_amount = 0.0
+        for e in matching:
+            if e.amount is None:
+                continue
+            if e.amount.get("currency") != cap.max_amount.currency:
+                continue
+            value = e.amount.get("value")
+            if isinstance(value, int | float):
+                total_amount += float(value)
+        if total_amount > cap.max_amount.value:
+            return cap.over
+
+    return None
+
+
+def _scope_matches(scope: CapMatch, effects: list[EffectEstimate]) -> bool:
+    return any(_matches(scope, e) for e in effects)
+
+
+@dataclass
+class PolicyEngine:
+    """`PolicyEngine.evaluate(plan, policy) -> PolicyResult` (spec §6)."""
+
+    clock: Clock = field(default_factory=SystemClock)
+
+    def evaluate(self, plan: Plan, policy: PolicyDoc) -> PolicyResult:
+        fired: list[tuple[Verdict, str]] = []
+        relaxations: list[str] = []
+
+        tools_verdict: Verdict | None = None
+        tools_reason: str | None = None
+        for i, rule in enumerate(policy.tools):
+            if fnmatch(plan.tool, rule.match):
+                tools_verdict, tools_reason = rule.verdict, f"tools[{i}]"
+                break
+
+        # Irreversible default (spec §6.4), overridable per tool.
+        if plan.reversibility == "irreversible":
+            default_verdict = policy.defaults.irreversible
+            if tools_verdict is not None and tools_reason is not None:
+                if _SEVERITY[tools_verdict] < _SEVERITY[default_verdict]:
+                    relaxations.append(tools_reason)
+                fired.append((tools_verdict, tools_reason))
+            else:
+                fired.append((default_verdict, "defaults.irreversible"))
+        elif tools_verdict is not None and tools_reason is not None:
+            fired.append((tools_verdict, tools_reason))
+
+        # Unknown effects are worst-case (spec §6.3).
+        if plan.unknown:
+            fired.append((policy.defaults.unknown_effects, "defaults.unknown_effects"))
+
+        # Quiet hours -- first matching window wins.
+        now = self.clock.now()
+        for i, qh in enumerate(policy.quiet_hours):
+            if _in_window(now, qh.between) and _scope_matches(qh.scope, plan.effects):
+                fired.append((qh.verdict, f"quiet_hours[{i}]"))
+                break
+
+        # Caps -- each is an independent constraint.
+        for i, cap in enumerate(policy.caps):
+            result = _evaluate_cap(cap, plan)
+            if result is not None:
+                fired.append((result, f"caps[{i}]"))
+
+        if not fired:
+            return PolicyResult(verdict="allow", reasons=[], requires_approval=False)
+
+        verdict = max((v for v, _ in fired), key=lambda v: _SEVERITY[v])
+        reasons = [r for _, r in fired]
+        return PolicyResult(
+            verdict=verdict,
+            reasons=reasons,
+            requires_approval=(verdict == "pause"),
+            relaxations=relaxations,
+        )

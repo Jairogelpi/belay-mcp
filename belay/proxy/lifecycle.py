@@ -1,11 +1,11 @@
 """Request lifecycle (spec §3): resolve -> plan -> policy -> (approval) -> execute.
 
-E3 implements the L1 slice normatively: **resolve** (contract lookup + the
+E3 implemented the L1 slice normatively: **resolve** (contract lookup + the
 default rule of §4.6) and **execute** (passthrough), with a ledger event at
-every stage transition (§9.1) even though plan/policy/approval are trivial
-pass-through stubs here. E4 (planner/policy), E5 (approvals), and E6 (saga
-step lifecycle) replace `PlanStage`/`PolicyStage`/`ApprovalStage`'s bodies
-without changing `Lifecycle`'s shape or call sites.
+every stage transition (§9.1). E4 replaces `PlanStage`/`PolicyStage`'s bodies
+with the real `Planner`/`PolicyEngine` (spec §5, §6); E5 (approvals) and E6
+(saga step lifecycle) do the same for `ApprovalStage` without changing
+`Lifecycle`'s shape or call sites.
 """
 
 from __future__ import annotations
@@ -14,9 +14,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
 from belay.ledger.store import LedgerStore
+from belay.planner.model import NativeDryRunCaller, Plan, PlanningSession
+from belay.planner.planner import Planner
+from belay.policy.engine import PolicyEngine
+from belay.policy.model import PolicyDoc, PolicyResult, default_policy
 
 
 @dataclass(frozen=True)
@@ -69,17 +74,24 @@ def resolve(
 
 
 class PlanStage:
-    """L1 stub for spec §5 (planner lands in E4): a static contract-basis plan."""
+    """Wraps `Planner.plan()` (spec §5, plan.md E4)."""
 
-    def plan(self, resolved: ResolvedCall) -> dict[str, Any]:
-        return {"basis": "contract", "effects": resolved.effects}
+    def __init__(self, planner: Planner) -> None:
+        self._planner = planner
+
+    async def plan(self, resolved: ResolvedCall, session: PlanningSession) -> Plan:
+        return await self._planner.plan(resolved.tool, resolved.args, session)
 
 
 class PolicyStage:
-    """L1 stub for spec §6 (policy engine lands in E4): always allow."""
+    """Wraps `PolicyEngine.evaluate()` against one fixed policy document (spec §6, plan.md E4)."""
 
-    def evaluate(self, plan: dict[str, Any]) -> str:
-        return "allow"
+    def __init__(self, engine: PolicyEngine, policy: PolicyDoc) -> None:
+        self._engine = engine
+        self._policy = policy
+
+    def evaluate(self, plan: Plan) -> PolicyResult:
+        return self._engine.evaluate(plan, self._policy)
 
 
 class ApprovalStage:
@@ -106,10 +118,19 @@ class Lifecycle:
     unsafe_passthrough_tools: frozenset[str]
     ledger: LedgerStore
     session_id: str
-    plan_stage: PlanStage = field(default_factory=PlanStage)
-    policy_stage: PolicyStage = field(default_factory=PolicyStage)
+    policy: PolicyDoc = field(default_factory=default_policy)
+    clock: Clock = field(default_factory=SystemClock)
+    native_dry_run: NativeDryRunCaller | None = None
+    plan_stage: PlanStage | None = None
+    policy_stage: PolicyStage | None = None
     approval_stage: ApprovalStage = field(default_factory=ApprovalStage)
     _step_seq: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.plan_stage is None:
+            self.plan_stage = PlanStage(Planner(clock=self.clock))
+        if self.policy_stage is None:
+            self.policy_stage = PolicyStage(PolicyEngine(clock=self.clock), self.policy)
 
     def start_session(self) -> None:
         """Emit `session_started` / `contract_set_pinned`, fixing this session's `set_hash`."""
@@ -166,10 +187,68 @@ class Lifecycle:
                 set_hash=self.contract_set.set_hash,
             )
 
-        # Stages 2-4 (spec §3): no-op stubs in L1, wired for E4-E6 to fill in.
-        plan = self.plan_stage.plan(resolved)
-        self.policy_stage.evaluate(plan)
-        await self.approval_stage.maybe_park("allow", plan)
+        # Stages 2-4 (spec §3): plan (§5) -> policy (§6) -> approval (§7, still an E5 stub).
+        assert self.plan_stage is not None and self.policy_stage is not None
+        planning_session = PlanningSession(
+            session_id=self.session_id,
+            contract=resolved.contract,
+            implicit_effects=resolved.effects if resolved.contract is None else [],
+            native_dry_run=self.native_dry_run,
+        )
+        plan = await self.plan_stage.plan(resolved, planning_session)
+        self.ledger.append(
+            self.session_id,
+            "plan_created",
+            plan.model_dump(mode="json"),
+            step_seq=step_seq,
+            set_hash=self.contract_set.set_hash,
+        )
+
+        policy_result = self.policy_stage.evaluate(plan)
+        plan = plan.with_policy(
+            policy_result.verdict, policy_result.reasons, policy_result.requires_approval
+        )
+        self.ledger.append(
+            self.session_id,
+            "policy_evaluated",
+            {
+                "verdict": policy_result.verdict,
+                "reasons": policy_result.reasons,
+                "relaxations": policy_result.relaxations,
+            },
+            step_seq=step_seq,
+            set_hash=self.contract_set.set_hash,
+        )
+
+        if policy_result.relaxations:
+            # spec §6.4: per-tool relaxation of the irreversible default is
+            # configuration, and MUST be visible in the ledger.
+            self.ledger.append(
+                self.session_id,
+                "config_override",
+                {
+                    "tool": tool,
+                    "reason": "irreversible_default_relaxed",
+                    "rules": policy_result.relaxations,
+                },
+                step_seq=step_seq,
+                set_hash=self.contract_set.set_hash,
+            )
+
+        if policy_result.verdict == "deny":
+            deny_exc = BelayError("policy_denied", {"tool": tool, "reasons": policy_result.reasons})
+            self.ledger.append(
+                self.session_id,
+                "step_failed",
+                {"tool": tool, "args": args, "error": deny_exc.to_dict()},
+                step_seq=step_seq,
+                set_hash=self.contract_set.set_hash,
+            )
+            raise deny_exc
+
+        # `pause` parks the action in the approval queue (spec §7); E5 fills
+        # this in. Until then it is observed but never blocks execution.
+        await self.approval_stage.maybe_park(policy_result.verdict, plan.model_dump(mode="json"))
 
         self.ledger.append(
             self.session_id,
