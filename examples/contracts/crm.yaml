@@ -1,0 +1,100 @@
+belay_contract: "0.1"
+tool: crm.update
+summary: Overwrites a record's fields wholesale
+reversibility: reversible
+capture:
+  tool: crm.get
+  args:
+    id: "$args.id"
+  as: before
+undo:
+  tool: crm.update
+  args:
+    id: "$args.id"
+    fields: "$state.before.fields"
+effects:
+  - type: update
+    resource: crm.record
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: crm.create
+summary: Creates (or overwrites) a record
+reversibility: reversible
+capture:
+  tool: crm.get
+  args:
+    id: "$args.id"
+  as: before
+undo:
+  tool: crm.delete
+  args:
+    id: "$args.id"
+effects:
+  - type: create
+    resource: crm.record
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: crm.delete
+summary: Deletes a record
+reversibility: conditional
+conditions:
+  - "$state.before.existed == true"
+capture:
+  tool: crm.get
+  args:
+    id: "$args.id"
+  as: before
+undo:
+  tool: crm.create
+  args:
+    id: "$args.id"
+    fields: "$state.before.fields"
+effects:
+  - type: delete
+    resource: crm.record
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: crm.get
+summary: Reads one record by id
+reversibility: irreversible
+effects:
+  - type: read
+    resource: crm.record
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: crm.export_records
+summary: Dumps every record
+reversibility: irreversible
+effects:
+  - type: read
+    resource: crm.record
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: crm.import_records
+summary: Bulk-creates/overwrites records
+reversibility: irreversible
+effects:
+  - type: create
+    resource: crm.record
+provenance:
+  declared_by: integrator
+  verified: false

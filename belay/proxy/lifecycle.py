@@ -19,6 +19,7 @@ from belay.approvals.queue import ApprovalQueue
 from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
+from belay.executor.saga import SagaExecutor
 from belay.ledger.store import LedgerStore
 from belay.planner.model import NativeDryRunCaller, Plan, PlanningSession
 from belay.planner.planner import Planner
@@ -162,6 +163,35 @@ class ApprovalStage:
 Executor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
+class ExecuteStage:
+    """Runs the real tool call through the saga step lifecycle (spec §8.1).
+
+    Replaces the flat tool_called/result_recorded passthrough E3-E5 used:
+    every call that reaches this stage now goes through the full six-stage
+    cycle of `belay.executor.saga.SagaExecutor.run_step` -- journaled,
+    capturing, calling, result_recorded, compensation_registered, committed.
+    """
+
+    def __init__(self, saga: SagaExecutor) -> None:
+        self.saga = saga
+
+    async def execute(
+        self,
+        session_id: str,
+        step_seq: int,
+        tool: str,
+        args: dict[str, Any],
+        contract: Contract | None,
+        executor: Executor,
+        *,
+        set_hash: str | None = None,
+    ) -> Any:
+        outcome = await self.saga.run_step(
+            session_id, step_seq, tool, args, contract, executor, set_hash=set_hash
+        )
+        return outcome.result
+
+
 @dataclass
 class Lifecycle:
     """Wires resolve -> plan -> policy -> (approval) -> execute (spec §3) for one session.
@@ -182,6 +212,7 @@ class Lifecycle:
     plan_stage: PlanStage | None = None
     policy_stage: PolicyStage | None = None
     approval_stage: ApprovalStage | None = None
+    execute_stage: ExecuteStage | None = None
     _step_seq: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -195,6 +226,10 @@ class Lifecycle:
             # the same queue.
             self.approval_stage = ApprovalStage(
                 ApprovalQueue(engine=self.ledger.engine, clock=self.clock)
+            )
+        if self.execute_stage is None:
+            self.execute_stage = ExecuteStage(
+                SagaExecutor(ledger=self.ledger, contract_set=self.contract_set)
             )
 
     def start_session(self) -> None:
@@ -336,39 +371,18 @@ class Lifecycle:
                 "poll_after_ms": check.pending.poll_after_ms,
             }
 
-        self.ledger.append(
+        # Stage 5 (spec §3, §8): the real saga step lifecycle (§8.1) --
+        # journaled -> capturing -> calling -> result_recorded ->
+        # compensation_registered -> committed. `step_journaled`/`tool_called`/
+        # `result_recorded` etc. below are emitted by `ExecuteStage`/
+        # `SagaExecutor`, not by this method directly.
+        assert self.execute_stage is not None
+        return await self.execute_stage.execute(
             self.session_id,
-            "tool_called",
-            {"tool": tool, "args": args, "config_override": resolved.config_override},
-            step_seq=step_seq,
+            step_seq,
+            tool,
+            args,
+            resolved.contract,
+            executor,
             set_hash=self.contract_set.set_hash,
         )
-
-        try:
-            result = await executor(tool, args)
-        except Exception as exc:
-            self.ledger.append(
-                self.session_id,
-                "step_failed",
-                {
-                    "tool": tool,
-                    "error": str(exc),
-                    "config_override": resolved.config_override,
-                },
-                step_seq=step_seq,
-                set_hash=self.contract_set.set_hash,
-            )
-            raise
-
-        self.ledger.append(
-            self.session_id,
-            "result_recorded",
-            {
-                "tool": tool,
-                "config_override": resolved.config_override,
-                "effects": resolved.effects,
-            },
-            step_seq=step_seq,
-            set_hash=self.contract_set.set_hash,
-        )
-        return result

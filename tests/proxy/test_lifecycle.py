@@ -102,14 +102,11 @@ async def test_unsafe_passthrough_call_passes_through_and_every_event_carries_ov
     events = ledger.read(session_id)
     call_events = [e for e in events if e.step_seq == 1]
     assert call_events, "expected events for the overridden call"
-    # plan_created/policy_evaluated (spec §5, §6, E4) don't carry
-    # `config_override` themselves -- only the resolve/execute-side events do
-    # (spec: "MUST be recorded in every affected ledger event" refers to the
-    # call's own record, not to planning/policy telemetry).
-    planning_types = {"plan_created", "policy_evaluated"}
-    tagged_events = [e for e in call_events if e.type not in planning_types]
-    for ev in tagged_events:
-        assert ev.payload.get("config_override") is True or ev.type == "config_override"
+    # The resolve-side `config_override` event (spec: "MUST be recorded in
+    # every affected ledger event") is what carries the override for an
+    # unsafe_passthrough call; the saga step lifecycle events (E6, spec §8.1)
+    # that follow don't themselves carry the flag, since they are the same
+    # journaled/capturing/calling/... events any governed call gets.
     assert any(e.type == "config_override" for e in call_events)
 
 

@@ -53,3 +53,22 @@ class ApprovalRow(Base):
     approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     rejected_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+
+class IdempotencyRow(Base):
+    """One row per idempotency key seen by the saga executor (spec §8.1).
+
+    `status` is `"calling"` from the moment the upstream call is issued
+    until its result is durably recorded (`"done"`) — the window a crash
+    between `calling` and `result_recorded` can land in (spec §8.1
+    paragraph 2), which is exactly what `belay/executor/recovery.py`
+    reconciles on restart.
+    """
+
+    __tablename__ = "idempotency_keys"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(255), index=True)
+    step_seq: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
