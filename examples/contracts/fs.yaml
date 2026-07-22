@@ -1,0 +1,61 @@
+belay_contract: "0.1"
+tool: fs.write_file
+summary: Overwrites a file's contents
+reversibility: reversible
+capture:
+  tool: fs.read_file
+  args:
+    path: "$args.path"
+  as: before
+undo:
+  tool: fs.write_file
+  args:
+    path: "$args.path"
+    content: "$state.before.content"
+idempotent: false
+effects:
+  - type: update
+    resource: fs.file
+    count: "1"
+verification:
+  tool: fs.read_file
+  args: { path: "$args.path" }
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: fs.delete_file
+summary: Deletes a file
+reversibility: conditional
+conditions:
+  - "$state.before.existed == true"
+capture:
+  tool: fs.read_file
+  args:
+    path: "$args.path"
+  as: before
+undo:
+  tool: fs.write_file
+  args:
+    path: "$args.path"
+    content: "$state.before.content"
+effects:
+  - type: delete
+    resource: fs.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: "0.1"
+tool: fs.read_file
+summary: Reads a file's contents (read-only, cannot be undone because nothing changed)
+reversibility: irreversible
+effects:
+  - type: read
+    resource: fs.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false

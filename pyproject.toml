@@ -42,6 +42,7 @@ dev = [
     "hypothesis>=6.100",
     "ruff>=0.6",
     "mypy>=1.11",
+    "types-PyYAML>=6.0",
     "pre-commit>=3.7",
 ]
 
@@ -74,9 +75,9 @@ testpaths = ["tests"]
 source = ["belay"]
 
 [tool.coverage.report]
-# ponytail: E0 is scaffolding with no real logic yet, so a 90% belay/
-# coverage gate (the project's long-term target, per plan.md §0) would
-# fail on empty stub modules. Raise this entrega by entrega as logic
-# lands; do not let it silently drift back down.
+# ponytail: most packages beyond belay/contracts are still empty stubs
+# (E2-E9 land them). A repo-wide 90% gate would fail on those until then.
+# belay/contracts/ itself is at 92-100% after E1; raise this entrega by
+# entrega as logic lands elsewhere, targeting 90% overall by v0.1.0 (plan.md §0).
 fail_under = 0
 exclude_also = ["if TYPE_CHECKING:"]

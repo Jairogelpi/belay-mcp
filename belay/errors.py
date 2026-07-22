@@ -9,7 +9,7 @@ canonical registry early so every later entrega imports from one place.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Final
+from typing import Any, Final
 
 # code -> retryable (spec §11)
 ERROR_CODES: Final[Mapping[str, bool]] = {
@@ -31,3 +31,28 @@ ERROR_CODES: Final[Mapping[str, bool]] = {
     "ledger_integrity_error": False,
     "unsafe_passthrough_disabled": False,
 }
+
+
+class BelayError(Exception):
+    """Structured error per spec §11: `{"code", "detail", "retryable"}`.
+
+    Raised at the boundaries components use to signal one of the 17
+    normative error codes. `code` must be a key of `ERROR_CODES`; `retryable`
+    defaults to the registry's value for that code but may be overridden.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        detail: Mapping[str, Any] | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown Belay error code: {code!r}")
+        self.code = code
+        self.detail: dict[str, Any] = dict(detail) if detail else {}
+        self.retryable = ERROR_CODES[code] if retryable is None else retryable
+        super().__init__(f"{code}: {self.detail}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"code": self.code, "detail": self.detail, "retryable": self.retryable}
