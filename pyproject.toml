@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "belay-mcp"
+version = "0.1.0.dev0"
+description = "An MCP proxy giving AI agents safe, reversible tool execution: contracts, dry-run planning, policy, approvals, saga execution, and rewind."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [{ name = "Belay contributors" }]
+keywords = ["mcp", "agents", "safety", "contracts", "saga", "rollback"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "mcp>=1.0",
+    "pydantic>=2.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/belay-mcp/belay"
+Specification = "https://github.com/belay-mcp/belay/blob/main/docs/spec.md"
+
+[project.scripts]
+belay = "belay.cli.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-benchmark>=4.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["belay"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["belay", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+exclude = ["^tests/"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+strict = false
+ignore_errors = true
+
+[tool.pytest.ini_options]
+addopts = "--cov=belay --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["belay"]
+
+[tool.coverage.report]
+# ponytail: E0 is scaffolding with no real logic yet, so a 90% belay/
+# coverage gate (the project's long-term target, per plan.md §0) would
+# fail on empty stub modules. Raise this entrega by entrega as logic
+# lands; do not let it silently drift back down.
+fail_under = 0
+exclude_also = ["if TYPE_CHECKING:"]
