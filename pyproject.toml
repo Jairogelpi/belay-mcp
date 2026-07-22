@@ -75,7 +75,7 @@ strict = false
 ignore_errors = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=belay --cov-report=term-missing"
+addopts = "--cov=belay --cov-report=term-missing -m \"not slow\""
 testpaths = ["tests"]
 markers = [
     "slow: starts a real MCP subprocess or otherwise runs noticeably longer than the fast suite",

@@ -22,5 +22,7 @@ jobs:
         run: ruff check .
       - name: Type-check (mypy)
         run: mypy belay
-      - name: Test
+      - name: Test (fast loop)
         run: pytest
+      - name: Test (full suite, incl. slow)
+        run: pytest -m "" --no-cov

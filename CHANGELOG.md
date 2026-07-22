@@ -72,3 +72,10 @@ per `docs/plan.md`; see `docs/adr/` for the decision record of each.
   and `vhs` were not available in the sandbox this entrega was built in. A
   VHS tape script (`examples/demo.tape`) is checked in for the maintainer
   to render.
+- The default `pytest` run (fast loop, `slow`-marked subprocess/integration
+  tests deselected) finishes in ~25-30s but covers `belay/` at ~89%, just
+  under the §0 90% bar; the full suite (CI's second `pytest` step, `-m ""`)
+  covers ~93% but takes ~85-90s, over the §0 60s bar. The two §0 criteria
+  are in tension as specified; CI runs both the fast loop and the full
+  suite so neither speed nor coverage is silently dropped, but no single
+  `pytest` invocation satisfies both numbers at once.
