@@ -1,0 +1,37 @@
+name: Spec ambiguity
+description: docs/spec.md is unclear, underspecified, or seems internally inconsistent.
+title: "[spec] "
+labels: ["spec-ambiguity"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `docs/spec.md` (Belay Specification 0.1) is the source of truth for
+        this repo (see `AGENTS.md` rule 1). If behavior isn't decidable from
+        the spec text alone, that's a spec bug, not something to resolve by
+        guessing in code.
+  - type: input
+    id: section
+    attributes:
+      label: Spec section(s)
+      description: Which section(s) of docs/spec.md are ambiguous?
+      placeholder: e.g. §6.4, §10.3
+    validations:
+      required: true
+  - type: textarea
+    id: ambiguity
+    attributes:
+      label: What's ambiguous or inconsistent
+      description: Quote the relevant text and explain the two (or more) readings that seem equally valid.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Where this bites in practice
+      description: A concrete call/contract/policy where the two readings would produce different, observable behavior.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed resolution (optional)
+      description: If you have an opinion on which reading should win, say so — but the spec change itself lands in its own commit/PR, not silently in code (AGENTS.md rule 1).

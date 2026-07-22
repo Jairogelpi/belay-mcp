@@ -1,17 +1,25 @@
 # Belay
 
+[![CI](https://github.com/Jairogelpi/belay-mcp/actions/workflows/ci.yaml/badge.svg)](https://github.com/Jairogelpi/belay-mcp/actions/workflows/ci.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Conformance: L3](https://img.shields.io/badge/conformance-L3-brightgreen.svg)](conformance)
+
+> PyPI badge intentionally omitted: `belay-mcp` is not published yet (see
+> "Release status" below) — a badge pointing at a nonexistent PyPI project
+> would 404, so it's left out rather than faked.
+
 **Safe, reversible tool execution for AI agents.**
 
 Belay is an MCP proxy that sits between an agent and its tool servers. It
 turns "the agent can call anything" into "every tool call is declared,
 previewable, gated, and — when it goes wrong — reversible."
 
-> Status: **L1 preview** (E3 of the [implementation plan](docs/plan.md)).
-> Contracts (§4), the event ledger (§9), and a real L1 MCP proxy (§3, §4.6,
-> Appendix C) work end to end: `belay wrap` + `belay run` front a real
-> upstream MCP server over stdio, resolving contracts, applying the default
-> rule, and recording every call to the ledger. Plans, policy, approvals,
-> sagas, and rewind (§5-§8, §10) land in E4-E7. The protocol is specified in
+> Status: **v0.1.0 (release candidate), L3 conformance.** All of E0-E9 are
+> implemented: contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
+> Appendix C), planner + policy (§5, §6), approvals (§7), the saga executor
+> (§8), and rewind (§10) — the full lifecycle in
+> [`docs/architecture.md`](docs/architecture.md). 225 tests,
+> ≥90% coverage on the full run. The protocol is specified in
 > [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
 
 ## Why
@@ -51,20 +59,20 @@ Agent (LLM) ──MCP──▶ Belay ──MCP──▶ tool servers
                 event ledger (append-only, hash-chained)
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the full diagram (E9)
-and [`docs/spec.md`](docs/spec.md) §3 for the normative request lifecycle.
+See [`docs/architecture.md`](docs/architecture.md) for the full diagram and
+[`docs/spec.md`](docs/spec.md) §3 for the normative request lifecycle.
 
 ## Install
 
 ```bash
-pip install belay-mcp   # not yet published — coming with v0.1.0
+pip install belay-mcp   # not yet published to PyPI — see "Release status" below
 ```
 
 For development:
 
 ```bash
-git clone https://github.com/belay-mcp/belay.git
-cd belay
+git clone https://github.com/Jairogelpi/belay-mcp.git
+cd belay-mcp
 pip install -e ".[dev]"
 pytest
 ```
@@ -80,40 +88,100 @@ belay run &
 belay verify belay.db
 ```
 
-`belay wrap`/`belay run` implement L1: contract resolution, the default
-rule, and passthrough execution with full ledger recording, over stdio.
-Plan/policy/approval stages exist as documented no-op stubs
-(`belay/proxy/lifecycle.py`) ready for E4-E6 to fill in — see
-[ADR 0003](docs/adr/0003-e3-proxy-l1.md).
+Every command above was re-run against a clean checkout while writing this
+README; `belay verify belay.db` prints `chain: OK` / `coherence: OK` on an
+empty, freshly-wrapped ledger.
 
-The full 3-minute demo — an agent attempts a bulk delete, gets paused,
-a human approves a narrowed version, something still goes wrong, and
-`belay rewind` restores the prior state with an honest report — is scripted
-in `examples/demo.py` and described in `docs/plan.md` §10. It ships in E9.
+## Demo
+
+The 3-minute portfolio demo (spec-driven scenario in `docs/plan.md` §10) is
+a real, runnable script — not a mock:
+
+```bash
+python examples/demo.py         # bulk delete -> pause -> narrow -> approve -> execute -> rewind
+python examples/demo.py --oops  # same, plus a wrong-filter mistake that rewind then undoes
+```
+
+It shells out to the real `belay` CLI (`wrap`, `approvals list/approve`,
+`rewind --dry-run`, `rewind --by`) and drives a real MCP session against
+`examples/crm-mock`, ending in `chain: OK` / `coherence: OK` and "session
+fully compensated" — genuine output, generated live each run.
+
+`belay approvals approve --narrow <filter>` does not exist as CLI surface
+(documented gap, see [ADR 0007](docs/adr/0007-e7-rewind.md) and
+[ADR 0009](docs/adr/0009-e9-demo-docs-polish.md)); the demo's "narrowing"
+step is the equivalent E7 actually built and tested — the agent retries with
+a different, narrower filter, which is a new plan the human approves
+instead of the original one.
+
+**Recording:** a VHS tape script (`examples/demo.tape`) is checked in for
+whoever has the `vhs` binary to render a GIF from — `asciinema` and `vhs`
+were not available in the sandbox this entrega was built in, so no
+recording is embedded here yet. This is an honest gap, not a placeholder
+GIF; see ADR 0009.
 
 ## Roadmap
 
 Built entrega by entrega per [`docs/plan.md`](docs/plan.md); each closes a
 slice of [`docs/spec.md`](docs/spec.md):
 
-| Entrega | Delivers | Spec sections |
-|---|---|---|
-| E0 | Repo scaffolding, CI, tooling | — |
-| E1 | Contracts + expression language | §4 |
-| E2 | Event ledger | §9 |
-| E3 | L1 proxy + CLI (first publishable milestone) | §3, §4.6, App. C |
-| E4 | Planner + policy engine | §5, §6 |
-| E5 | Approvals | §7 |
-| E6 | Saga executor | §8 |
-| E7 | Rewind (closes L3 conformance) | §10 |
-| E8 | Public conformance suite + example packs | §13 |
-| E9 | Demo, docs, portfolio polish, v0.1.0 release | — |
+| Entrega | Delivers | Spec sections | Status |
+|---|---|---|---|
+| E0 | Repo scaffolding, CI, tooling | — | done |
+| E1 | Contracts + expression language | §4 | done |
+| E2 | Event ledger | §9 | done |
+| E3 | L1 proxy + CLI (first publishable milestone) | §3, §4.6, App. C | done |
+| E4 | Planner + policy engine | §5, §6 | done |
+| E5 | Approvals | §7 | done |
+| E6 | Saga executor | §8 | done |
+| E7 | Rewind (closes L3 conformance) | §10 | done |
+| E8 | Public conformance suite + example packs | §13 | done |
+| E9 | Demo, docs, portfolio polish, v0.1.0 release | — | done (tag/PyPI pending, see below) |
 
 ## Conformance
 
-Belay targets **L3** conformance (contracts + plans/policy/approvals +
-sagas/rewind, spec §13) at v0.1.0, verified by the `belay-conformance` suite
-built in E8.
+Belay is **L3** conformant (contracts + plans/policy/approvals +
+sagas/rewind, spec §13), verified by the `belay-conformance` suite:
+
+```bash
+belay-conformance run --target belay --level 3
+```
+
+`belay-conformance` is a separate, target-agnostic package: any MCP proxy
+that implements the ~6-method `ConformanceTarget` adapter can run the same
+suite against itself.
+
+## How Belay compares
+
+Belay isn't a gateway, an observability tool, or an enterprise workflow
+engine — it overlaps with pieces of each without being a drop-in
+replacement for any:
+
+- **MCP gateways/routers** (e.g. [mcp-gateway](https://github.com/lasso-security/mcp-gateway),
+  various vendor "MCP proxy" products) focus on auth, rate limiting, and
+  routing across multiple MCP servers. Belay assumes you already have (or
+  don't need) that layer and adds contract-based reversibility on top —
+  its concern is "what happens if this specific call was a mistake",
+  not multiplexing.
+- **Observability/tracing for agents** (e.g. [LangSmith](https://www.langchain.com/langsmith),
+  [Langfuse](https://langfuse.com/)) record what an agent did after the
+  fact. Belay's ledger (spec §9) is adjacent but exists to make actions
+  *governable and undoable*, not to analyze prompts/latency/cost.
+- **Enterprise workflow/saga engines** (e.g. [Temporal](https://temporal.io/),
+  [AWS Step Functions](https://aws.amazon.com/step-functions/)) implement
+  the saga pattern generally, for developer-authored workflows. Belay
+  narrowly targets one thing: an *agent-invoked* MCP tool call, undone via
+  a contract the tool integrator declares once — it is not a general
+  orchestration engine and doesn't try to be.
+
+## Release status
+
+`v0.1.0` is feature-complete against `docs/plan.md`'s Definition of Done
+(§0) but has **not been tagged or published to PyPI yet** — that's a
+manual step for the maintainer (PyPI trusted publishing must be configured
+on the PyPI project first; an agent cannot do that). See
+[`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Contributing
 

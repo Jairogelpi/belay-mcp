@@ -1,0 +1,43 @@
+name: Propose a contract pack
+description: Propose a new example contract pack (like fs, crm, or email) for examples/contracts/.
+title: "[contract pack] "
+labels: ["contract-pack"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Contract packs live in `examples/contracts/` and are validated
+        against the JSON Schema in spec Appendix A (see `docs/spec.md` §4).
+  - type: input
+    id: domain
+    attributes:
+      label: Domain / target system
+      description: What kind of tool server is this for (e.g. "Slack", "Postgres", "Stripe")?
+      placeholder: e.g. Slack
+    validations:
+      required: true
+  - type: textarea
+    id: tools
+    attributes:
+      label: Tools and their reversibility
+      description: >
+        List each tool this pack would cover and whether it's reversible,
+        irreversible, or conditional (spec §4.1), plus what the undo call
+        would be for reversible/conditional ones.
+      placeholder: |
+        - slack.post_message: reversible, undo = slack.delete_message
+        - slack.delete_channel: irreversible
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Blast-radius / policy considerations
+      description: Anything a default policy should cap (recipient counts, spend, row counts, quiet hours)?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I've read spec §4 (Contracts) and Appendix A (JSON Schema).
+        - label: I'm willing to submit the YAML + a loader test, not just describe it here.
