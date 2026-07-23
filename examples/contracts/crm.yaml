@@ -114,6 +114,13 @@ undo:
 effects:
   - type: delete
     resource: crm.record
+sql:
+  # plan-v2 E11: when the CRM is SQLite-backed, a plan for this tool gets a
+  # real row count via `sql_simulator` (BEGIN; DELETE ...; ROLLBACK) instead
+  # of the undeclared-count `unknown[]` above -- see examples/demo_sql.py.
+  statement: "DELETE FROM records WHERE last_seen < :cutoff"
+  params:
+    cutoff: "$args.before_year"
 provenance:
   declared_by: integrator
   verified: false

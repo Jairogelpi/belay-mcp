@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from belay.clock import FixedClock
-from belay.contracts.model import Contract, Effect, Undo
+from belay.contracts.model import Contract, Effect, SqlHint, Undo
 from belay.errors import BelayError
+from belay.planner.adapters.sql import make_sql_runner
 from belay.planner.model import PlanningSession
 from belay.planner.planner import Planner, check_plan_binding
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 pytestmark = pytest.mark.anyio
 
@@ -151,6 +155,87 @@ async def test_plan_mismatch_on_non_identical_args() -> None:
     with pytest.raises(BelayError) as excinfo:
         check_plan_binding(plan, "crm.update_record", {"id": 2}, clock=clock)
     assert excinfo.value.code == "plan_mismatch"
+
+
+def _sql_engine(tmp_path: Path) -> Engine:
+    engine = create_engine(f"sqlite:///{tmp_path / 'crm.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE records (id INTEGER PRIMARY KEY, last_seen INTEGER)"))
+        for value in (2020, 2020, 2020, 2024):  # 3 stale, 1 fresh
+            conn.execute(text("INSERT INTO records (last_seen) VALUES (:v)"), {"v": value})
+    return engine
+
+
+def _sql_hinted_contract() -> Contract:
+    return Contract(
+        belay_contract="0.1",
+        tool="crm.bulk_delete",
+        reversibility="irreversible",
+        effects=[Effect(type="delete", resource="crm.record")],
+        sql=SqlHint(
+            statement="DELETE FROM records WHERE last_seen < :cutoff",
+            params={"cutoff": "$args.cutoff"},
+        ),
+    )
+
+
+async def test_sql_simulator_basis_returns_real_row_count(tmp_path: Path) -> None:
+    engine = _sql_engine(tmp_path)
+    planner = Planner()
+    session = PlanningSession(
+        session_id="s1", contract=_sql_hinted_contract(), sql_runner=make_sql_runner(engine)
+    )
+
+    plan = await planner.plan("crm.bulk_delete", {"cutoff": 2023}, session)
+
+    effects = [e.model_dump(mode="json") for e in plan.effects]
+    assert effects == [
+        {
+            "type": "delete",
+            "resource": "crm.record",
+            "count": "3",
+            "estimate": False,
+            "basis": "sql_simulator",
+            "amount": None,
+            "recipients": None,
+        }
+    ]
+    assert plan.unknown == []
+    assert plan.confidence == "high"
+    # provably unchanged: sql_simulator never commits.
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM records")).scalar_one() == 4
+
+
+async def test_native_dry_run_takes_precedence_over_sql_simulator(tmp_path: Path) -> None:
+    async def native(tool: str, args: dict) -> dict:
+        return {"effects": [{"type": "delete", "resource": "crm.record", "count": "999"}]}
+
+    engine = _sql_engine(tmp_path)
+    planner = Planner()
+    session = PlanningSession(
+        session_id="s1",
+        contract=_sql_hinted_contract(),
+        sql_runner=make_sql_runner(engine),
+        native_dry_run=native,
+    )
+
+    plan = await planner.plan("crm.bulk_delete", {"cutoff": 2023}, session)
+
+    effects = [e.model_dump(mode="json") for e in plan.effects]
+    assert effects[0]["basis"] == "native_dry_run"
+    assert effects[0]["count"] == "999"
+
+
+async def test_no_sql_runner_supplied_falls_back_to_contract_basis() -> None:
+    planner = Planner()
+    session = PlanningSession(session_id="s1", contract=_sql_hinted_contract())
+
+    plan = await planner.plan("crm.bulk_delete", {"cutoff": 2023}, session)
+
+    # no `count` declared on the contract effect -> unknown, never a guess.
+    assert plan.effects == []
+    assert plan.unknown == [{"type": "delete", "resource": "crm.record"}]
 
 
 async def test_plan_mismatch_on_different_tool() -> None:

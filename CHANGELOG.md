@@ -19,6 +19,20 @@ once it reaches 1.0.
   `z_score_threshold=3.0`, `verdict=pause` by default); cold-start below
   `min_samples` never blocks. `examples/demo_anomaly.py`,
   `docs/adr/0010-e10-anomaly-baselines.md`.
+- **Real SQL dry-run adapter (E11, plan-v2 §"E11"):**
+  `belay/planner/adapters/sql.py` -- new `sql_simulator` plan basis (spec
+  §5.3), slotted `native_dry_run > sql_simulator > dry_run > contract`.
+  Runs a contract's new optional `sql` capture/effect hint
+  (`belay/contracts/model.py::SqlHint`, additive -- old contracts load
+  unchanged) as a real `BEGIN; ...; ROLLBACK` transaction against a real
+  SQLAlchemy `Engine` to get a genuine affected-row count, never
+  committing on any path (verified by a crash-mid-simulation test with no
+  explicit rollback). Bind parameters reuse the existing §4.3 expression
+  language, no second templating syntax. SQLite tested and working;
+  Postgres implemented via the same dialect-agnostic API but not verified
+  against a live instance in this sandbox (see the ADR's honesty note).
+  `examples/contracts/crm.yaml` (`crm.bulk_delete`'s `sql` hint),
+  `examples/demo_sql.py`, `docs/adr/0011-e11-sql-dry-run.md`.
 
 ## [0.1.0] - 2026-07-22
 

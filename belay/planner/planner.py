@@ -1,24 +1,31 @@
 """Planner.plan(): dry-run bases and plan expiration (spec §5.3, §5.4).
 
-Dry-run adapters v0.1 (plan.md E4):
+Dry-run adapters (plan.md E4, plan-v2 E11):
 
 - `contract` -- always available. Derives the estimate straight from the
   contract's declared `effects`. Every contract-basis count is honest about
   its own uncertainty (spec §5.3: "MUST NOT present contract-basis counts as
   exact"), so it is always marked `estimate: true`; a declared effect with no
   `count` at all goes to `unknown[]` instead of a guessed number.
+- `sql_simulator` (plan-v2 E11) -- used when the contract declares a `sql`
+  hint (`belay/contracts/model.py::SqlHint`) and the caller supplies a
+  `PlanningSession.sql_runner`. Runs the real statement in a transaction that
+  is always rolled back (`belay/planner/adapters/sql.py`) to get a real
+  affected/matched row count -- `estimate: false`, since this is not a guess.
 - `native_dry_run` -- used when the caller supplies a
   `PlanningSession.native_dry_run` callable (the tool exposes a `<tool>.dry_run`
-  sibling) and it returns a result. Precedence is `native_dry_run > dry_run >
-  contract` (spec §5.3); this Planner tries `native_dry_run` first and falls
-  back to `contract`.
-- `dry_run` (e.g. `EXPLAIN`/`SELECT COUNT(*)` simulation for SQL) is
-  deliberately **not implemented** in v0.1 -- see plan.md §11 ("SQL dry-run
-  adapter" is listed as a post-v0.1 issue). `Basis` still admits the literal
-  for forward compatibility with a future adapter, but no code path in this
-  module produces it.
-  # ponytail: no SQL/generic simulator adapter; add one (and wire it between
-  # native_dry_run and contract below) when a concrete tool needs it.
+  sibling) and it returns a result.
+- `dry_run` (a generic `EXPLAIN`/`SELECT COUNT(*)` simulator not tied to a
+  contract's `sql` hint) remains unimplemented -- `sql_simulator` supersedes
+  the "future SQL dry-run adapter" issue plan.md §11 deferred. `Basis` still
+  admits the `dry_run` literal for forward compatibility, but no code path in
+  this module produces it.
+
+Precedence (plan-v2 E11, docs/adr/0011-e11-sql-dry-run.md): `native_dry_run >
+sql_simulator > dry_run > contract`. `Planner.plan()` builds the plan in that
+reverse order below (weakest basis first), each stage overwriting the
+previous one's `effects`/`basis` if it applies -- so the last stage that
+fires wins, which is exactly the strongest-available basis.
 """
 
 from __future__ import annotations
@@ -29,9 +36,11 @@ from typing import Any, Literal
 
 from belay.canonical import canonical_bytes, sha256_hex
 from belay.clock import Clock, SystemClock
+from belay.contracts.expressions import evaluate as evaluate_expression
+from belay.contracts.expressions import parse as parse_expression
 from belay.contracts.model import Contract
 from belay.errors import BelayError
-from belay.planner.model import EffectEstimate, Plan, PlanningSession
+from belay.planner.model import EffectEstimate, Plan, PlanningSession, SqlRunner
 
 DEFAULT_PLAN_TTL_SECONDS = 600  # 10 minutes (spec §5.4 default)
 
@@ -105,10 +114,42 @@ def _native_effects(
     return effects, unknown
 
 
+async def _sql_effects(
+    contract: Contract, args: dict[str, Any], sql_runner: SqlRunner
+) -> list[EffectEstimate]:
+    """Run `contract.sql`'s statement for real via `sql_runner` (plan-v2 E11).
+
+    Bind params are Belay expressions (spec §4.3), evaluated against
+    `$args`/`$context` -- the same grammar and evaluator `undo.args` uses, no
+    second templating engine. The resulting real row count replaces every
+    declared effect's `count`, marked `estimate: false`: this is a measured
+    number, not a guess.
+    """
+    assert contract.sql is not None
+    scope = {"args": args, "context": {}}
+    params = {
+        name: evaluate_expression(parse_expression(expr), scope)
+        for name, expr in (contract.sql.params or {}).items()
+    }
+    count = await sql_runner(contract.sql.statement, params)
+    return [
+        EffectEstimate(
+            type=effect.type,
+            resource=effect.resource,
+            count=str(count),
+            estimate=False,
+            basis="sql_simulator",
+            amount=effect.amount,
+            recipients=effect.recipients,
+        )
+        for effect in contract.effects
+    ]
+
+
 def _confidence(basis: str, unknown: list[dict[str, Any]]) -> Literal["high", "medium", "low"]:
     if unknown:
         return "low"
-    if basis == "native_dry_run":
+    if basis in ("native_dry_run", "sql_simulator"):
         return "high"
     return "medium"
 
@@ -131,6 +172,15 @@ class Planner:
             unknown = []
             reversibility = "reversible"
             basis = "contract"
+
+        if (
+            session.contract is not None
+            and session.contract.sql is not None
+            and session.sql_runner is not None
+        ):
+            effects = await _sql_effects(session.contract, args, session.sql_runner)
+            unknown = []
+            basis = "sql_simulator"
 
         if session.native_dry_run is not None:
             native_result = await session.native_dry_run(tool, args)

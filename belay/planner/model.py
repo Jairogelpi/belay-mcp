@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from belay.contracts.model import Contract
 
 EffectType = TLiteral["create", "update", "delete", "send", "spend", "execute", "read"]
-Basis = TLiteral["native_dry_run", "dry_run", "contract"]
+Basis = TLiteral["native_dry_run", "sql_simulator", "dry_run", "contract"]
 Verdict = TLiteral["allow", "pause", "deny"]
 
 
@@ -88,6 +88,15 @@ class Plan(BaseModel):
 
 NativeDryRunCaller = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
+# plan-v2 E11: runs a contract's `sql` hint statement for real (in a
+# transaction that is always rolled back -- see `belay/planner/adapters/sql.py`)
+# and returns the real affected/matched row count. Kept as a bare
+# `Callable[[str, dict], Awaitable[int]]` here (no `sqlalchemy` import in this
+# module) so `belay/planner/model.py` stays a thin, dependency-light data
+# module; `belay/planner/adapters/sql.py` is the one place that touches
+# SQLAlchemy.
+SqlRunner = Callable[[str, dict[str, Any]], Awaitable[int]]
+
 
 @dataclass
 class PlanningSession:
@@ -103,3 +112,4 @@ class PlanningSession:
     contract: Contract | None = None
     implicit_effects: list[dict[str, Any]] = field(default_factory=list)
     native_dry_run: NativeDryRunCaller | None = None
+    sql_runner: SqlRunner | None = None

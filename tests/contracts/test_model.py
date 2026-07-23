@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from belay.contracts.model import Contract
+from belay.contracts.model import Contract, SqlHint
 from belay.errors import BelayError
 from pydantic import ValidationError
 
@@ -109,3 +109,59 @@ def test_effects_type_is_restricted_to_the_seven_declared_types() -> None:
     }
     with pytest.raises(ValidationError):
         Contract.model_validate(doc)
+
+
+# plan-v2 E11: the optional `sql` capture/effect hint (additive field).
+
+
+def test_old_contract_without_sql_field_still_loads_unchanged() -> None:
+    contract = Contract.model_validate(BASE)
+    assert contract.sql is None
+
+
+def test_sql_hint_with_valid_delete_statement_loads() -> None:
+    doc = {
+        **BASE,
+        "sql": {
+            "statement": "DELETE FROM records WHERE last_seen < :cutoff",
+            "params": {"cutoff": "$args.cutoff"},
+        },
+    }
+    contract = Contract.model_validate(doc)
+    assert contract.sql == SqlHint(
+        statement="DELETE FROM records WHERE last_seen < :cutoff",
+        params={"cutoff": "$args.cutoff"},
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DROP TABLE records",
+        "DELETE FROM records; DROP TABLE records",
+        "PRAGMA table_info(records)",
+        "INSERT INTO records (id) VALUES (1)",
+        "records WHERE 1=1",  # no verb at all
+        "",
+    ],
+)
+def test_malformed_or_unsafe_sql_statement_is_contract_invalid_at_load_time(
+    statement: str,
+) -> None:
+    doc = {**BASE, "sql": {"statement": statement}}
+    with pytest.raises(BelayError) as exc_info:
+        Contract.model_validate(doc)
+    assert exc_info.value.code == "contract_invalid"
+
+
+def test_sql_hint_param_expression_must_be_in_the_belay_grammar() -> None:
+    doc = {
+        **BASE,
+        "sql": {
+            "statement": "DELETE FROM records WHERE last_seen < :cutoff",
+            "params": {"cutoff": "__import__('os')"},
+        },
+    }
+    with pytest.raises(BelayError) as exc_info:
+        Contract.model_validate(doc)
+    assert exc_info.value.code == "expression_invalid"
