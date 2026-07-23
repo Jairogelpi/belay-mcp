@@ -33,6 +33,23 @@ once it reaches 1.0.
   against a live instance in this sandbox (see the ADR's honesty note).
   `examples/contracts/crm.yaml` (`crm.bulk_delete`'s `sql` hint),
   `examples/demo_sql.py`, `docs/adr/0011-e11-sql-dry-run.md`.
+- **Counterfactual replay (E12, plan-v2 §"E12"):**
+  `belay/ledger/counterfactual.py::run_counterfactual` -- "what would have
+  happened if a human had decided differently at an approval/policy point,"
+  computed entirely offline from the ledger: zero real upstream calls, zero
+  mutation of the real session (a `CounterfactualBranch` holds only a
+  read-only tuple of `Event`s, no `LedgerStore` handle at all). Reuses
+  `belay.ledger.replay.replay()` for the real session's baseline final
+  state and the existing `Basis` literal (E4/E11) for divergent steps'
+  estimates, rather than duplicating either. Honesty rule (mirrors E7's
+  `fully_rewound`): steps identical to reality are `unchanged` (the real
+  recorded result); steps that diverge *because of* the override with a
+  safe read-only estimate available are `diverged` with that `Basis` (or
+  the branch's own `"simulated"` marker); steps with no safe way to
+  re-derive an outcome are `unknown`, never fabricated. `belay
+  counterfactual <session_id> --at-step <n> --override '<json>' [--json]`.
+  `examples/demo_counterfactual.py`,
+  `docs/adr/0012-e12-counterfactual-replay.md`.
 
 ## [0.1.0] - 2026-07-22
 

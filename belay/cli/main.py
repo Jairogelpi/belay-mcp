@@ -403,6 +403,55 @@ def rewind_command(
         raise typer.Exit(code=1)
 
 
+@app.command(name="counterfactual")
+def counterfactual_command(
+    session_id: str = typer.Argument(..., help="Session to branch (spec-equivalent, plan-v2 E12)."),
+    at_step: int = typer.Option(
+        ..., "--at-step", help="step_seq of the policy_evaluated event to fork at."
+    ),
+    override: str = typer.Option(
+        ..., "--override", help='JSON-encoded override, e.g. \'{"verdict": "deny"}\'.'
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    json_out: bool = typer.Option(False, "--json", help="Print the full report as JSON."),
+) -> None:
+    """Ask "what if the human had decided differently?" -- purely offline (plan-v2 E12).
+
+    Read-only: reads the ledger once and never opens an upstream connection,
+    so it works whether or not the session's `belay run` is still live.
+    """
+    import json as jsonlib
+
+    from belay.ledger.counterfactual import InvalidForkPoint, run_counterfactual
+    from belay.ledger.store import LedgerStore
+
+    ledger = LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
+    events = ledger.read(session_id)
+    override_dict = jsonlib.loads(override)
+
+    try:
+        report = run_counterfactual(events, at_step, override_dict)
+    except InvalidForkPoint as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if json_out:
+        typer.echo(jsonlib.dumps(report.to_dict(), indent=2))
+        return
+
+    typer.echo(f"counterfactual for {session_id}, forked at step {at_step} with {override_dict}:")
+    for step in report.steps:
+        basis = f" ({step.basis})" if step.basis else ""
+        typer.echo(f"  step {step.step_seq}: {step.tool} -> {step.outcome}{basis}")
+    if report.is_noop:
+        typer.echo("no-op override: identical to what actually happened")
+    else:
+        typer.echo(
+            f"{len(report.unchanged)} unchanged, {len(report.diverged)} diverged, "
+            f"{len(report.unknown)} unknown"
+        )
+
+
 def main() -> None:
     app()
 
