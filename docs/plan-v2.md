@@ -1,4 +1,4 @@
-# Belay — Plan v2 (post-v0.1.0): E10-E13
+# Belay — Plan v2 (post-v0.1.0): E10-E15
 
 Continuation of `docs/plan.md`'s methodology (SDD+TDD, one PR/commit per
 entrega, English artifacts, no LLM anywhere in `belay/`, no `eval`/`exec`).
@@ -7,134 +7,186 @@ conformance (`belay-conformance run --target belay --level 3` must still
 pass after each).
 
 ## E10 — Statistical anomaly baselines (DONE, shipped)
-
-Landed. See `docs/adr/0010-e10-anomaly-baselines.md`.
-
 ## E11 — Real SQL dry-run adapter (DONE, shipped)
-
-Landed. See `docs/adr/0011-e11-sql-dry-run.md`.
-
 ## E12 — Counterfactual replay (DONE, shipped)
+## E13 — Cryptographically signed, offline-verifiable evidence (DONE, shipped)
 
-Landed. See `docs/adr/0012-e12-counterfactual-replay.md`.
+See `docs/adr/0010`-`0013` for each.
 
-## E13 — Cryptographically signed, offline-verifiable evidence
+## E14 — Identity attribution: who told the agent to do this
 
-**Problem:** the ledger's hash chain (E2, spec §9.2) proves internal
-consistency — that no event was altered or reordered — but only to someone
-who trusts the party presenting the chain and has access to recompute it.
-There is no artifact today that a *third party*, with no access to Belay's
-database and no trust relationship with the operator, can verify
-independently: "this exact sequence of governed actions and their
-compensations really happened, was really approved by this identified
-human, and has not been altered since." That's the difference between an
-internal audit log and portable, legally-useful evidence. Plan.md itself
-flags signed contract sets as a v0.2+ direction (§11, "firma de contract
-sets vía sigstore") — this entrega generalizes the idea to the whole
-session ledger, using plain Ed25519 (no sigstore/external CA dependency
-required for v1, keep it self-contained and offline-first).
+**Problem:** the ledger already records `approved_by` (who authorized a
+paused action, §7/§12) but nothing records *who launched the agent
+session in the first place* or *on whose behalf* an action was taken. In
+an org with many employees and many agents sharing one Belay deployment,
+an audit today can answer "what happened and who approved the risky
+step" but not "which human's instruction produced this session at all" —
+the actual accountability chain enterprises ask for when rolling out
+agentic tools to a workforce.
 
-**Constraint:** fully offline-verifiable — verification must need nothing
-but the exported evidence file and a public key; no call to Belay, no
-database access, no network. No LLM, no `eval`/`exec` (same as always).
-Must not change the existing hash-chain algorithm or break any E2 test —
-this is an additive signature *over* the existing chain, not a replacement
-of it.
+**Constraint:** no new trust mechanism invented — Belay does not
+authenticate humans itself (out of scope, spec has no auth layer); this
+entrega records and enforces the presence of an **externally-asserted**
+identity (an API key label, an SSO-issued claim string, a service
+account name — whatever the deployment's own auth in front of Belay
+already established) as a first-class, immutable, signable field. Do not
+build a login system. Reuse E13's signing so identity claims become part
+of the tamper-evident evidence, not a bolt-on.
 
 **Design:**
-- `belay/ledger/signing.py`:
-  - `SigningKey` wrapper around Ed25519 (use `cryptography` — a
-    well-audited, already-common Python dependency; do not hand-roll
-    crypto primitives). `generate() -> SigningKey`, `.public_bytes()`,
-    key persisted to disk as a file the operator controls (never stored
-    inside the SQLite ledger DB itself — signing key and evidence must be
-    separable, that's the whole point).
-  - `sign_session(events: list[Event], key: SigningKey) -> SignedEvidence`
-    — computes the existing chain's terminal hash (reuse
-    `belay/ledger/verify.py`'s `verify_chain` logic to get the final
-    `hash`, do not recompute the chain a second way), then signs
-    `canonical_bytes({"session_id", "set_hash", "chain_head_hash",
-    "event_count", "signed_at"})` (reuse `belay/canonical.py`, do not
-    invent a second canonicalization) with the private key.
-  - `SignedEvidence` model: the signature, the public key (or its
-    fingerprint), the signed summary fields, and — critically — the full
-    event list itself (or a reference/embedded export) so the bundle is
-    self-contained and doesn't require the verifier to already have the
-    events from elsewhere.
-  - `verify_evidence(bundle: SignedEvidence) -> VerificationResult` — pure
-    function, no I/O beyond reading the bundle passed in: (1) recompute
-    the hash chain over the embedded events via the *existing*
-    `verify_chain`/`verify_coherence` from E2 (reuse, don't duplicate),
-    (2) recompute the canonical summary and check the Ed25519 signature
-    against the embedded/provided public key, (3) report tampering
-    precisely — which check failed (chain broke at event k vs. signature
-    invalid vs. summary mismatch) rather than a single opaque
-    pass/fail, matching the existing precision of E2's chain-corruption
-    reporting (`verify_chain` already reports the exact failing index —
-    this must not regress that precision when composed with signing).
-- Export format: a single self-contained JSON (or JSON+detached
-  signature, your call — document the choice) file, `belay verify-export
-  <session_id> --key <path> -o <file>`, and a fully independent verifier
-  entry point that needs ONLY that file (+ the public key, embedded or
-  supplied separately depending on your trust-model choice — document
-  it) — `belay verify-evidence <file> [--pubkey <path>]`. This verifier
-  path must be usable **without a live Belay installation's database at
-  all** — test this by verifying an exported bundle in a fresh temp dir
-  with no `belay.db` present.
-- Tamper detection must cover: (a) any event payload byte changed post-export
-  → chain check fails at the right index, (b) the whole file re-signed with
-  a different key → signature check fails, (c) the summary fields
-  (session_id/set_hash/event_count) edited without re-signing → signature
-  check fails, (d) events appended after signing → detected (event_count
-  or chain-head mismatch against the signed summary).
+- `belay/ledger/model.py`: add `initiated_by: str | None` (the human/service
+  identity that started the session) — additive field on `Event`, no
+  schema break (the model already has `extra="allow"`, but promote this
+  specific field to a named, typed, documented one since it's now
+  load-bearing, not incidental metadata).
+- `belay/proxy/lifecycle.py`: `Lifecycle`/`start_session()` takes a
+  required `initiated_by: str` parameter (no silent default — an
+  unattributed session should be a deliberate, explicit choice like
+  `"unknown"`/`"anonymous"`, never accidentally blank) and stamps it onto
+  `session_started` and every subsequent event for that session (either
+  by repeating it per-event or by treating `session_started`'s value as
+  binding for the whole session and letting `belay/ledger/replay.py`'s
+  `SessionState` surface it — pick whichever avoids redundant storage,
+  document the choice).
+- `belay/approvals/queue.py`: the existing `approved_by` stays exactly as
+  is (§12 already covers it) — E14 is only additive on the *initiator*
+  side, do not touch approval semantics.
+- On-behalf-of chains: if an agent session was itself launched by another
+  automated process rather than directly by a human (e.g. a scheduler
+  service acting for a named employee), support an optional
+  `on_behalf_of: str | None` alongside `initiated_by` (the calling
+  identity vs. the accountable human) — both flow into the same event
+  stamping mechanism.
+- CLI: `belay wrap`/`belay run` gain a `--initiated-by <identity>`
+  (required, or defaulted to an explicit loud `"unknown"` string if
+  omitted — never silently empty) and optional `--on-behalf-of
+  <identity>`. `belay verify`/`belay verify-evidence` (E13) output must
+  surface `initiated_by`/`on_behalf_of` in their report so an auditor
+  sees it without a manual ledger query.
+- E13 integration: `sign_session`'s signed summary (currently session_id,
+  set_hash, chain_head_hash, event_count, signed_at) gains `initiated_by`
+  (and `on_behalf_of` if present) so identity attribution is itself
+  covered by the cryptographic signature — tampering with who initiated a
+  session must be detected exactly like tampering with the chain.
 
 **Tests (TDD, red before green):**
-- Sign a real multi-event session (reuse an E3/E6/E7-style real
-  stdio-subprocess fixture) → `verify_evidence` reports fully valid.
-- Each of the four tamper scenarios above, each as its own test, each
-  asserting the *specific* failure reported (not just "invalid").
-- Property test (Hypothesis): for any valid signed evidence bundle,
-  flipping any single byte in the embedded event payloads always fails
-  verification (never a false negative) — the security-critical guarantee
-  for this entrega, do not skip it.
-- Wrong public key supplied to `verify_evidence` → signature check fails
-  cleanly, no crash.
-- Round-trip: `belay verify-export` then `belay verify-evidence` against
-  the exported file in a directory with no `belay.db` at all, no live
-  `belay run`, confirming the "no Belay installation needed" claim for
-  real, not just architecturally.
-- Signing key never appears inside the SQLite ledger DB or the exported
-  evidence file itself (only the public key/fingerprint does) — an
-  explicit test grepping the exported bytes for the private key material
-  to prove it never leaks in.
-- Regression: existing E2 `verify_chain`/`verify_coherence` tests and CLI
-  `belay verify` behavior are completely unaffected — signing is additive,
-  never required, `belay verify` (unsigned path) keeps working exactly as
-  before for anyone who doesn't opt into signing.
+- `start_session` without `initiated_by` is a type/call error (or an
+  explicit loud default), never silently blank — write the test that
+  proves an accidental omission is caught, not swallowed.
+- `initiated_by`/`on_behalf_of` appear on `session_started` and are
+  retrievable via `replay()`'s `SessionState` for the whole session.
+- `belay verify-evidence` (E13) reports `initiated_by` and detects
+  tampering with it exactly like any other summary field (reuse E13's
+  existing tamper-detection test pattern — this is a regression-style
+  test proving the two entregas compose correctly, not a new mechanism).
+- CLI: `belay wrap ... --initiated-by alice@corp` then `belay run` then a
+  real stdio call produces a ledger where `belay verify-evidence` surfaces
+  `alice@corp` as initiator.
+- Multiple sessions from different initiators against the same wrapped
+  server never cross-contaminate (each session's events carry only its
+  own initiator) — property or parametrized test over N sessions.
+- Regression: all E0-E13 tests still pass; sessions started without
+  identity attribution via any pre-E14 test helper either get updated to
+  pass an explicit identity or get an explicit `"unknown"` default — no
+  test should be silently broken by the new required parameter.
 
-**Exit:** `examples/demo_signed_evidence.py` (or an added step to an
-existing demo script) runs a real session, exports signed evidence, then
-verifies it in a clean subdirectory with no access to the original
-`belay.db`, and additionally demonstrates a tamper attempt (flip one byte
-in a copy of the exported file) being caught with a precise error. Add
-`docs/adr/0013-e13-signed-evidence.md` documenting: why Ed25519 over
-sigstore/X.509 for v1 (self-contained, no CA/network dependency, upgrade
-path noted for later), the exact tamper-detection guarantees and their
-limits (e.g. this proves *the operator's key* signed it, not identity of
-the human approver beyond what's already recorded in `approved_by` fields
-— be honest about what cryptographic non-repudiation does and doesn't
-give you here), and the key-management responsibility handed to the
-operator (Belay generates/uses keys but does not manage key rotation or
-revocation in v1 — note as a documented gap/future issue, don't
-overclaim).
+**Exit:** `examples/demo_signed_evidence.py` (E13) or a new
+`examples/demo_attribution.py` shows two different `--initiated-by`
+identities running sessions against the same server, and a `belay
+verify-evidence` report correctly distinguishing which human/service
+triggered which session. Add `docs/adr/0014-e14-identity-attribution.md`
+documenting: why Belay does not implement authentication itself (scope
+boundary — it trusts the identity the deployment's own front door
+already asserts), the `initiated_by` vs `on_behalf_of` semantics, and how
+this composes with E13 signing.
 
-Update `CHANGELOG.md`'s `[Unreleased]` section alongside the existing
-E10/E11/E12 entries — do not remove or restructure those.
+## E15 — Per-identity irreversible-action quota (not just per-call caps)
+
+**Problem:** `PolicyEngine`'s existing `Cap` (E4) limits blast radius
+*per call/plan* (e.g. "max 100 rows this action"). Nothing today limits
+how many separate irreversible or high-risk approvals a given
+human-or-agent identity can accumulate over a rolling window (e.g. "no
+more than 20 irreversible actions per agent per day even if each one
+individually looks small and gets approved"). This is the literal
+enterprise governance ask: "I approved one bulk-delete, I did not approve
+the agent doing that 200 times."
+
+**Depends on E14:** quota is scoped per `initiated_by` identity, so this
+entrega must land after (or alongside, sharing the same event-stamping
+work) E14 — there is no meaningful per-identity quota without knowing
+which identity a session belongs to.
+
+**Constraint:** deterministic, ledger-derived (like E10's baselines —
+reuse the same "read prior events, do not keep a second parallel
+in-memory store of truth" philosophy), no LLM. Must compose with the
+existing `deny > pause > allow` max-severity rule, not replace it.
+
+**Design:**
+- `belay/policy/quota.py`: `QuotaTracker` reads prior `policy_evaluated` /
+  `approval_resolved` events from the ledger (via `belay/ledger/store.py`,
+  same access pattern as E10's `BaselineStore`) filtered by
+  `initiated_by` and a rolling time window (reuse the injectable `Clock`
+  from `belay/clock.py`, E4 — do not read wall-clock time directly),
+  counting approved/executed irreversible-effect actions.
+- New policy dimension `quota` in `PolicyEngine.evaluate`, combined by the
+  existing max-severity rule alongside `tools`/`quiet_hours`/
+  `anomaly`(E10)/irreversible-default.
+- `Defaults.quota` config: `enabled`, `window` (e.g. `"1d"`/`"7d"`,
+  parsed relative to the injected clock), `max_irreversible_actions`,
+  `verdict` (default `pause`) — sensible defaults so it's usable without
+  hand-tuning, same spirit as E10's "works with zero manual
+  configuration," though unlike E10 a quota number is inherently a policy
+  choice an operator will often want to set explicitly; document the
+  default chosen and why in the ADR rather than pretending zero-config
+  is meaningful here the way it was for statistical anomaly detection.
+- Reasons in `PolicyResult` must state the identity, the current count,
+  the window, and the configured max, matching E10's explainability bar.
+- Quota accounting must only count actions that were actually approved
+  and executed (or auto-allowed), not ones that were denied/still
+  pending — verify this distinction explicitly.
+
+**Tests (TDD, red before green):**
+- Below quota → `allow` contribution from this dimension; at/over quota →
+  configured verdict (default `pause`), with an explanatory reason citing
+  identity/count/window/max.
+- Rolling window correctness with the injectable clock: an action just
+  inside the window counts, one that has aged out of the window (per the
+  clock) does not — test both boundaries explicitly.
+- Per-identity isolation: two identities each individually under quota
+  even though their *combined* count would exceed it — no cross-identity
+  leakage (this is the direct counterpart to E14's no-cross-contamination
+  test and E10's per-session isolation test).
+- Only approved+executed actions count, not denied or still-pending ones
+  — explicit test.
+- Composition: quota firing alongside an existing cap/anomaly/irreversible
+  verdict still resolves via max-severity correctly (extend E10's
+  composition test pattern to include the new dimension).
+- Property test (Hypothesis): for any sequence of N actions by one
+  identity with a configured max of M, the (M+1)th irreversible action
+  within the window always triggers the configured verdict, never
+  `allow` — the core correctness guarantee for this entrega.
+- CLI/end-to-end: a real session where an agent identity has its Nth
+  bulk action paused purely by quota, no per-call cap involved.
+
+**Exit:** `examples/demo_quota.py` (or an added step in an existing demo)
+shows one identity being paused after exceeding its irreversible-action
+quota within the configured window, entirely due to E15/E14, no
+per-call `Cap` needed for that tool. Add `docs/adr/0015-e15-identity-quota.md`
+documenting the window-rolling mechanism, why it composes with rather
+than replaces E4's per-call caps, and the explicit default chosen (with
+the honest caveat that, unlike E10, a meaningful default number is a
+judgment call, not a statistically-derived zero-config value).
+
+Update `CHANGELOG.md`'s `[Unreleased]` section alongside E10-E13's
+entries for both E14 and E15 — do not remove or restructure existing
+entries.
 
 ## Sequencing
 
-E13 builds on `belay/ledger/verify.py` and `belay/canonical.py` (E2) only
-by reuse, not modification — safe to build independently of E10/E11/E12
-which are all already landed. Run the full test suite +
-`belay-conformance ... --level 3` after landing to catch cross-contamination
-early.
+E14 must land before E15 (E15 is scoped per-identity, which E14
+introduces). Both touch `belay/proxy/lifecycle.py` and
+`belay/ledger/model.py` (E14) plus `belay/policy/engine.py` (E15, on top
+of E14's identity field) — build sequentially in the same working tree,
+not in parallel, to avoid two agents editing the same files
+concurrently. Run the full test suite + `belay-conformance ... --level 3`
+after each lands.
