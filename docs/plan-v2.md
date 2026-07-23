@@ -1,4 +1,4 @@
-# Belay — Plan v2 (post-v0.1.0): E10 anomaly baselines, E11 SQL dry-run, E12 counterfactual replay
+# Belay — Plan v2 (post-v0.1.0): E10-E13
 
 Continuation of `docs/plan.md`'s methodology (SDD+TDD, one PR/commit per
 entrega, English artifacts, no LLM anywhere in `belay/`, no `eval`/`exec`).
@@ -14,122 +14,127 @@ Landed. See `docs/adr/0010-e10-anomaly-baselines.md`.
 
 Landed. See `docs/adr/0011-e11-sql-dry-run.md`.
 
-## E12 — Counterfactual replay ("what if I had decided differently")
+## E12 — Counterfactual replay (DONE, shipped)
 
-**Problem:** `belay rewind` answers "undo what actually happened." Nothing
-today answers "what would have happened if I had approved/denied/narrowed
-this differently at the moment of decision?" — without touching production,
-without re-calling the real upstream, and without needing to have actually
-run the alternate path live. Every competing gateway/observability tool
-lacks this because none of them has a deterministic, pure ledger+replay
-foundation to build it on (spec §9.4) — Belay already does (E2). This is
-the single most differentiating feature available to build: an auditor or
-on-call human can ask "why did this get approved, and what if it hadn't?"
-entirely offline, from the ledger alone.
+Landed. See `docs/adr/0012-e12-counterfactual-replay.md`.
 
-**Constraint:** fully deterministic, no LLM, no network calls, no real
-tool/upstream invocation during a counterfactual run. A counterfactual
-replay must NEVER be confused with or leak into the real session's ledger
-— it produces its own separate, clearly-labeled report/branch, never
-mutates or appends to the original session's event chain.
+## E13 — Cryptographically signed, offline-verifiable evidence
+
+**Problem:** the ledger's hash chain (E2, spec §9.2) proves internal
+consistency — that no event was altered or reordered — but only to someone
+who trusts the party presenting the chain and has access to recompute it.
+There is no artifact today that a *third party*, with no access to Belay's
+database and no trust relationship with the operator, can verify
+independently: "this exact sequence of governed actions and their
+compensations really happened, was really approved by this identified
+human, and has not been altered since." That's the difference between an
+internal audit log and portable, legally-useful evidence. Plan.md itself
+flags signed contract sets as a v0.2+ direction (§11, "firma de contract
+sets vía sigstore") — this entrega generalizes the idea to the whole
+session ledger, using plain Ed25519 (no sigstore/external CA dependency
+required for v1, keep it self-contained and offline-first).
+
+**Constraint:** fully offline-verifiable — verification must need nothing
+but the exported evidence file and a public key; no call to Belay, no
+database access, no network. No LLM, no `eval`/`exec` (same as always).
+Must not change the existing hash-chain algorithm or break any E2 test —
+this is an additive signature *over* the existing chain, not a replacement
+of it.
 
 **Design:**
-- `belay/ledger/counterfactual.py`: `CounterfactualBranch` /
-  `run_counterfactual(events, at_step_seq, override, *, upstream_replay=None) -> CounterfactualReport`.
-  - `events`: the real session's ledger events (read via
-    `belay/ledger/store.py`, same as `replay()`).
-  - `at_step_seq`: which decision point to fork at (must correspond to an
-    actual `policy_evaluated` or `approval_*` event in the real ledger —
-    forking at a point that never existed is a user error, reject it
-    clearly, don't silently no-op).
-  - `override`: the alternate decision (`verdict: allow|pause|deny`, or an
-    alternate approval outcome/narrowed args) to substitute at that point.
-  - Mechanism: re-run the **existing deterministic components** —
-    `PolicyEngine`, `belay/contracts/expressions.py` evaluation, and the
-    saga stage sequence from `belay/executor/saga.py` — against the
-    branch, but replace any real upstream tool call with a **replay
-    source**: by default, the *captured* snapshots and *recorded results*
-    already in the original ledger for steps that didn't change; for any
-    step whose behavior diverges *because* of the override (e.g. a step
-    that would now execute but didn't originally, or vice versa), there is
-    no real recorded result to replay — the branch must represent this
-    honestly as `simulated` (using the same dry-run/estimate machinery
-    from E4/E11, never a real call) rather than inventing a fake concrete
-    result. This is the key honesty rule for this entrega, analogous to
-    E7's `fully_rewound` honesty rule — do not let a counterfactual report
-    claim a concrete outcome that was never actually observed or safely
-    dry-run-estimated.
-  - `upstream_replay`: optional override hook so a caller *can* supply a
-    real read-only dry-run adapter (native_dry_run / sql_simulator from
-    E11) for divergent steps, to get better-than-"simulated" estimates
-    where safely available — but must default to the safe, no-real-call
-    path if not supplied.
-- `CounterfactualReport` model: which steps ran identically to the real
-  session (`unchanged`), which ran differently due to the override
-  (`diverged`, with a `basis: simulated|dry_run|sql_simulator` marker per
-  E4/E11's existing `Basis` type — reuse it, don't invent a parallel one),
-  and a final state comparison against the real session's actual final
-  `SessionState` (from `belay/ledger/replay.py` — reuse `replay()`, don't
-  duplicate its fold logic).
-- CLI: `belay counterfactual <session_id> --at-step <n> --override '<json>'`
-  prints the `CounterfactualReport` (human-readable + `--json` machine
-  form). Read-only: must not require `belay run` to be live, must not
-  touch the real upstream server, must not append anything to the real
-  session's ledger (verify this with a test that snapshots the ledger row
-  count before/after and asserts it's unchanged).
+- `belay/ledger/signing.py`:
+  - `SigningKey` wrapper around Ed25519 (use `cryptography` — a
+    well-audited, already-common Python dependency; do not hand-roll
+    crypto primitives). `generate() -> SigningKey`, `.public_bytes()`,
+    key persisted to disk as a file the operator controls (never stored
+    inside the SQLite ledger DB itself — signing key and evidence must be
+    separable, that's the whole point).
+  - `sign_session(events: list[Event], key: SigningKey) -> SignedEvidence`
+    — computes the existing chain's terminal hash (reuse
+    `belay/ledger/verify.py`'s `verify_chain` logic to get the final
+    `hash`, do not recompute the chain a second way), then signs
+    `canonical_bytes({"session_id", "set_hash", "chain_head_hash",
+    "event_count", "signed_at"})` (reuse `belay/canonical.py`, do not
+    invent a second canonicalization) with the private key.
+  - `SignedEvidence` model: the signature, the public key (or its
+    fingerprint), the signed summary fields, and — critically — the full
+    event list itself (or a reference/embedded export) so the bundle is
+    self-contained and doesn't require the verifier to already have the
+    events from elsewhere.
+  - `verify_evidence(bundle: SignedEvidence) -> VerificationResult` — pure
+    function, no I/O beyond reading the bundle passed in: (1) recompute
+    the hash chain over the embedded events via the *existing*
+    `verify_chain`/`verify_coherence` from E2 (reuse, don't duplicate),
+    (2) recompute the canonical summary and check the Ed25519 signature
+    against the embedded/provided public key, (3) report tampering
+    precisely — which check failed (chain broke at event k vs. signature
+    invalid vs. summary mismatch) rather than a single opaque
+    pass/fail, matching the existing precision of E2's chain-corruption
+    reporting (`verify_chain` already reports the exact failing index —
+    this must not regress that precision when composed with signing).
+- Export format: a single self-contained JSON (or JSON+detached
+  signature, your call — document the choice) file, `belay verify-export
+  <session_id> --key <path> -o <file>`, and a fully independent verifier
+  entry point that needs ONLY that file (+ the public key, embedded or
+  supplied separately depending on your trust-model choice — document
+  it) — `belay verify-evidence <file> [--pubkey <path>]`. This verifier
+  path must be usable **without a live Belay installation's database at
+  all** — test this by verifying an exported bundle in a fresh temp dir
+  with no `belay.db` present.
+- Tamper detection must cover: (a) any event payload byte changed post-export
+  → chain check fails at the right index, (b) the whole file re-signed with
+  a different key → signature check fails, (c) the summary fields
+  (session_id/set_hash/event_count) edited without re-signing → signature
+  check fails, (d) events appended after signing → detected (event_count
+  or chain-head mismatch against the signed summary).
 
 **Tests (TDD, red before green):**
-- Forking at a real `policy_evaluated` event with an override verdict of
-  `deny` where the real session was `allow` → downstream steps after that
-  point are marked `diverged`/`simulated` (never fabricated as concrete
-  results), and the report's final-state comparison correctly shows what
-  differs.
-- Forking with an override that matches what actually happened (a no-op
-  override) → the report shows 100% `unchanged`, identical final state to
-  `replay()` on the real events — this is the regression anchor proving
-  the counterfactual engine agrees with reality when nothing is changed.
-- Property test (Hypothesis): for any real session's event history and any
-  no-op override at any valid decision point, `run_counterfactual` always
-  reports `unchanged` for every step and a final state equal to
-  `belay.ledger.replay.replay(events)` — the strongest correctness
-  guarantee for this entrega, do not skip it.
-- Immutability: running a counterfactual against a live SQLite ledger DB
-  never appends a row to the real session's `events` table (assert exact
-  row count before == after) and never opens a connection to any upstream
-  MCP server (spy/mock the upstream transport layer and assert zero
-  calls).
-- Honesty: a step whose real outcome depended on data no longer safely
-  re-derivable (e.g. the real call's result was never captured because it
-  wasn't a read-only/capturable effect) must be reported as `unknown`, not
-  guessed — this is the analogue of E7's irreversible-steps-stay-honest
-  rule.
-- Invalid fork point (a `step_seq`/event id that doesn't correspond to an
-  actual decision event in that session) → clear error, not a silent
-  empty report.
-- CLI: `belay counterfactual` runs against a real SQLite fixture DB
-  produced by an actual prior `belay run` session (reuse the existing
-  stdio-subprocess fixture pattern from E3/E7's CLI tests), confirms the
-  ledger is untouched afterward.
+- Sign a real multi-event session (reuse an E3/E6/E7-style real
+  stdio-subprocess fixture) → `verify_evidence` reports fully valid.
+- Each of the four tamper scenarios above, each as its own test, each
+  asserting the *specific* failure reported (not just "invalid").
+- Property test (Hypothesis): for any valid signed evidence bundle,
+  flipping any single byte in the embedded event payloads always fails
+  verification (never a false negative) — the security-critical guarantee
+  for this entrega, do not skip it.
+- Wrong public key supplied to `verify_evidence` → signature check fails
+  cleanly, no crash.
+- Round-trip: `belay verify-export` then `belay verify-evidence` against
+  the exported file in a directory with no `belay.db` at all, no live
+  `belay run`, confirming the "no Belay installation needed" claim for
+  real, not just architecturally.
+- Signing key never appears inside the SQLite ledger DB or the exported
+  evidence file itself (only the public key/fingerprint does) — an
+  explicit test grepping the exported bytes for the private key material
+  to prove it never leaks in.
+- Regression: existing E2 `verify_chain`/`verify_coherence` tests and CLI
+  `belay verify` behavior are completely unaffected — signing is additive,
+  never required, `belay verify` (unsigned path) keeps working exactly as
+  before for anyone who doesn't opt into signing.
 
-**Exit:** `examples/demo_counterfactual.py` (or an added step in one of the
-existing `examples/demo*.py` scripts) runs the real `examples/demo.py`
-bulk-delete-then-rewind scenario, then asks "what if the human had denied
-instead of approved?" via `belay counterfactual`, and shows the branch
-report — proving the feature end to end against a real session, not a
-synthetic fixture only. Add `docs/adr/0012-e12-counterfactual-replay.md`
-documenting: the honesty rule (simulated vs. unknown vs. unchanged), why
-this reuses `replay()`/`PolicyEngine`/`Basis` rather than parallel
-implementations, and the immutability guarantee's enforcement mechanism
-(not just tested — architecturally, e.g. by never handing the branch a
-handle to the real `LedgerStore.append`).
+**Exit:** `examples/demo_signed_evidence.py` (or an added step to an
+existing demo script) runs a real session, exports signed evidence, then
+verifies it in a clean subdirectory with no access to the original
+`belay.db`, and additionally demonstrates a tamper attempt (flip one byte
+in a copy of the exported file) being caught with a precise error. Add
+`docs/adr/0013-e13-signed-evidence.md` documenting: why Ed25519 over
+sigstore/X.509 for v1 (self-contained, no CA/network dependency, upgrade
+path noted for later), the exact tamper-detection guarantees and their
+limits (e.g. this proves *the operator's key* signed it, not identity of
+the human approver beyond what's already recorded in `approved_by` fields
+— be honest about what cryptographic non-repudiation does and doesn't
+give you here), and the key-management responsibility handed to the
+operator (Belay generates/uses keys but does not manage key rotation or
+revocation in v1 — note as a documented gap/future issue, don't
+overclaim).
 
-Update `CHANGELOG.md`'s `[Unreleased]` section alongside E10/E11's entries
-(don't remove or restructure theirs).
+Update `CHANGELOG.md`'s `[Unreleased]` section alongside the existing
+E10/E11/E12 entries — do not remove or restructure those.
 
 ## Sequencing
 
-E12 depends on E10/E11 only incidentally (reuses `Basis` from E4/E11) and
-is otherwise a new, disjoint module (`belay/ledger/counterfactual.py` +
-`belay/cli/main.py` addition) — safe to build after E10/E11 land, which
-they already have. Run the full test suite + `belay-conformance ... --level 3`
-after landing to catch cross-contamination early.
+E13 builds on `belay/ledger/verify.py` and `belay/canonical.py` (E2) only
+by reuse, not modification — safe to build independently of E10/E11/E12
+which are all already landed. Run the full test suite +
+`belay-conformance ... --level 3` after landing to catch cross-contamination
+early.
