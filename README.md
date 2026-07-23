@@ -14,13 +14,16 @@ Belay is an MCP proxy that sits between an agent and its tool servers. It
 turns "the agent can call anything" into "every tool call is declared,
 previewable, gated, and — when it goes wrong — reversible."
 
-> Status: **v0.1.0 (release candidate), L3 conformance.** All of E0-E9 are
-> implemented: contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
+> Status: **`v0.1.0` tagged, L3 conformance.** E0-E9 (`docs/plan.md`) shipped
+> the full lifecycle — contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
 > Appendix C), planner + policy (§5, §6), approvals (§7), the saga executor
-> (§8), and rewind (§10) — the full lifecycle in
-> [`docs/architecture.md`](docs/architecture.md). 225 tests,
-> ≥90% coverage on the full run. The protocol is specified in
-> [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
+> (§8), and rewind (§10), diagrammed in
+> [`docs/architecture.md`](docs/architecture.md). Seven further entregas
+> (E10-E16, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
+> "What's new since v0.1.0" below. 307 tests, ≥90% coverage on the full run,
+> [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
+> in the spec has a real test (CI-enforced, not a stale doc). The protocol is
+> specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
 
 ## Why
 
@@ -48,6 +51,47 @@ incident. Belay's answer isn't "trust the model more" — it's infrastructure:
   every tool call independently verifiable and replayable.
 
 No LLM sits on the safety path. Belay is deterministic end to end.
+
+## What's new since v0.1.0
+
+Seven entregas landed on top of the v0.1.0 lifecycle (`docs/plan-v2.md`,
+ADRs 0010-0018), each additive — none weakened an existing test or broke L3
+conformance:
+
+- **Statistical anomaly baselines** (E10) — a per-session rolling
+  mean/stddev (Welford's algorithm, no LLM, no manual threshold) pauses an
+  action that's wildly outside its own session's normal pattern, even with
+  zero `Cap` configured for that tool. `examples/demo_anomaly.py`.
+- **Real SQL dry-run** (E11) — instead of a declared estimate, a
+  `BEGIN ... ROLLBACK` against the actual database reports the real
+  affected-row count before a human approves anything, never committing.
+  `examples/demo_sql.py`.
+- **Counterfactual replay** (E12) — `belay counterfactual <session> --at-step
+  N --override '{"verdict":"deny"}'` answers "what would have happened if a
+  human had decided differently here" entirely offline, from the ledger
+  alone — never calling the real upstream, never touching the real
+  session's chain. Honest by construction: it only ever reports
+  `unchanged`, `diverged` (with the real basis), or `unknown` — never a
+  fabricated concrete outcome. `examples/demo_counterfactual.py`.
+- **Signed, offline-verifiable evidence** (E13) — `belay verify-export` +
+  `belay verify-evidence` produce and check an Ed25519-signed bundle that
+  needs nothing but the file itself and a public key: no `belay.db`, no
+  network. Tamper detection is precise (chain vs. signature vs. summary
+  mismatch), not a single opaque pass/fail. `examples/demo_signed_evidence.py`.
+- **Identity attribution** (E14) — every session is bound to an explicit
+  `--initiated-by` (and optional `--on-behalf-of`) identity, folded into
+  E13's signature so forging *who* triggered a session is caught exactly
+  like tampering with the ledger. `examples/demo_attribution.py`.
+- **Per-identity irreversible-action quota** (E15) — beyond E4's per-call
+  caps, a rolling window limits how many irreversible actions one identity
+  can accumulate, so "I approved this once" can't silently become "the
+  agent did it 200 times." `examples/demo_quota.py`.
+- **Blast-radius self-explanation** (E16) — the governed response back to
+  the *agent itself* (not just the human's CLI) carries a structured,
+  template-filled explanation of why a call paused/was denied, with a
+  deterministic `suggested_action` when one mechanically applies. In
+  `examples/demo_self_explain.py` the agent reads its own explanation,
+  narrows its request, and gets `allow` — with zero human approval step.
 
 ## How it fits
 
@@ -137,6 +181,14 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E7 | Rewind (closes L3 conformance) | §10 | done |
 | E8 | Public conformance suite + example packs | §13 | done |
 | E9 | Demo, docs, portfolio polish, v0.1.0 release | — | done (tag/PyPI pending, see below) |
+| E10 | Statistical anomaly baselines | — (plan-v2) | done |
+| E11 | Real SQL dry-run adapter | §5.3 (extended) | done |
+| E12 | Counterfactual replay | §9.4 (extended) | done |
+| E13 | Signed, offline-verifiable evidence | §9 (extended) | done |
+| E14 | Identity attribution | §9, §12 (extended) | done |
+| E15 | Per-identity irreversible-action quota | §6 (extended) | done |
+| E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
+| E17 | `docs/traceability.md` generator, CI-enforced | §8 (plan.md) | done |
 
 ## Conformance
 
@@ -183,10 +235,12 @@ replacement for any:
 
 ## Release status
 
-`v0.1.0` is feature-complete against `docs/plan.md`'s Definition of Done
-(§0) but has **not been tagged or published to PyPI yet** — that's a
-manual step for the maintainer (PyPI trusted publishing must be configured
-on the PyPI project first; an agent cannot do that). See
+`v0.1.0` is tagged (`git tag v0.1.0`, on top of the full E0-E9 Definition of
+Done, §0) but **not published to PyPI yet** — that's a manual step for the
+maintainer (PyPI trusted publishing must be configured on the PyPI project
+first; an agent cannot do that). `main` is currently ahead of the `v0.1.0`
+tag with E10-E17 (see "What's new since v0.1.0" above); no new tag has been
+cut for those yet. See
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
 [`CHANGELOG.md`](CHANGELOG.md).
 
