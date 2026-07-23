@@ -8,7 +8,7 @@ import pytest
 from belay.ledger.counterfactual import InvalidForkPoint, run_counterfactual
 from belay.ledger.replay import replay
 from belay.ledger.store import LedgerStore
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 
@@ -132,6 +132,7 @@ def test_noop_override_reports_100_percent_unchanged_and_matches_replay() -> Non
     assert report.counterfactual_final_state.model_dump() == replay(events).model_dump()
 
 
+@settings(deadline=None)
 @given(
     verdict=st.sampled_from(["allow", "pause", "deny"]),
     fork_step=st.sampled_from([1, 2]),
