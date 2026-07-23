@@ -17,10 +17,13 @@ from datetime import datetime, time
 from fnmatch import fnmatch
 
 from belay.clock import Clock, SystemClock
+from belay.ledger.store import LedgerStore
 from belay.planner.model import EffectEstimate, Plan
+from belay.policy.baseline import BaselineStore
 from belay.policy.model import Cap, CapMatch, PolicyDoc, PolicyResult, Verdict
 
 _SEVERITY: dict[Verdict, int] = {"allow": 0, "pause": 1, "deny": 2}
+_ANOMALY_EPSILON = 1e-9
 
 
 def _matches(match: CapMatch, effect: EffectEstimate) -> bool:
@@ -79,11 +82,62 @@ def _scope_matches(scope: CapMatch, effects: list[EffectEstimate]) -> bool:
     return any(_matches(scope, e) for e in effects)
 
 
+def _evaluate_anomaly(
+    plan: Plan,
+    policy: PolicyDoc,
+    ledger: LedgerStore,
+    covered: set[tuple[str, str]],
+) -> tuple[Verdict, str] | None:
+    """The `anomaly` dimension (plan-v2 E10): flag an effect count far above its own history.
+
+    Cold start (fewer than `min_samples` prior calls for this `(tool,
+    effect_type)` in this session) always contributes nothing -- never block
+    on insufficient data. Skips effects a fired `Cap` already covers
+    (`covered`), so a cap and the anomaly baseline don't double-fire on the
+    same effect; an anomaly with no cap configured at all still fires on its
+    own, which is the win condition (docs/adr/0010-e10-anomaly-baselines.md).
+    """
+    config = policy.defaults.anomaly
+    if not config.enabled or any(fnmatch(plan.tool, pattern) for pattern in config.exclude):
+        return None
+
+    store = BaselineStore(ledger)
+    for effect in plan.effects:
+        if (effect.type, effect.resource) in covered:
+            continue
+        value = effect.upper_bound()
+        if value is None:
+            continue
+        stats = store.stats(
+            plan.session_id, plan.tool, effect.type, exclude_plan_id=plan.plan_id
+        )
+        if stats.n < config.min_samples:
+            continue
+        stddev = stats.stddev
+        if stddev < _ANOMALY_EPSILON:
+            anomalous = value > stats.mean
+            z = float("inf") if anomalous else 0.0
+        else:
+            z = (value - stats.mean) / stddev
+            anomalous = z >= config.z_score_threshold
+        if not anomalous:
+            continue
+        ratio = value / stats.mean if stats.mean > _ANOMALY_EPSILON else float("inf")
+        reason = (
+            f"anomaly: {plan.tool} {effect.type} count {value:g} is {ratio:.1f}x the "
+            f"trailing baseline of {stats.mean:.1f} (z={z:.2f}, n={stats.n}, "
+            f"stddev={stddev:.2f})"
+        )
+        return config.verdict, reason
+    return None
+
+
 @dataclass
 class PolicyEngine:
     """`PolicyEngine.evaluate(plan, policy) -> PolicyResult` (spec §6)."""
 
     clock: Clock = field(default_factory=SystemClock)
+    ledger: LedgerStore | None = None
 
     def evaluate(self, plan: Plan, policy: PolicyDoc) -> PolicyResult:
         fired: list[tuple[Verdict, str]] = []
@@ -120,10 +174,21 @@ class PolicyEngine:
                 break
 
         # Caps -- each is an independent constraint.
+        covered: set[tuple[str, str]] = set()
         for i, cap in enumerate(policy.caps):
             result = _evaluate_cap(cap, plan)
             if result is not None:
                 fired.append((result, f"caps[{i}]"))
+                covered |= {
+                    (e.type, e.resource) for e in plan.effects if _matches(cap.match, e)
+                }
+
+        # Anomaly baseline (plan-v2 E10) -- only when a ledger is wired in
+        # (spec: reads the session's own history, never global state).
+        if self.ledger is not None:
+            anomaly = _evaluate_anomaly(plan, policy, self.ledger, covered)
+            if anomaly is not None:
+                fired.append((anomaly[0], anomaly[1]))
 
         if not fired:
             return PolicyResult(verdict="allow", reasons=[], requires_approval=False)

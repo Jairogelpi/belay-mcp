@@ -15,10 +15,29 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AnomalyDefaults(_Strict):
+    """Statistical anomaly baseline config (plan-v2 E10) -- zero manual thresholds required.
+
+    Defaults are chosen so the dimension works out of the box with no
+    operator configuration: `min_samples` calls build the baseline (cold
+    start, never blocks below it), then any call whose effect count is
+    `z_score_threshold` standard deviations above the trailing mean pauses.
+    `exclude` is the per-tool opt-out (globs), the anomaly-dimension
+    equivalent of relaxing the irreversible default (spec §6.4).
+    """
+
+    enabled: bool = True
+    min_samples: int = 10
+    z_score_threshold: float = 3.0
+    verdict: Verdict = "pause"
+    exclude: list[str] = Field(default_factory=list)
+
+
 class Defaults(_Strict):
     irreversible: Verdict = "pause"
     conditional_unmet: Verdict = "pause"
     unknown_effects: Verdict = "pause"
+    anomaly: AnomalyDefaults = Field(default_factory=AnomalyDefaults)
 
 
 class CapMatch(_Strict):

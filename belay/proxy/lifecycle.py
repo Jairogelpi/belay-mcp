@@ -219,7 +219,9 @@ class Lifecycle:
         if self.plan_stage is None:
             self.plan_stage = PlanStage(Planner(clock=self.clock))
         if self.policy_stage is None:
-            self.policy_stage = PolicyStage(PolicyEngine(clock=self.clock), self.policy)
+            self.policy_stage = PolicyStage(
+                PolicyEngine(clock=self.clock, ledger=self.ledger), self.policy
+            )
         if self.approval_stage is None:
             # Share the ledger's SQLite file (spec §7): the CLI's `belay
             # approvals` subcommands run as a separate process and must see

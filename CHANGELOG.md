@@ -8,6 +8,18 @@ once it reaches 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **Statistical anomaly baselines (E10, plan-v2 §"E10"):** `belay/policy/baseline.py`
+  -- deterministic, no-LLM, no-network per-session rolling mean/stddev
+  (Welford's algorithm) computed from the ledger's own `plan_created`
+  history. New `anomaly` policy dimension in `PolicyEngine.evaluate`,
+  combined with `tools`/`quiet_hours`/irreversible-default by the same
+  max-severity rule. Zero manual configuration required (`min_samples=10`,
+  `z_score_threshold=3.0`, `verdict=pause` by default); cold-start below
+  `min_samples` never blocks. `examples/demo_anomaly.py`,
+  `docs/adr/0010-e10-anomaly-baselines.md`.
+
 ## [0.1.0] - 2026-07-22
 
 First feature-complete release: an MCP proxy giving agents contract-based,
