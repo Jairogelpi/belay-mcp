@@ -93,6 +93,22 @@ once it reaches 1.0.
   was left silently broken by the new required parameter.
   `examples/demo_attribution.py`,
   `docs/adr/0014-e14-identity-attribution.md`.
+- **Per-identity irreversible-action quota (E15, plan-v2 §"E15"):**
+  `belay/policy/quota.py::QuotaTracker` -- a rolling-window count of one
+  E14 `initiated_by` identity's approved-and-executed irreversible actions,
+  read from the ledger across all of that identity's sessions (same
+  "read the ledger, no parallel store" philosophy as E10's
+  `BaselineStore`). New `quota` policy dimension in `PolicyEngine.evaluate`,
+  combined with `tools`/`quiet_hours`/`anomaly`/irreversible-default by the
+  same max-severity rule -- composes with, does not replace, E4's per-call
+  `Cap`. Only actions that were actually approved (or auto-allowed) *and*
+  executed count (`step_committed` proof); denied or still-pending actions
+  never do. `Defaults.quota` (`QuotaDefaults`) ships `enabled=False` by
+  default -- unlike E10's statistically-derived zero-config baseline, a
+  quota number is an operator's own risk judgment call, not something
+  Belay can derive from data alone (honest caveat documented in the ADR).
+  `reasons` cite the identity, current count, window, and configured max.
+  `examples/demo_quota.py`, `docs/adr/0015-e15-identity-quota.md`.
 
 ## [0.1.0] - 2026-07-22
 

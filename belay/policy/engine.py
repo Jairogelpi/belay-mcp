@@ -21,6 +21,7 @@ from belay.ledger.store import LedgerStore
 from belay.planner.model import EffectEstimate, Plan
 from belay.policy.baseline import BaselineStore
 from belay.policy.model import Cap, CapMatch, PolicyDoc, PolicyResult, Verdict
+from belay.policy.quota import QuotaTracker, parse_window
 
 _SEVERITY: dict[Verdict, int] = {"allow": 0, "pause": 1, "deny": 2}
 _ANOMALY_EPSILON = 1e-9
@@ -132,6 +133,44 @@ def _evaluate_anomaly(
     return None
 
 
+def _evaluate_quota(
+    plan: Plan, policy: PolicyDoc, ledger: LedgerStore, now: datetime
+) -> tuple[Verdict, str] | None:
+    """The `quota` dimension (plan-v2 E15): a per-identity rolling cap on approved-and-
+    executed irreversible actions, independent of any per-call `Cap` (E4).
+
+    Only fires for irreversible-effect plans; only counts prior actions that
+    were themselves approved (or auto-allowed) *and* actually executed
+    (`QuotaTracker`), never denied or still-pending ones. No identity (no
+    `session_started.initiated_by` on this plan's session) means quota simply
+    doesn't contribute -- same "opt out by absence of data" spirit as E10's
+    cold start.
+    """
+    config = policy.defaults.quota
+    if not config.enabled or plan.reversibility != "irreversible":
+        return None
+
+    started = next(
+        (e for e in ledger.read(plan.session_id) if e.type == "session_started"), None
+    )
+    identity = started.initiated_by if started is not None else None
+    if identity is None:
+        return None
+
+    window = parse_window(config.window)
+    tracker = QuotaTracker(ledger)
+    count = tracker.count(identity, now=now, window=window)
+    if count < config.max_irreversible_actions:
+        return None
+
+    reason = (
+        f"quota: identity {identity!r} has {count} approved irreversible action(s) in the "
+        f"trailing {config.window} window, at/over the configured max of "
+        f"{config.max_irreversible_actions}"
+    )
+    return config.verdict, reason
+
+
 @dataclass
 class PolicyEngine:
     """`PolicyEngine.evaluate(plan, policy) -> PolicyResult` (spec §6)."""
@@ -189,6 +228,10 @@ class PolicyEngine:
             anomaly = _evaluate_anomaly(plan, policy, self.ledger, covered)
             if anomaly is not None:
                 fired.append((anomaly[0], anomaly[1]))
+
+            quota = _evaluate_quota(plan, policy, self.ledger, now)
+            if quota is not None:
+                fired.append((quota[0], quota[1]))
 
         if not fired:
             return PolicyResult(verdict="allow", reasons=[], requires_approval=False)

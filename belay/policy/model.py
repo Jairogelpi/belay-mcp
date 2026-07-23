@@ -33,11 +33,30 @@ class AnomalyDefaults(_Strict):
     exclude: list[str] = Field(default_factory=list)
 
 
+class QuotaDefaults(_Strict):
+    """Per-identity rolling irreversible-action quota config (plan-v2 E15).
+
+    Unlike `AnomalyDefaults`, this is NOT a zero-config statistically-derived
+    number -- `max_irreversible_actions` is an operator judgment call (see
+    docs/adr/0015-e15-identity-quota.md for the honest caveat). `enabled`
+    defaults to `False`: no default limit is imposed on an identity's
+    irreversible-action volume until an operator explicitly turns it on and
+    picks a number appropriate to their org, unlike E10's anomaly detection
+    which is safe to enable unconditionally.
+    """
+
+    enabled: bool = False
+    window: str = "1d"
+    max_irreversible_actions: int = 20
+    verdict: Verdict = "pause"
+
+
 class Defaults(_Strict):
     irreversible: Verdict = "pause"
     conditional_unmet: Verdict = "pause"
     unknown_effects: Verdict = "pause"
     anomaly: AnomalyDefaults = Field(default_factory=AnomalyDefaults)
+    quota: QuotaDefaults = Field(default_factory=QuotaDefaults)
 
 
 class CapMatch(_Strict):
