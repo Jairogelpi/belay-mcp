@@ -50,6 +50,26 @@ once it reaches 1.0.
   counterfactual <session_id> --at-step <n> --override '<json>' [--json]`.
   `examples/demo_counterfactual.py`,
   `docs/adr/0012-e12-counterfactual-replay.md`.
+- **Cryptographically signed, offline-verifiable evidence (E13, plan-v2
+  §"E13"):** `belay/ledger/signing.py` -- Ed25519 (`cryptography`, no
+  hand-rolled crypto) `SigningKey` persisted to an operator-controlled file
+  (never inside the SQLite ledger). `sign_session` reuses `verify_chain`
+  (E2) for the chain's terminal hash and `belay/canonical.py` for the
+  signed summary, never a second chain-recomputation or canonicalization.
+  `verify_evidence` is a pure function needing only the exported bundle:
+  reports the *precise* failing stage (`chain` / `coherence` / `signature`
+  / `summary_mismatch`), matching `verify_chain`'s existing per-index
+  precision instead of an opaque pass/fail. New CLI: `belay keygen`,
+  `belay verify-export <session_id> --key <path> -o <file>`, `belay
+  verify-evidence <file> [--pubkey <path>]` -- the last needs zero database
+  access, zero network, tested in a directory with no `belay.db` present at
+  all. Covers all four tamper scenarios (payload byte flipped, re-signed
+  with a different key, summary fields edited without re-signing, events
+  appended after signing) plus a Hypothesis property test that any
+  single-byte flip in the embedded events always fails verification.
+  `belay verify` (E2's unsigned path) is completely unaffected.
+  `examples/demo_signed_evidence.py`,
+  `docs/adr/0013-e13-signed-evidence.md`.
 
 ## [0.1.0] - 2026-07-22
 

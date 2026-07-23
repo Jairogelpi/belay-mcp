@@ -61,6 +61,86 @@ def verify(db: str = typer.Argument(..., help="Path to a Belay SQLite ledger fil
         raise typer.Exit(code=1)
 
 
+@app.command("keygen")
+def keygen(
+    path: str = typer.Argument(..., help="Where to write the private Ed25519 signing key (PEM)."),
+) -> None:
+    """Generate an Ed25519 signing key for `verify-export` (spec/plan-v2 E13).
+
+    The private key is written to `path`; a companion `<path>.pub` file
+    holds the public key as hex text, for `verify-evidence --pubkey`.
+    """
+    from belay.ledger.signing import SigningKey
+
+    key = SigningKey.generate()
+    key.save(path)
+    pub_path = f"{path}.pub"
+    Path(pub_path).write_text(key.public_hex() + "\n", encoding="utf-8")
+    typer.echo(f"private key -> {path} (keep this offline and secret)")
+    typer.echo(f"public key  -> {pub_path} ({key.public_hex()})")
+
+
+@app.command("verify-export")
+def verify_export(
+    session_id: str = typer.Argument(..., help="Session to export signed evidence for."),
+    key: str = typer.Option(
+        ..., "--key", help="Path to an Ed25519 private signing key (PEM, `belay keygen`)."
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    out: str = typer.Option(..., "--out", "-o", help="Where to write the signed evidence file."),
+) -> None:
+    """Export a self-contained, offline-verifiable signed evidence bundle (plan-v2 E13)."""
+    from belay.ledger.signing import SigningKey, sign_session
+    from belay.ledger.store import LedgerStore
+
+    db_path = Path(db).resolve()
+    store = LedgerStore(f"sqlite:///{db_path.as_posix()}")
+    events = store.read(session_id)
+    if not events:
+        typer.echo(f"no events found for session {session_id!r} in {db_path}", err=True)
+        raise typer.Exit(code=1)
+
+    signing_key = SigningKey.load(key)
+    bundle = sign_session(events, signing_key)
+    Path(out).write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+    typer.echo(
+        f"signed evidence for session {session_id} ({len(events)} events) -> {out} "
+        f"(public key {bundle.public_key})"
+    )
+
+
+@app.command("verify-evidence")
+def verify_evidence_cmd(
+    file: str = typer.Argument(..., help="Signed evidence file (from `belay verify-export`)."),
+    pubkey: str = typer.Option(
+        "",
+        "--pubkey",
+        help="Path to a trusted public key (hex text, `belay keygen`'s .pub file). "
+        "If omitted, the public key embedded in the file is used -- weaker trust, "
+        "since a tampered file could embed a matching forged key.",
+    ),
+) -> None:
+    """Verify a signed evidence bundle -- needs ONLY this file (+ optional pubkey).
+
+    No database, no network, no live Belay installation required (plan-v2 E13).
+    """
+    from belay.ledger.signing import SignedEvidence, verify_evidence
+
+    bundle = SignedEvidence.model_validate_json(Path(file).read_text(encoding="utf-8"))
+    trusted = Path(pubkey).read_text(encoding="utf-8").strip() if pubkey else None
+    report = verify_evidence(bundle, trusted_public_key_hex=trusted)
+
+    typer.echo(f"session: {bundle.session_id}")
+    typer.echo(f"events: {bundle.event_count}")
+    if report.ok:
+        typer.echo("evidence: VALID (chain, coherence, signature, and summary all check out)")
+    else:
+        typer.echo(f"evidence: INVALID (failed at stage: {report.stage})")
+        for e in report.errors:
+            typer.echo(f"  - {e}")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def wrap(
     server_dir: str = typer.Argument(
