@@ -58,6 +58,7 @@ def test_irreversible_defaults_to_pause() -> None:
 
 
 def test_cap_exceeded_produces_its_own_verdict_and_rule_id() -> None:
+    """@spec("6.2") — every verdict MUST be recorded with the rule ids that fired."""
     policy = PolicyDoc(
         caps=[Cap(match=CapMatch(effect="update", resource="db.*"), max_count=100, over="pause")]
     )
@@ -160,6 +161,15 @@ def test_quiet_hours_does_not_fire_outside_window() -> None:
     assert result.verdict == "allow"
 
 
+def test_unknown_top_level_field_in_policy_doc_is_rejected() -> None:
+    """@spec("14.2") — policies are authority (like contracts): unknown fields MUST be rejected."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PolicyDoc.model_validate({"belay_policy": "0.1", "not_a_real_field": True})
+
+
 def test_unknown_effects_apply_default_verdict() -> None:
     policy = PolicyDoc(defaults=Defaults(unknown_effects="pause"))
     result = PolicyEngine().evaluate(
@@ -173,6 +183,7 @@ def test_unknown_effects_apply_default_verdict() -> None:
 def test_property_unknown_effects_never_resolve_to_allow_when_default_is_pause(
     unknown_count: int,
 ) -> None:
+    """@spec("6.3") — caps MUST be evaluated against the upper bound; unknowns are worst-case."""
     policy = PolicyDoc(defaults=Defaults(unknown_effects="pause"))
     unknown = [{"type": "delete", "resource": f"r{i}"} for i in range(unknown_count)]
     result = PolicyEngine().evaluate(_plan(unknown=unknown), policy)

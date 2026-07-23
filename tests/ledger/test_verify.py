@@ -69,6 +69,7 @@ def test_verify_coherence_ok_for_complete_step() -> None:
 
 
 def test_verify_coherence_flags_committed_without_journal() -> None:
+    """@spec("9.2") — verify MUST recompute the chain and cross-check coherence per step."""
     store = LedgerStore("sqlite:///:memory:")
     store.append("s1", "result_recorded", {}, step_seq=1)
     store.append("s1", "compensation_registered", {}, step_seq=1)

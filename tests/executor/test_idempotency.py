@@ -37,6 +37,7 @@ class _SpyUpstream:
 
 
 async def test_repeating_the_same_idempotency_key_calls_upstream_once() -> None:
+    """@spec("4.5") — same idempotency_key MUST dedupe, not re-call the tool."""
     ledger = LedgerStore()
     idempotency = IdempotencyStore()
     saga = SagaExecutor(ledger=ledger, idempotency=idempotency)

@@ -26,3 +26,5 @@ jobs:
         run: pytest
       - name: Test (full suite, incl. slow)
         run: pytest -m "" --no-cov
+      - name: Spec MUST traceability
+        run: python scripts/traceability.py --check

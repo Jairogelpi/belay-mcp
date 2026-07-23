@@ -38,6 +38,7 @@ calls: list[str] = []
 
 
 async def test_capture_runs_before_the_tool_call_and_snapshot_is_in_the_ledger() -> None:
+    """@spec("4.4.2") — capture MUST execute before the main call within the same step."""
     calls.clear()
     ledger = LedgerStore()
     saga = SagaExecutor(ledger=ledger)
@@ -51,6 +52,7 @@ async def test_capture_runs_before_the_tool_call_and_snapshot_is_in_the_ledger()
 
 
 async def test_non_read_only_capture_contract_is_rejected() -> None:
+    """@spec("4.4.1") — the capture call MUST be read-only."""
     ledger = LedgerStore()
     write_capture_contract = Contract(
         belay_contract="0.1",

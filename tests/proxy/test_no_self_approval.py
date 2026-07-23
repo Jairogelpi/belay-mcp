@@ -52,6 +52,7 @@ class FakeUpstream:
 
 
 async def test_agent_facing_tool_list_never_advertises_an_approval_tool() -> None:
+    """@spec("12.1") — approval surfaces MUST NOT be exposed as tools to the protected agent."""
     upstream = FakeUpstream()
     proxy = BelayProxyServer(
         upstream,  # type: ignore[arg-type]
@@ -74,6 +75,7 @@ async def test_agent_facing_tool_list_never_advertises_an_approval_tool() -> Non
 async def test_calling_any_approval_shaped_tool_name_is_refused_not_approved(
     fake_tool_name: str,
 ) -> None:
+    """@spec("7.2.2") — an agent MUST NOT be able to approve its own actions through any tool."""
     upstream = FakeUpstream()
     proxy = BelayProxyServer(
         upstream,  # type: ignore[arg-type]

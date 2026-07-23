@@ -49,6 +49,7 @@ def test_read_only_hint_with_no_contract_is_allowed_with_implicit_read_effect() 
 
 
 def test_no_contract_and_no_read_only_hint_is_contract_missing() -> None:
+    """@spec("4.6.1") — no contract and not read-only MUST refuse with contract_missing."""
     with pytest.raises(BelayError) as excinfo:
         resolve(
             "fs.write_file",
@@ -84,6 +85,7 @@ def test_existing_contract_governs_regardless_of_hints() -> None:
 
 
 async def test_unsafe_passthrough_call_passes_through_and_every_event_carries_override() -> None:
+    """@spec("4.6.2") — unsafe_passthrough MUST be recorded in every affected ledger event."""
     ledger = LedgerStore()
     session_id = "s_test"
     lifecycle = Lifecycle(
@@ -126,6 +128,7 @@ async def test_unsafe_passthrough_does_not_apply_to_other_tools() -> None:
 
 
 async def test_session_fixes_set_hash_and_later_contract_changes_do_not_apply() -> None:
+    """@spec("4.7") — a session pins the set_hash present at session_started."""
     ledger = LedgerStore()
     session_id = "s_pin"
 
@@ -202,6 +205,7 @@ async def test_default_policy_pauses_irreversible_tools_and_blocks_execution() -
 
 
 async def test_deny_verdict_blocks_execution_and_never_calls_the_executor() -> None:
+    """@spec("3.1") — every numbered stage MUST emit its ledger event, even on denial."""
     ledger = LedgerStore()
     session_id = "s_deny"
     cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")

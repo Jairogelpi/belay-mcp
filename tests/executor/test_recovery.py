@@ -31,6 +31,7 @@ def _simulate_crash_after_calling(
 
 
 async def test_recovery_reconciles_via_idempotency_key() -> None:
+    """@spec("8.1") — recovery MUST reconcile via idempotency key or mark step indeterminate."""
     ledger = LedgerStore()
     idempotency = IdempotencyStore()
     idempotency.begin("k1", "s1", 1)

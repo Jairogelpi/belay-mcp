@@ -44,6 +44,7 @@ def _bulk_delete_contract() -> Contract:
 
 
 async def test_contract_basis_plan_marks_declared_counts_as_estimates() -> None:
+    """@spec("5.3") — contract-basis counts MUST NOT be presented as exact."""
     planner = Planner(clock=FixedClock(datetime(2026, 7, 22, 12, 0, tzinfo=UTC)))
     session = PlanningSession(session_id="s1", contract=_write_contract())
 
@@ -125,6 +126,7 @@ async def test_native_dry_run_returning_none_falls_back_to_contract() -> None:
 
 
 async def test_plan_expiration_rejects_execution_after_ttl() -> None:
+    """@spec("5.4.2") — expired plans MUST be re-planned (plan_expired on stale execution)."""
     clock = FixedClock(datetime(2026, 7, 22, 12, 0, tzinfo=UTC))
     planner = Planner(clock=clock, plan_ttl_seconds=600)
     session = PlanningSession(session_id="s1", contract=_write_contract())
@@ -147,6 +149,7 @@ async def test_plan_execution_within_ttl_is_accepted() -> None:
 
 
 async def test_plan_mismatch_on_non_identical_args() -> None:
+    """@spec("5.4.1") — Belay MUST re-validate byte-identical args before executing a bound plan."""
     clock = FixedClock(datetime(2026, 7, 22, 12, 0, tzinfo=UTC))
     planner = Planner(clock=clock)
     session = PlanningSession(session_id="s1", contract=_write_contract())

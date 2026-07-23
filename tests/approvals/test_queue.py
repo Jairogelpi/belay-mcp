@@ -15,6 +15,7 @@ def _clock(at: datetime | None = None) -> FixedClock:
 
 
 def test_approve_transitions_pending_to_approved() -> None:
+    """@spec("7.2.1") — the approving principal MUST be recorded (approved_by)."""
     queue = ApprovalQueue(clock=_clock())
     item = queue.request("s1", "plan_1", {"tool": "mail.send"})
     approved = queue.approve(item.approval_id, approved_by="jairo")
@@ -53,6 +54,7 @@ def test_transitions_are_unidirectional_rejected_cannot_be_approved_or_rerejecte
 
 
 def test_expired_item_is_never_executable_via_approve() -> None:
+    """@spec("7.1") — an expired approval item MUST NOT be executable."""
     clock = _clock()
     queue = ApprovalQueue(clock=clock)
     item = queue.request("s1", "plan_1", {"tool": "mail.send"}, expiry=timedelta(minutes=1))
@@ -94,7 +96,7 @@ def test_list_and_for_plan_lazily_reflect_expiration() -> None:
 
 
 def test_approval_item_is_bound_to_its_plan_id_and_replanning_invalidates_it() -> None:
-    """spec §12 approver binding: re-planning the same logical call produces
+    """@spec("12.3") spec §12 approver binding: re-planning the same logical call produces
     a new `plan_id`; the old approval item is bound to the old `plan_id` and
     is never surfaced for the new one, even after being approved."""
     queue = ApprovalQueue(clock=_clock())

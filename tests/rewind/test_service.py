@@ -144,6 +144,7 @@ async def test_compensations_run_in_strict_reverse_step_seq_order_as_mini_steps(
 
 
 async def test_dry_run_enumerates_honestly_and_touches_nothing() -> None:
+    """@spec("10.3.1") — rewind result MUST enumerate compensated/skipped/irreversible/indeterm."""
     ledger = LedgerStore()
     store = FakeStore()
     session_id = "s_dry"
@@ -172,6 +173,7 @@ async def test_dry_run_enumerates_honestly_and_touches_nothing() -> None:
 
 
 async def test_new_step_after_fence_raises_session_fenced() -> None:
+    """@spec("10.1") — rewind of a live session MUST first fence the session."""
     ledger = LedgerStore()
     store = FakeStore()
     session_id = "s_fence"
@@ -291,6 +293,7 @@ async def test_skip_and_continue_is_explicit_and_recorded_in_the_ledger() -> Non
 
 
 async def test_verification_is_executed_and_a_failure_does_not_count_as_compensated() -> None:
+    """@spec("10.2") — declared verification blocks MUST be checked and recorded."""
     ledger = LedgerStore()
     store = FakeStore()
     session_id = "s_verify"
@@ -341,6 +344,7 @@ async def test_verification_passing_counts_as_compensated() -> None:
 
 
 async def test_honesty_mixed_reversible_and_irreversible_never_reports_fully_rewound() -> None:
+    """@spec("10.3.2") — MUST NOT report "fully rewound" unless every step compensated+verified."""
     ledger = LedgerStore()
     store = FakeStore()
     session_id = "s_honest"

@@ -7,6 +7,7 @@ from belay.ledger.store import LedgerStore
 
 
 def test_unknown_payload_fields_survive_a_write_read_roundtrip() -> None:
+    """@spec("14.1") — unknown fields MUST be preserved in the ledger (evidence is tolerant)."""
     store = LedgerStore("sqlite:///:memory:")
     store.append("s1", "step_journaled", {"known": 1, "from_the_future": {"nested": True}})
 

@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 
 
 def test_replay_reconstructs_basic_session_state() -> None:
+    """@spec("9.4") — replay MUST reconstruct session state from the ledger alone."""
     store = LedgerStore("sqlite:///:memory:")
     store.append("s1", "session_started", {})
     store.append("s1", "contract_set_pinned", {"set_hash": "sha256:abc"})

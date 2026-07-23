@@ -8,6 +8,7 @@ from belay.ledger.redact import redact
 
 
 def test_redacted_field_never_appears_in_cleartext() -> None:
+    """@spec("9.3") — implementations MUST support field-level redaction at write time."""
     contract = SimpleNamespace(redact=["$args.password"])
     payload = {"args": {"password": "hunter2", "user": "jairo"}}
 

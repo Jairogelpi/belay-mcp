@@ -113,6 +113,7 @@ def test_precedence_and_binds_tighter_than_or() -> None:
     ],
 )
 def test_rejects_out_of_grammar_expressions(text: str) -> None:
+    """@spec("4.3") — implementations MUST reject any construct outside the expression grammar."""
     with pytest.raises(BelayError) as exc_info:
         parse(text)
     assert exc_info.value.code == "expression_invalid"

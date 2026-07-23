@@ -17,6 +17,7 @@ BASE = {
 
 
 def test_reversible_without_undo_is_contract_invalid() -> None:
+    """@spec("4.2.1") — reversible contracts MUST declare an undo block."""
     doc = {**BASE, "reversibility": "reversible"}
     del doc["undo"]
     with pytest.raises(BelayError) as exc_info:
@@ -25,6 +26,7 @@ def test_reversible_without_undo_is_contract_invalid() -> None:
 
 
 def test_irreversible_with_undo_is_invalid() -> None:
+    """@spec("4.2.2") — irreversible contracts MUST NOT declare an undo block."""
     doc = {**BASE, "reversibility": "irreversible"}
     with pytest.raises(BelayError) as exc_info:
         Contract.model_validate(doc)
@@ -39,6 +41,7 @@ def test_irreversible_without_undo_is_valid() -> None:
 
 
 def test_conditional_requires_undo_and_conditions() -> None:
+    """@spec("4.2.3") — conditional contracts MUST include undo and conditions."""
     doc = {**BASE, "reversibility": "conditional"}
     with pytest.raises(BelayError) as exc_info:
         Contract.model_validate(doc)
@@ -81,6 +84,7 @@ def test_reversible_with_undo_is_valid() -> None:
 
 
 def test_unknown_top_level_field_is_rejected() -> None:
+    """@spec("14.2") — unknown fields MUST be rejected in contracts (authority is strict)."""
     doc = {**BASE, "totally_unknown_field": True}
     with pytest.raises(ValidationError):
         Contract.model_validate(doc)
