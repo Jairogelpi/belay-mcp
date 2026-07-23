@@ -109,6 +109,32 @@ once it reaches 1.0.
   Belay can derive from data alone (honest caveat documented in the ADR).
   `reasons` cite the identity, current count, window, and configured max.
   `examples/demo_quota.py`, `docs/adr/0015-e15-identity-quota.md`.
+- **Blast-radius self-explanation returned to the agent (E16, plan-v2
+  §"E16"):** `belay/policy/explain.py::explain(policy_result, plan,
+  contract=None) -> Explanation` -- a pure formatting function, no new
+  computation: every number in its output is traceable back to the real
+  `PolicyResult.reasons` already computed by `PolicyEngine.evaluate`
+  (caps/tools/quiet_hours/irreversible-default from E4, `anomaly` from E10,
+  `quota` from E15). `Explanation` (`verdict`, `headline`, `dimensions`,
+  `suggested_action`) now rides on every governed response the calling
+  agent receives, not just what a human sees via `belay approvals
+  list`/the ledger: `pending_approval` carries it inline,
+  `policy_denied`/`approval_rejected`/`approval_expired` carry it in
+  `BelayError.detail["explanation"]`, and `allow` responses get a minimal
+  empty-dimensions `Explanation` too (for symmetry), folded additively into
+  `CallToolResult.structuredContent` in `belay/proxy/server.py` without
+  touching the upstream's own response shape. `suggested_action` is a
+  deterministic, mechanical suggestion (never guessed) present only when a
+  contract declares a `$args.<path>`-referencing narrowing argument via
+  `conditions` (conditional contracts) or `sql.params` (E11) -- absent
+  otherwise. Disclosure policy: full transparency, applied uniformly across
+  every dimension (documented and justified against spec §12 in the ADR).
+  Hypothesis property test confirms `explain()` never raises and never
+  references a number absent from `reasons`, across real `PolicyResult`s
+  from the real `PolicyEngine.evaluate()`. `examples/demo_self_explain.py`
+  (a scripted agent that reads its own pause's `suggested_action`, narrows,
+  resubmits, and gets `allow` -- zero human approval steps),
+  `docs/adr/0016-e16-blast-radius-self-explanation.md`.
 
 ## [0.1.0] - 2026-07-22
 

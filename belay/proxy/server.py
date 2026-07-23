@@ -77,6 +77,14 @@ class BelayProxyServer:
                     isError=True,
                 )
             if isinstance(result, CallToolResult):
+                # E16: fold the allow-path Explanation into `structuredContent`,
+                # additively -- the upstream's own `content`/other fields are
+                # untouched, existing clients/tests reading them see no change.
+                explanation = self.lifecycle.last_explanation
+                if explanation is not None:
+                    structured = dict(result.structuredContent or {})
+                    structured.setdefault("explanation", explanation)
+                    result = result.model_copy(update={"structuredContent": structured})
                 return result
             # A structured, non-error status payload (spec §7.3
             # `pending_approval`) -- not a raw error, not the upstream's

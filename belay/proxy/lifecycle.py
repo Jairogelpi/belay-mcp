@@ -24,6 +24,7 @@ from belay.ledger.store import LedgerStore
 from belay.planner.model import NativeDryRunCaller, Plan, PlanningSession
 from belay.planner.planner import Planner
 from belay.policy.engine import PolicyEngine
+from belay.policy.explain import explain
 from belay.policy.model import PolicyDoc, PolicyResult, default_policy
 
 
@@ -214,6 +215,16 @@ class Lifecycle:
     approval_stage: ApprovalStage | None = None
     execute_stage: ExecuteStage | None = None
     _step_seq: int = field(default=0, init=False, repr=False)
+    last_explanation: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    """The most recent call's E16 `Explanation`, as a plain dict (or `None`
+    before any policy evaluation has happened, e.g. a `contract_missing`
+    raised before `PolicyEngine.evaluate` runs). `pending_approval`/`deny`
+    responses carry their own copy inline; `allow` responses don't get their
+    raw result shape touched (spec: existing response shapes must not
+    change), so `belay/proxy/server.py` reads this side channel instead to
+    fold a minimal `Explanation` into `CallToolResult.structuredContent` for
+    the allow path too.
+    """
 
     def __post_init__(self) -> None:
         if self.plan_stage is None:
@@ -354,8 +365,16 @@ class Lifecycle:
                 set_hash=self.contract_set.set_hash,
             )
 
+        explanation = explain(policy_result, plan, contract=resolved.contract).model_dump(
+            mode="json"
+        )
+        self.last_explanation = explanation
+
         if policy_result.verdict == "deny":
-            deny_exc = BelayError("policy_denied", {"tool": tool, "reasons": policy_result.reasons})
+            deny_exc = BelayError(
+                "policy_denied",
+                {"tool": tool, "reasons": policy_result.reasons, "explanation": explanation},
+            )
             self.ledger.append(
                 self.session_id,
                 "step_failed",
@@ -372,7 +391,13 @@ class Lifecycle:
         # proceeding to execute (spec §7.3) -- this is the one legitimate
         # early return from `govern_and_execute` that isn't an exception.
         assert self.approval_stage is not None
-        check = self.approval_stage.check(policy_result.verdict, plan, self.session_id, step_seq)
+        try:
+            check = self.approval_stage.check(
+                policy_result.verdict, plan, self.session_id, step_seq
+            )
+        except BelayError as exc:
+            exc.detail.setdefault("explanation", explanation)
+            raise
         if check.created:
             assert check.pending is not None
             self.ledger.append(
@@ -388,6 +413,7 @@ class Lifecycle:
                 "status": "pending_approval",
                 "approval_id": check.pending.approval_id,
                 "poll_after_ms": check.pending.poll_after_ms,
+                "explanation": explanation,
             }
 
         # Stage 5 (spec §3, §8): the real saga step lifecycle (§8.1) --
