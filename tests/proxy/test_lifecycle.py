@@ -1,4 +1,4 @@
-"""Tests for the L1 default rule and session set_hash pinning (spec §3, §4.6, §4.7)."""
+"""Tests for the L1 default rule and session set_hash pinning (spec Â§3, Â§4.6, Â§4.7)."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ async def test_unsafe_passthrough_call_passes_through_and_every_event_carries_ov
         ledger=ledger,
         session_id=session_id,
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     result = await lifecycle.govern_and_execute(
         "fs.delete_file", {"path": "a"}, read_only_hint=False, executor=_noop_executor
@@ -104,7 +104,7 @@ async def test_unsafe_passthrough_call_passes_through_and_every_event_carries_ov
     assert call_events, "expected events for the overridden call"
     # The resolve-side `config_override` event (spec: "MUST be recorded in
     # every affected ledger event") is what carries the override for an
-    # unsafe_passthrough call; the saga step lifecycle events (E6, spec §8.1)
+    # unsafe_passthrough call; the saga step lifecycle events (E6, spec Â§8.1)
     # that follow don't themselves carry the flag, since they are the same
     # journaled/capturing/calling/... events any governed call gets.
     assert any(e.type == "config_override" for e in call_events)
@@ -136,7 +136,7 @@ async def test_session_fixes_set_hash_and_later_contract_changes_do_not_apply() 
         ledger=ledger,
         session_id=session_id,
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     started = ledger.read(session_id)[0]
     assert started.type == "session_started"
@@ -169,7 +169,7 @@ def _irreversible_send_contract() -> Contract:
 
 async def test_default_policy_pauses_irreversible_tools_and_blocks_execution() -> None:
     # E5: PolicyEngine's `pause` now really parks the call in the approval
-    # queue (spec §7) -- the executor is never called and the agent gets a
+    # queue (spec Â§7) -- the executor is never called and the agent gets a
     # structured `pending_approval` result instead.
     ledger = LedgerStore()
     session_id = "s_pause"
@@ -184,7 +184,7 @@ async def test_default_policy_pauses_irreversible_tools_and_blocks_execution() -
     lifecycle = Lifecycle(
         contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     result = await lifecycle.govern_and_execute(
         "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=executor
@@ -222,7 +222,7 @@ async def test_deny_verdict_blocks_execution_and_never_calls_the_executor() -> N
         session_id=session_id,
         policy=policy,
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     with pytest.raises(BelayError) as excinfo:
         await lifecycle.govern_and_execute(
@@ -253,7 +253,7 @@ async def test_irreversible_relaxation_is_recorded_as_config_override() -> None:
         session_id=session_id,
         policy=policy,
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     result = await lifecycle.govern_and_execute(
         "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
@@ -271,14 +271,14 @@ async def test_irreversible_relaxation_is_recorded_as_config_override() -> None:
 
 
 async def test_paused_then_approved_via_queue_lets_execution_continue() -> None:
-    """spec §7 end-to-end: pause -> approve (as the CLI would) -> retried call executes."""
+    """spec Â§7 end-to-end: pause -> approve (as the CLI would) -> retried call executes."""
     ledger = LedgerStore()
     session_id = "s_approve_flow"
     cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
     lifecycle = Lifecycle(
         contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     first = await lifecycle.govern_and_execute(
         "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
@@ -303,7 +303,7 @@ async def test_paused_then_rejected_raises_approval_rejected_with_reason() -> No
     lifecycle = Lifecycle(
         contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
 
     first = await lifecycle.govern_and_execute(
         "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
@@ -319,3 +319,4 @@ async def test_paused_then_rejected_raises_approval_rejected_with_reason() -> No
         )
     assert excinfo.value.code == "approval_rejected"
     assert excinfo.value.detail["reason"] == "not now"
+

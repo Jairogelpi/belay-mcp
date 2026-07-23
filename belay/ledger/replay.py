@@ -22,6 +22,10 @@ class SessionState(BaseModel):
     session_id: str | None = None
     set_hash: str | None = None
     status: str = "open"
+    # E14 (plan-v2): bound once on `session_started`, surfaced here for the
+    # whole session (see `belay/ledger/model.py`'s `Event` docstring).
+    initiated_by: str | None = None
+    on_behalf_of: str | None = None
     steps: dict[int, str] = Field(default_factory=dict)  # step_seq -> last event type
     verdicts: list[dict[str, Any]] = Field(default_factory=list)
     compensations: dict[int, dict[str, Any]] = Field(default_factory=dict)
@@ -39,6 +43,10 @@ def replay(events: list[Event]) -> SessionState:
             state.session_id = ev.session_id
         if ev.type == "session_started":
             state.status = "open"
+            if ev.initiated_by is not None:
+                state.initiated_by = ev.initiated_by
+            if ev.on_behalf_of is not None:
+                state.on_behalf_of = ev.on_behalf_of
         elif ev.type == "contract_set_pinned":
             set_hash = ev.payload.get("set_hash")
             if isinstance(set_hash, str):

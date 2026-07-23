@@ -67,7 +67,7 @@ async def test_list_tools_proxies_upstream_tools() -> None:
         LedgerStore(),
         "s_test",
     )
-    proxy.lifecycle.start_session()
+    proxy.lifecycle.start_session("test-fixture")
 
     async with create_connected_server_and_client_session(proxy.mcp_server) as client:
         result = await client.list_tools()
@@ -82,7 +82,7 @@ async def test_call_tool_read_only_hint_passes_through_with_no_contract() -> Non
         LedgerStore(),
         "s_test",
     )
-    proxy.lifecycle.start_session()
+    proxy.lifecycle.start_session("test-fixture")
 
     async with create_connected_server_and_client_session(proxy.mcp_server) as client:
         result = await client.call_tool("fs.list_files", {})
@@ -98,10 +98,11 @@ async def test_call_tool_without_contract_or_hint_is_refused_as_mcp_error() -> N
         LedgerStore(),
         "s_test",
     )
-    proxy.lifecycle.start_session()
+    proxy.lifecycle.start_session("test-fixture")
 
     async with create_connected_server_and_client_session(proxy.mcp_server) as client:
         result = await client.call_tool("fs.write_file", {"path": "a", "content": "b"})
         assert result.isError
         assert "contract_missing" in result.content[0].text  # type: ignore[union-attr]
         assert upstream.calls == []
+

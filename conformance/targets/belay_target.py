@@ -58,7 +58,7 @@ class BelayConformanceTarget:
             session_id=session_id,
             policy=policy,
         )
-        lifecycle.start_session()
+        lifecycle.start_session("test-fixture")
         self._sessions[session_id] = _Session(lifecycle, executor)
         return session_id
 
@@ -102,3 +102,4 @@ class BelayConformanceTarget:
             approvals=sess.lifecycle.approval_stage.queue,
         )
         return await service.rewind(session_id, sess.executor, dry_run=dry_run, by=by)
+

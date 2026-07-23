@@ -29,6 +29,8 @@ def _row_to_event(row: EventRow) -> Event:
         set_hash=row.set_hash,
         prev_hash=row.prev_hash,
         hash=row.hash,
+        initiated_by=row.initiated_by,
+        on_behalf_of=row.on_behalf_of,
     )
 
 
@@ -62,8 +64,16 @@ class LedgerStore:
         payload: dict[str, Any],
         step_seq: int | None = None,
         set_hash: str | None = None,
+        initiated_by: str | None = None,
+        on_behalf_of: str | None = None,
     ) -> Event:
-        """Append one event, computing `prev_hash`/`hash` (spec §9.1, §9.2)."""
+        """Append one event, computing `prev_hash`/`hash` (spec §9.1, §9.2).
+
+        `initiated_by`/`on_behalf_of` (E14, plan-v2) are normally only passed
+        by `Lifecycle.start_session()` for the `session_started` event -- see
+        `belay/ledger/model.py`'s `Event` docstring for why this isn't
+        repeated on every event.
+        """
         with DBSession(self._engine) as db:
             last = db.scalars(
                 select(EventRow)
@@ -83,6 +93,8 @@ class LedgerStore:
                 set_hash=set_hash,
                 prev_hash=prev_hash,
                 hash="",
+                initiated_by=initiated_by,
+                on_behalf_of=on_behalf_of,
             )
             event.hash = compute_hash(event)
 
@@ -96,6 +108,8 @@ class LedgerStore:
                 set_hash=event.set_hash,
                 prev_hash=event.prev_hash,
                 hash=event.hash,
+                initiated_by=event.initiated_by,
+                on_behalf_of=event.on_behalf_of,
             )
             db.add(row)
             db.commit()

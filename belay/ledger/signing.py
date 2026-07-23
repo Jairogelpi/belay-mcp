@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from belay.canonical import canonical_bytes
 from belay.ledger.model import Event, VerifyReport
@@ -95,6 +95,11 @@ def _signed_summary(bundle_like: Any) -> dict[str, Any]:
         "chain_head_hash": bundle_like.chain_head_hash,
         "event_count": bundle_like.event_count,
         "signed_at": bundle_like.signed_at,
+        # E14 (plan-v2): identity attribution is part of the signed summary
+        # so tampering with who initiated a session is detected exactly like
+        # tampering with the chain/event_count.
+        "initiated_by": bundle_like.initiated_by,
+        "on_behalf_of": bundle_like.on_behalf_of,
     }
 
 
@@ -109,6 +114,14 @@ class SignedEvidence(BaseModel):
     embedded public key to match a forged signature.
     """
 
+    # Unlike `Event` (spec §14: ledger evidence is deliberately tolerant of
+    # unknown fields), the bundle envelope itself is strict: a byte-flip that
+    # renames a field (e.g. `on_behalf_of` -> `oX_behalf_of`) must be a
+    # visible parse failure, not a silently-dropped field that falls back to
+    # its default and slips past verification (E14 tightened this after
+    # finding exactly that gap via the Hypothesis property test below).
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "1"
     session_id: str
     set_hash: str | None = None
@@ -118,6 +131,11 @@ class SignedEvidence(BaseModel):
     public_key: str
     signature: str
     events: list[Event]
+    # E14 (plan-v2): the session's initiator, derived from its
+    # `session_started` event and covered by the signature (see
+    # `_signed_summary`).
+    initiated_by: str | None = None
+    on_behalf_of: str | None = None
 
 
 class VerificationResult(BaseModel):
@@ -156,12 +174,15 @@ def sign_session(events: list[Event], key: SigningKey) -> SignedEvidence:
     set_hash = next((e.set_hash for e in reversed(events) if e.set_hash is not None), None)
     chain_head_hash = events[-1].hash
     signed_at = datetime.now(UTC).isoformat()
+    initiated_by, on_behalf_of = _identity_from_events(events)
     summary: dict[str, Any] = {
         "session_id": session_id,
         "set_hash": set_hash,
         "chain_head_hash": chain_head_hash,
         "event_count": len(events),
         "signed_at": signed_at,
+        "initiated_by": initiated_by,
+        "on_behalf_of": on_behalf_of,
     }
     signature = key.sign(canonical_bytes(summary)).hex()
 
@@ -174,7 +195,17 @@ def sign_session(events: list[Event], key: SigningKey) -> SignedEvidence:
         public_key=key.public_hex(),
         signature=signature,
         events=events,
+        initiated_by=initiated_by,
+        on_behalf_of=on_behalf_of,
     )
+
+
+def _identity_from_events(events: list[Event]) -> tuple[str | None, str | None]:
+    """`initiated_by`/`on_behalf_of` are bound once, on `session_started` (E14)."""
+    started = next((e for e in events if e.type == "session_started"), None)
+    if started is None:
+        return None, None
+    return started.initiated_by, started.on_behalf_of
 
 
 def verify_evidence(
@@ -227,6 +258,7 @@ def verify_evidence(
 
     actual_event_count = len(bundle.events)
     actual_chain_head = bundle.events[-1].hash if bundle.events else None
+    actual_initiated_by, actual_on_behalf_of = _identity_from_events(bundle.events)
     mismatches: list[str] = []
     if actual_event_count != bundle.event_count:
         mismatches.append(
@@ -237,6 +269,16 @@ def verify_evidence(
         mismatches.append(
             f"chain_head_hash mismatch: signed summary says {bundle.chain_head_hash}, "
             f"recomputed chain head is {actual_chain_head}"
+        )
+    if actual_initiated_by != bundle.initiated_by:
+        mismatches.append(
+            f"initiated_by mismatch: signed summary says {bundle.initiated_by!r}, "
+            f"embedded session_started event says {actual_initiated_by!r}"
+        )
+    if actual_on_behalf_of != bundle.on_behalf_of:
+        mismatches.append(
+            f"on_behalf_of mismatch: signed summary says {bundle.on_behalf_of!r}, "
+            f"embedded session_started event says {actual_on_behalf_of!r}"
         )
     if mismatches:
         return VerificationResult(

@@ -1,4 +1,4 @@
-"""No-self-approval (spec §12): the agent has no approval-surface at all.
+"""No-self-approval (spec Â§12): the agent has no approval-surface at all.
 
 Belay MUST NOT expose any approval-related route to the protected agent.
 This is enforced architecturally, not just by convention: `BelayProxyServer`
@@ -59,7 +59,7 @@ async def test_agent_facing_tool_list_never_advertises_an_approval_tool() -> Non
         LedgerStore(),
         "s_test",
     )
-    proxy.lifecycle.start_session()
+    proxy.lifecycle.start_session("test-fixture")
 
     async with create_connected_server_and_client_session(proxy.mcp_server) as client:
         result = await client.list_tools()
@@ -81,12 +81,12 @@ async def test_calling_any_approval_shaped_tool_name_is_refused_not_approved(
         LedgerStore(),
         "s_test",
     )
-    proxy.lifecycle.start_session()
+    proxy.lifecycle.start_session("test-fixture")
 
     async with create_connected_server_and_client_session(proxy.mcp_server) as client:
         result = await client.call_tool(fake_tool_name, {"approval_id": "ap_whatever"})
         # There is no approval surface to call: an undeclared, non-read-only
-        # tool is refused per the default rule (spec §4.6) -- it never
+        # tool is refused per the default rule (spec Â§4.6) -- it never
         # reaches anything that could resolve or approve anything.
         assert result.isError
         assert "contract_missing" in result.content[0].text  # type: ignore[union-attr]
@@ -99,3 +99,4 @@ def test_approval_stage_has_no_approve_or_reject_call_site() -> None:
     source = inspect.getsource(lifecycle_module.ApprovalStage)
     assert ".approve(" not in source
     assert ".reject(" not in source
+

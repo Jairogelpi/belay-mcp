@@ -56,6 +56,14 @@ class Event(BaseModel):
     set_hash: str | None = None
     prev_hash: str
     hash: str
+    # E14 (plan-v2): the externally-asserted identity that started this
+    # session (an API key label, SSO claim, service account name -- Belay
+    # trusts whatever its deployment's own front door already asserted, see
+    # ADR 0014). Bound once on `session_started` rather than repeated on
+    # every event of the session -- `belay.ledger.replay.SessionState`
+    # surfaces it session-wide, avoiding redundant per-event storage.
+    initiated_by: str | None = None
+    on_behalf_of: str | None = None
 
     def unsigned_dict(self) -> dict[str, Any]:
         """Envelope fields the hash is computed over: everything but `hash` itself."""

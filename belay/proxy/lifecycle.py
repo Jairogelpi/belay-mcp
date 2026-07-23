@@ -234,13 +234,24 @@ class Lifecycle:
                 SagaExecutor(ledger=self.ledger, contract_set=self.contract_set)
             )
 
-    def start_session(self) -> None:
-        """Emit `session_started` / `contract_set_pinned`, fixing this session's `set_hash`."""
+    def start_session(self, initiated_by: str, on_behalf_of: str | None = None) -> None:
+        """Emit `session_started` / `contract_set_pinned`, fixing this session's `set_hash`.
+
+        `initiated_by` is required (E14, plan-v2): an unattributed session
+        must be a deliberate, loud choice by the caller (e.g. an explicit
+        `"unknown"` string), never a silently-defaulted blank -- omitting
+        the argument is a `TypeError`, not a swallowed default.
+        `on_behalf_of` is optional: the identity that directly launched this
+        session (e.g. a scheduler service account) may differ from the
+        accountable human it acts for.
+        """
         self.ledger.append(
             self.session_id,
             "session_started",
             {"tool_count": len(self.contract_set.contracts)},
             set_hash=self.contract_set.set_hash,
+            initiated_by=initiated_by,
+            on_behalf_of=on_behalf_of,
         )
         self.ledger.append(
             self.session_id,

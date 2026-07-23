@@ -70,6 +70,29 @@ once it reaches 1.0.
   `belay verify` (E2's unsigned path) is completely unaffected.
   `examples/demo_signed_evidence.py`,
   `docs/adr/0013-e13-signed-evidence.md`.
+- **Identity attribution: who told the agent to do this (E14, plan-v2
+  §"E14"):** `initiated_by`/`on_behalf_of` promoted to named, typed
+  `belay/ledger/model.py::Event` fields (`initiated_by` required-in-spirit,
+  `on_behalf_of` optional) -- an externally-asserted identity Belay trusts
+  from its deployment's own front door, never a login system Belay builds
+  itself (scope boundary, see the ADR). `Lifecycle.start_session` now
+  requires `initiated_by` (an accidental omission is a loud `TypeError`,
+  never a silently-blank session); bound once on `session_started` rather
+  than repeated per event, surfaced session-wide via `belay/ledger/replay.py`'s
+  `SessionState`. New CLI: `belay wrap`/`belay run --initiated-by
+  <identity> [--on-behalf-of <identity>]`; `belay verify`/`belay
+  verify-evidence` (E13) both surface `initiated_by`/`on_behalf_of` in their
+  reports. E13 integration: `sign_session`'s signed summary now covers
+  `initiated_by`/`on_behalf_of`, so tampering with who initiated a session
+  is detected exactly like tampering with the chain/`event_count`
+  (`SignedEvidence` also tightened to `extra="forbid"`, closing a gap the
+  new Hypothesis property test found: silently renaming a bundle field used
+  to fall back to its default instead of failing to parse). Regression: all
+  7 pre-existing `start_session()` call sites across E3-E13 test/conformance
+  fixtures updated to pass an explicit `"test-fixture"` identity -- no test
+  was left silently broken by the new required parameter.
+  `examples/demo_attribution.py`,
+  `docs/adr/0014-e14-identity-attribution.md`.
 
 ## [0.1.0] - 2026-07-22
 

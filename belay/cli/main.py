@@ -47,7 +47,12 @@ def verify(db: str = typer.Argument(..., help="Path to a Belay SQLite ledger fil
     chain_report = verify_chain(events)
     coherence_report = verify_coherence(events)
 
+    started = next((e for e in events if e.type == "session_started"), None)
     typer.echo(f"events: {len(events)}")
+    if started is not None:
+        typer.echo(f"initiated_by: {started.initiated_by}")
+        if started.on_behalf_of is not None:
+            typer.echo(f"on_behalf_of: {started.on_behalf_of}")
     if chain_report.ok:
         typer.echo("chain: OK")
     else:
@@ -132,6 +137,9 @@ def verify_evidence_cmd(
 
     typer.echo(f"session: {bundle.session_id}")
     typer.echo(f"events: {bundle.event_count}")
+    typer.echo(f"initiated_by: {bundle.initiated_by}")
+    if bundle.on_behalf_of is not None:
+        typer.echo(f"on_behalf_of: {bundle.on_behalf_of}")
     if report.ok:
         typer.echo("evidence: VALID (chain, coherence, signature, and summary all check out)")
     else:
@@ -155,6 +163,17 @@ def wrap(
         help="Comma-separated tool names to allow through with no contract (spec §4.6).",
     ),
     db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    initiated_by: str = typer.Option(
+        "unknown",
+        "--initiated-by",
+        help="Default identity (E14) that started sessions of this wrapped server. "
+        "Never silently blank -- an unattributed session must say so explicitly.",
+    ),
+    on_behalf_of: str = typer.Option(
+        "",
+        "--on-behalf-of",
+        help="Optional: the accountable identity this default initiator acts for (E14).",
+    ),
     out: str = typer.Option(
         "belay.wrap.json", "--out", "-o", help="Where to write the wrap config."
     ),
@@ -179,6 +198,8 @@ def wrap(
         contracts=[str(Path(c).resolve()) for c in contracts],
         unsafe_passthrough=tools,
         db=db,
+        initiated_by=initiated_by,
+        on_behalf_of=on_behalf_of or None,
     )
     config.save(out)
     typer.echo(f"wrote {out}")
@@ -191,6 +212,17 @@ def run(
         "",
         "--policy",
         help="Policy document path (spec §6.1); default is the out-of-the-box policy.",
+    ),
+    initiated_by: str = typer.Option(
+        "",
+        "--initiated-by",
+        help="Identity (E14) that started this session. Overrides `belay wrap`'s default; "
+        "if neither is given, falls back to the loud explicit \"unknown\".",
+    ),
+    on_behalf_of: str = typer.Option(
+        "",
+        "--on-behalf-of",
+        help="Optional: the accountable identity this initiator acts for (E14).",
     ),
 ) -> None:
     """Start the Belay MCP proxy over stdio (spec §3, Appendix C)."""
@@ -210,6 +242,8 @@ def run(
     policy_doc = load_policy(policy) if policy else default_policy()
     ledger = LedgerStore(f"sqlite:///{Path(wrap_config.db).resolve().as_posix()}")
     session_id = f"s_{uuid.uuid4().hex[:12]}"
+    effective_initiated_by = initiated_by or wrap_config.initiated_by or "unknown"
+    effective_on_behalf_of = on_behalf_of or wrap_config.on_behalf_of or None
 
     async def _main() -> None:
         async with connect_stdio(
@@ -223,7 +257,7 @@ def run(
                 unsafe_passthrough_tools=frozenset(wrap_config.unsafe_passthrough),
                 policy=policy_doc,
             )
-            proxy.lifecycle.start_session()
+            proxy.lifecycle.start_session(effective_initiated_by, effective_on_behalf_of)
             await proxy.run_stdio()
 
     anyio.run(_main)

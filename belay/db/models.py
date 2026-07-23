@@ -34,6 +34,10 @@ class EventRow(Base):
     set_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prev_hash: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
+    # E14 (plan-v2): bound once on `session_started`, null on every other
+    # event of the session (see belay/ledger/model.py's Event docstring).
+    initiated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    on_behalf_of: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class ApprovalRow(Base):

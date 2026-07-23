@@ -30,6 +30,10 @@ class WrapConfig(BaseModel):
     contracts: list[str]
     unsafe_passthrough: list[str] = []
     db: str = "belay.db"
+    # E14 (plan-v2): default identity for sessions of this wrapped server;
+    # `belay run --initiated-by`/`--on-behalf-of` override it per-run.
+    initiated_by: str = "unknown"
+    on_behalf_of: str | None = None
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(self.model_dump_json(indent=2) + "\n", encoding="utf-8")

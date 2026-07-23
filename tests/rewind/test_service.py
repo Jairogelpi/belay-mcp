@@ -1,6 +1,6 @@
-"""RewindService (spec §10): order, dry-run honesty, fencing, halt/skip,
-verification accounting, the §10.3 honesty rule, and compensations routed
-through the policy engine (spec §12)."""
+"""RewindService (spec Â§10): order, dry-run honesty, fencing, halt/skip,
+verification accounting, the Â§10.3 honesty rule, and compensations routed
+through the policy engine (spec Â§12)."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def _send_contract() -> Contract:
 def _delete_contract() -> Contract:
     # Only used by `RewindService._compensation_plan` to look up `obj.delete`'s
     # own declared effects (for the cap check) -- it is never itself routed
-    # through the lifecycle, so it doesn't need (and per spec §4.2 must not
+    # through the lifecycle, so it doesn't need (and per spec Â§4.2 must not
     # declare) an `undo` of its own.
     return Contract(
         belay_contract="0.1",
@@ -179,7 +179,7 @@ async def test_new_step_after_fence_raises_session_fenced() -> None:
     lifecycle = Lifecycle(
         contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
     await lifecycle.govern_and_execute(
         "obj.create", {"id": "a"}, read_only_hint=False, executor=store.executor
     )
@@ -207,7 +207,7 @@ async def test_fencing_race_fence_wins_over_a_step_racing_to_start() -> None:
     lifecycle = Lifecycle(
         contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
     )
-    lifecycle.start_session()
+    lifecycle.start_session("test-fixture")
     service = RewindService(ledger=ledger, contract_set=cs)
 
     results: list[str] = []
@@ -337,7 +337,7 @@ async def test_verification_passing_counts_as_compensated() -> None:
     assert report.fully_rewound is True
 
 
-# --- honesty (§10.3): never "fully rewound" with irreversible steps remaining --
+# --- honesty (Â§10.3): never "fully rewound" with irreversible steps remaining --
 
 
 async def test_honesty_mixed_reversible_and_irreversible_never_reports_fully_rewound() -> None:
@@ -355,11 +355,11 @@ async def test_honesty_mixed_reversible_and_irreversible_never_reports_fully_rew
     assert statuses[3] == "compensated"
     assert statuses[2] == "skipped"
     # ...but the session is NOT fully rewound because step 2 is irreversible
-    # and remains in scope. This is the honesty property (spec §10.3).
+    # and remains in scope. This is the honesty property (spec Â§10.3).
     assert report.fully_rewound is False
 
 
-# --- compensations pass through the policy engine (spec §12) -------------------
+# --- compensations pass through the policy engine (spec Â§12) -------------------
 
 
 async def test_compensation_over_a_cap_pauses_like_a_forward_action() -> None:
@@ -393,3 +393,4 @@ async def test_compensation_over_a_cap_pauses_like_a_forward_action() -> None:
     assert report2.outcomes[0].status == "compensated"
     assert "a" not in store.records
     assert report2.fully_rewound is True
+
