@@ -378,6 +378,65 @@ async def test_end_to_end_nth_bulk_action_paused_purely_by_quota_no_cap() -> Non
     assert any(r.startswith("quota:") for r in last_eval.payload["reasons"])
 
 
+# -- 8. regression: approved retry re-plans under a new step_seq, must still count --
+
+
+@pytest.mark.anyio
+async def test_approved_retry_under_new_step_seq_still_counts_toward_quota() -> None:
+    """The agent's paused call gets `step_seq=1`; after a human approves it, the
+    agent's retry is a brand-new `govern_and_execute` call that re-plans and
+    re-evaluates policy under `step_seq=2` (only `ApprovalStage.check` -- keyed
+    by `plan_id` -- lets it proceed). `QuotaTracker` must follow that same
+    `plan_id` link, not assume the approval and the execution share a `step_seq`."""
+    from belay.approvals.queue import ApprovalQueue
+
+    contract = ContractModel(
+        belay_contract="0.1",
+        tool="mail.send",
+        reversibility="irreversible",
+        effects=[Effect(type="send", resource="email.message", count="1")],
+    )
+    cs = ContractSet(contracts={"mail.send": contract}, set_hash="sha256:x")
+    ledger = LedgerStore()
+    policy = PolicyDoc(defaults=Defaults(quota=QuotaDefaults(enabled=True, max_irreversible_actions=99)))
+    queue = ApprovalQueue(engine=ledger.engine)
+    lifecycle = Lifecycle(
+        contract_set=cs,
+        unsafe_passthrough_tools=frozenset(),
+        ledger=ledger,
+        session_id="s_retry",
+        policy=policy,
+        approval_stage=None,
+    )
+    lifecycle.approval_stage.queue = queue  # type: ignore[union-attr]
+    lifecycle.start_session("agent-bot")
+
+    async def executor(tool: str, args: dict) -> dict:
+        return {"ok": True}
+
+    args = {"to": "user@example.com"}
+    first = await lifecycle.govern_and_execute(
+        "mail.send", args, read_only_hint=False, executor=executor
+    )
+    assert first["status"] == "pending_approval"
+
+    item = queue.approve(first["approval_id"], approved_by="human")
+    ledger.append(
+        item.session_id,
+        "approval_resolved",
+        {"approval_id": item.approval_id, "plan_id": item.plan_id, "state": "approved"},
+        step_seq=item.step_seq,
+    )
+
+    second = await lifecycle.govern_and_execute(
+        "mail.send", args, read_only_hint=False, executor=executor
+    )
+    assert "status" not in second or second["status"] != "pending_approval"
+
+    tracker = QuotaTracker(ledger)
+    assert tracker.count("agent-bot", now=datetime.now(UTC), window=timedelta(days=1)) == 1
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"

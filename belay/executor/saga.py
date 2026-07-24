@@ -36,6 +36,7 @@ from belay.contracts.expressions import Scope, evaluate, parse
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
 from belay.executor.idempotency import IdempotencyStore
+from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
 
 Executor = Callable[[str, dict[str, Any]], Awaitable[Any]]
@@ -163,12 +164,15 @@ class SagaExecutor:
             self.ledger.append(
                 session_id,
                 "step_journaled",
-                {
-                    "tool": tool,
-                    "args": args,
-                    "contract": contract.tool if contract is not None else None,
-                    "reversibility": contract.reversibility if contract is not None else None,
-                },
+                redact(
+                    {
+                        "tool": tool,
+                        "args": args,
+                        "contract": contract.tool if contract is not None else None,
+                        "reversibility": contract.reversibility if contract is not None else None,
+                    },
+                    contract,
+                ),
                 step_seq=step_seq,
                 set_hash=set_hash,
             )
@@ -197,7 +201,9 @@ class SagaExecutor:
             self.ledger.append(
                 session_id,
                 "tool_called",
-                {"tool": tool, "args": args, "idempotency_key": idempotency_key},
+                redact(
+                    {"tool": tool, "args": args, "idempotency_key": idempotency_key}, contract
+                ),
                 step_seq=step_seq,
                 set_hash=set_hash,
             )
@@ -217,7 +223,7 @@ class SagaExecutor:
             self.ledger.append(
                 session_id,
                 "result_recorded",
-                {"tool": tool, "result": scope["result"]},
+                redact({"tool": tool, "result": scope["result"]}, contract),
                 step_seq=step_seq,
                 set_hash=set_hash,
             )

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "belay-mcp"
-version = "0.1.0.dev0"
+version = "0.2.0a1"
 description = "An MCP proxy giving AI agents safe, reversible tool execution: contracts, dry-run planning, policy, approvals, saga execution, and rewind."
 readme = "README.md"
 license = "MIT"
@@ -27,11 +27,12 @@ dependencies = [
     "typer>=0.12",
     "pyyaml>=6.0",
     "cryptography>=42.0",
+    "pytest>=8.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/belay-mcp/belay"
-Specification = "https://github.com/belay-mcp/belay/blob/main/docs/spec.md"
+Homepage = "https://github.com/Jairogelpi/belay-mcp"
+Specification = "https://github.com/Jairogelpi/belay-mcp/blob/main/docs/spec.md"
 
 [project.scripts]
 belay = "belay.cli.main:main"
@@ -39,7 +40,6 @@ belay-conformance = "conformance.cli:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
     "pytest-cov>=5.0",
     "pytest-benchmark>=4.0",
     "hypothesis>=6.100",
@@ -51,6 +51,13 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["belay", "conformance"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# The conformance suite locates fixtures via `Path(__file__).parents[2] /
+# "examples"` (repo-root-relative in dev) -- shipping `examples/` as a
+# top-level sibling of `belay/`/`conformance/` in the wheel keeps that
+# same relative path valid for an installed `belay-conformance` too.
+"examples" = "examples"
 
 [tool.ruff]
 target-version = "py312"

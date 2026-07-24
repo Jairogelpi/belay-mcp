@@ -20,6 +20,7 @@ from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
 from belay.executor.saga import SagaExecutor
+from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
 from belay.planner.model import NativeDryRunCaller, Plan, PlanningSession
 from belay.planner.planner import Planner
@@ -302,7 +303,15 @@ class Lifecycle:
             self.ledger.append(
                 self.session_id,
                 "step_failed",
-                {"tool": tool, "args": args, "error": exc.to_dict(), "config_override": unsafe},
+                redact(
+                    {
+                        "tool": tool,
+                        "args": args,
+                        "error": exc.to_dict(),
+                        "config_override": unsafe,
+                    },
+                    self.contract_set.resolve(tool),
+                ),
                 step_seq=step_seq,
                 set_hash=self.contract_set.set_hash,
             )
@@ -378,7 +387,10 @@ class Lifecycle:
             self.ledger.append(
                 self.session_id,
                 "step_failed",
-                {"tool": tool, "args": args, "error": deny_exc.to_dict()},
+                redact(
+                    {"tool": tool, "args": args, "error": deny_exc.to_dict()},
+                    resolved.contract,
+                ),
                 step_seq=step_seq,
                 set_hash=self.contract_set.set_hash,
             )

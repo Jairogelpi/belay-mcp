@@ -64,25 +64,37 @@ def _count_session(events: list[Event], *, cutoff: datetime, now: datetime) -> i
     reversibility: dict[int, str] = {}
     verdict: dict[int, str] = {}
     at: dict[int, datetime] = {}
-    approved: dict[int, bool] = {}
+    plan_id_of: dict[int, str] = {}
     committed: set[int] = set()
+    # Keyed by `plan_id`, not `step_seq`: a `pause`d call's retry re-plans
+    # under a *new* `step_seq` once approved (spec §7 -- `ApprovalStage` is
+    # itself bound to `plan_id` for the same reason, see its docstring), so
+    # matching the approval back to the step that actually executed only
+    # works through the `plan_id` both share.
+    approved_plan_ids: set[str] = set()
 
     for event in events:
         step = event.step_seq
+        if event.type == "approval_resolved":
+            if event.payload.get("state") == "approved":
+                plan_id = event.payload.get("plan_id")
+                if isinstance(plan_id, str):
+                    approved_plan_ids.add(plan_id)
+            continue
         if step is None:
             continue
         if event.type == "plan_created":
             value = event.payload.get("reversibility")
             if isinstance(value, str):
                 reversibility[step] = value
+            plan_id = event.payload.get("plan_id")
+            if isinstance(plan_id, str):
+                plan_id_of[step] = plan_id
         elif event.type == "policy_evaluated":
             v = event.payload.get("verdict")
             if isinstance(v, str):
                 verdict[step] = v
             at[step] = datetime.fromisoformat(event.at)
-        elif event.type == "approval_resolved":
-            if event.payload.get("state") == "approved":
-                approved[step] = True
         elif event.type == "step_committed":
             committed.add(step)
 
@@ -94,7 +106,10 @@ def _count_session(events: list[Event], *, cutoff: datetime, now: datetime) -> i
         if step_verdict == "allow":
             executed = step in committed
         elif step_verdict == "pause":
-            executed = approved.get(step, False) and step in committed
+            plan_id = plan_id_of.get(step)
+            executed = (
+                plan_id is not None and plan_id in approved_plan_ids and step in committed
+            )
         else:  # "deny" or unknown -- never counts
             executed = False
         if not executed:

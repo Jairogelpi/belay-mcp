@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,6 +52,15 @@ class LedgerStore:
     def __init__(self, db_url: str = "sqlite:///:memory:", *, engine: Engine | None = None) -> None:
         self._engine = engine if engine is not None else create_engine(db_url, future=True)
         Base.metadata.create_all(self._engine)
+        # ponytail: process-local lock per session, not a DB-level lock —
+        # fine for single-process `belay run`; multi-process writers to the
+        # same SQLite file would need a real advisory/row lock instead.
+        self._locks_guard = threading.Lock()
+        self._session_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+    def _lock_for(self, session_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._session_locks[session_id]
 
     @property
     def engine(self) -> Engine:
@@ -74,7 +85,7 @@ class LedgerStore:
         `belay/ledger/model.py`'s `Event` docstring for why this isn't
         repeated on every event.
         """
-        with DBSession(self._engine) as db:
+        with self._lock_for(session_id), DBSession(self._engine) as db:
             last = db.scalars(
                 select(EventRow)
                 .where(EventRow.session_id == session_id)

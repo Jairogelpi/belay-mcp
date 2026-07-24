@@ -28,3 +28,26 @@ jobs:
         run: pytest -m "" --no-cov
       - name: Spec MUST traceability
         run: python scripts/traceability.py --check
+
+  wheel-smoke:
+    # Editable installs (`pip install -e .`) hide packaging bugs: missing
+    # package-data, wrong deps. This installs ONLY the built wheel in a
+    # throwaway venv and runs the real quickstart against it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+      - name: Install wheel only (no repo, no dev extras)
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install dist/*.whl
+      - name: Quickstart against the installed wheel
+        run: |
+          cd /tmp
+          /tmp/wheel-venv/bin/belay-conformance run --target belay --level 3
