@@ -58,6 +58,7 @@ from belay.canonical import canonical_bytes, sha256_hex
 from belay.contracts.expressions import evaluate, parse
 from belay.contracts.model import Contract, ContractSet
 from belay.ledger.model import Event
+from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
 from belay.planner.model import EffectEstimate, Plan
 from belay.policy.engine import PolicyEngine
@@ -65,7 +66,7 @@ from belay.policy.model import PolicyDoc, default_policy
 
 Executor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
-StepStatus = Literal["reversible", "irreversible", "conditional_unmet", "indeterminate"]
+StepStatus = Literal["reversible", "irreversible", "conditional_unmet", "indeterminate", "no_op"]
 OutcomeStatus = Literal[
     "compensated", "verification_failed", "compensation_failed", "skipped", "paused", "denied"
 ]
@@ -160,6 +161,10 @@ class RewindPlan:
     def indeterminate(self) -> list[RewindStepPlan]:
         return [s for s in self.steps if s.status == "indeterminate"]
 
+    @property
+    def no_op(self) -> list[RewindStepPlan]:
+        return [s for s in self.steps if s.status == "no_op"]
+
 
 @dataclass(frozen=True)
 class CompensationOutcome:
@@ -188,29 +193,38 @@ class RewindReport:
 
     @property
     def fully_rewound(self) -> bool:
-        """Spec §10.3: never true while any in-scope step wasn't compensated+verified."""
+        """Spec §10.3: never true while any in-scope step wasn't compensated+verified.
+
+        `no_op` steps (a contract-less `read_only_hint` call, spec §4.6) never
+        changed anything, so they don't count against this -- only genuinely
+        `irreversible`/`conditional_unmet`/`indeterminate` steps do.
+        """
         if self.dry_run:
             return False
-        if any(s.status != "reversible" for s in self.plan.steps):
+        affected = [s for s in self.plan.steps if s.status != "no_op"]
+        if any(s.status != "reversible" for s in affected):
             return False
         ok = {o.step_seq for o in self.outcomes if o.status == "compensated"}
-        return all(s.step_seq in ok for s in self.plan.steps)
+        return all(s.step_seq in ok for s in affected)
 
     @property
     def verified_result(self) -> RewindResult | None:
         """Verified Rewind's honest session-level claim (see module docstring).
 
         `None` for a `dry_run` -- nothing executed, so there is no claim to make
-        about real-world state yet, only a plan.
+        about real-world state yet, only a plan. `no_op` steps are excluded from
+        the accounting entirely -- a read never affected anything, so it has
+        nothing to be `restored`/`compensated` about.
         """
         if self.dry_run:
             return None
-        if not self.plan.steps:
+        affected = [s for s in self.plan.steps if s.status != "no_op"]
+        if not affected:
             return "restored"  # nothing was in scope: vacuously fully restored
 
         succeeded_by_step = {o.step_seq: o.result for o in self.outcomes if o.result is not None}
         n_succeeded = len(succeeded_by_step)
-        n_total = len(self.plan.steps)
+        n_total = len(affected)
 
         if n_succeeded == 0:
             return "impossible"
@@ -227,6 +241,7 @@ async def compensate_one(
     step_seq: int,
     comp: dict[str, Any],
     executor: Executor,
+    contract: Contract | None = None,
 ) -> dict[str, Any] | None:
     """Execute one materialized compensation as its own mini-step (spec §10.2).
 
@@ -234,6 +249,12 @@ async def compensate_one(
     -- shared by `RewindService.rewind()` and `belay.executor.saga.SagaExecutor
     .compensate` (E6's auto-unwind), so there is exactly one compensation
     code path rather than two copies of the same ledger bookkeeping.
+
+    `contract` is the *original* forward call's contract: its `redact` paths
+    (spec §9.3) apply here too -- a compensation's `args` is materialized from
+    the same `$args`/`$state` scope the forward call was, so anything
+    sensitive there (a password used to undo an auth grant, say) is just as
+    sensitive echoed back in the undo call.
     """
     if not comp.get("reversible"):
         return None
@@ -243,19 +264,22 @@ async def compensate_one(
         ledger.append(
             session_id,
             "compensation_failed",
-            {"step_seq": step_seq, "tool": comp["tool"], "error": str(exc)},
+            redact({"step_seq": step_seq, "tool": comp["tool"], "error": str(exc)}, contract),
             step_seq=step_seq,
         )
         raise
     ledger.append(
         session_id,
         "compensation_executed",
-        {
-            "step_seq": step_seq,
-            "tool": comp["tool"],
-            "args": comp["args"],
-            "result": _as_dict(result),
-        },
+        redact(
+            {
+                "step_seq": step_seq,
+                "tool": comp["tool"],
+                "args": comp["args"],
+                "result": _as_dict(result),
+            },
+            contract,
+        ),
         step_seq=step_seq,
     )
     return _as_dict(result)
@@ -320,9 +344,13 @@ class RewindService:
             comp_payload = comp_events[0].payload if comp_events else {"reversible": False}
             if not comp_payload.get("reversible"):
                 reason = str(comp_payload.get("reason", "irreversible"))
-                status: StepStatus = (
-                    "conditional_unmet" if reason == "conditional_unmet" else "irreversible"
-                )
+                status: StepStatus
+                if reason == "conditional_unmet":
+                    status = "conditional_unmet"
+                elif reason == "no_op":
+                    status = "no_op"
+                else:
+                    status = "irreversible"
                 steps.append(RewindStepPlan(step_seq, tool, status, reason=reason))
                 continue
 
@@ -538,9 +566,15 @@ class RewindService:
                     continue
                 # `existing.state == "approved"` -- fall through to execute.
 
+            step_contract = self.contract_set.resolve(step.tool) if self.contract_set else None
             try:
                 await compensate_one(
-                    self.ledger, session_id, step.step_seq, step.compensation, executor
+                    self.ledger,
+                    session_id,
+                    step.step_seq,
+                    step.compensation,
+                    executor,
+                    step_contract,
                 )
             except Exception as exc:
                 outcomes.append(

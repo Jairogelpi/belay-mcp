@@ -156,6 +156,7 @@ class SagaExecutor:
         context: dict[str, Any] | None = None,
         on_stage: StageHook | None = None,
         set_hash: str | None = None,
+        read_only: bool = False,
     ) -> StepResult:
         scope: Scope = {"args": args, "result": None, "context": context or {}, "state": {}}
 
@@ -230,11 +231,11 @@ class SagaExecutor:
             _fire(on_stage, "result_recorded")
 
             # 5. compensation_registered -- materialize now, never re-evaluate later.
-            compensation = self._materialize_compensation(contract, scope)
+            compensation = self._materialize_compensation(contract, scope, read_only=read_only)
             self.ledger.append(
                 session_id,
                 "compensation_registered",
-                compensation,
+                redact(compensation, contract),
                 step_seq=step_seq,
                 set_hash=set_hash,
             )
@@ -266,8 +267,17 @@ class SagaExecutor:
             )
             raise
 
-    def _materialize_compensation(self, contract: Contract | None, scope: Scope) -> dict[str, Any]:
-        if contract is None or contract.reversibility == "irreversible":
+    def _materialize_compensation(
+        self, contract: Contract | None, scope: Scope, *, read_only: bool = False
+    ) -> dict[str, Any]:
+        if contract is None:
+            if read_only:
+                # A read-only call with no contract (spec §4.6 default rule)
+                # never changed anything -- it's a no-op for rewind purposes,
+                # not a genuinely irreversible action with no undo path.
+                return {"reversible": False, "reason": "no_op"}
+            return {"reversible": False, "reason": "irreversible"}
+        if contract.reversibility == "irreversible":
             return {"reversible": False, "reason": "irreversible"}
         if contract.reversibility == "conditional":
             assert contract.conditions is not None
@@ -281,7 +291,11 @@ class SagaExecutor:
         return {"reversible": True, "tool": contract.undo.tool, "args": materialized_args}
 
     async def compensate(
-        self, session_id: str, step: StepResult, executor: Executor
+        self,
+        session_id: str,
+        step: StepResult,
+        executor: Executor,
+        contract: Contract | None = None,
     ) -> dict[str, Any] | None:
         """Execute one step's materialized compensation, if it has one.
 
@@ -294,7 +308,7 @@ class SagaExecutor:
         from belay.rewind.service import compensate_one
 
         return await compensate_one(
-            self.ledger, session_id, step.step_seq, step.compensation, executor
+            self.ledger, session_id, step.step_seq, step.compensation, executor, contract
         )
 
     async def run_saga(
@@ -322,7 +336,8 @@ class SagaExecutor:
                 compensated: list[int] = []
                 if auto_compensate:
                     for done in reversed(committed):
-                        await self.compensate(session_id, done, executor)
+                        done_contract = steps[done.step_seq - 1].contract
+                        await self.compensate(session_id, done, executor, done_contract)
                         compensated.append(done.step_seq)
                 return SagaReport(committed=committed, failed=exc, compensated=compensated)
             committed.append(outcome)

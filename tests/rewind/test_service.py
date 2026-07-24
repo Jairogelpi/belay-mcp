@@ -449,6 +449,36 @@ async def test_dry_run_has_no_verified_result() -> None:
     assert report.verified_result is None
 
 
+# --- read-only no-contract calls are `no_op`, not `irreversible` (spec Â§4.6) ---
+
+
+async def test_read_only_hint_call_with_no_contract_is_no_op_not_irreversible() -> None:
+    """A contract-less `fs.list`-style call with `readOnlyHint: true` changed
+    nothing -- it must not be classified alongside a genuinely irreversible
+    action, and must not block a session from being fully rewound/restored."""
+    ledger = LedgerStore()
+    session_id = "s_read_only"
+    cs = _contract_set(_create_contract())
+    lifecycle = Lifecycle(
+        contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
+    )
+    lifecycle.start_session("agent-bot")
+
+    async def executor(tool: str, args: dict) -> dict:
+        return {"entries": []}
+
+    await lifecycle.govern_and_execute("fs.list", {}, read_only_hint=True, executor=executor)
+
+    service = RewindService(ledger=ledger, contract_set=cs)
+    plan = service.build_plan(session_id)
+    assert plan.steps[0].status == "no_op"
+    assert plan.irreversible == []
+
+    report = await service.rewind(session_id, executor, by="jairo")
+    assert report.fully_rewound is True
+    assert report.verified_result == "restored"
+
+
 # --- honesty (Â§10.3): never "fully rewound" with irreversible steps remaining --
 
 

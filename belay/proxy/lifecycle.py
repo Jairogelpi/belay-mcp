@@ -187,9 +187,17 @@ class ExecuteStage:
         executor: Executor,
         *,
         set_hash: str | None = None,
+        read_only: bool = False,
     ) -> Any:
         outcome = await self.saga.run_step(
-            session_id, step_seq, tool, args, contract, executor, set_hash=set_hash
+            session_id,
+            step_seq,
+            tool,
+            args,
+            contract,
+            executor,
+            set_hash=set_hash,
+            read_only=read_only,
         )
         return outcome.result
 
@@ -434,6 +442,13 @@ class Lifecycle:
         # `result_recorded` etc. below are emitted by `ExecuteStage`/
         # `SagaExecutor`, not by this method directly.
         assert self.execute_stage is not None
+        # spec §4.6 default rule: a contract-less call only reaches here at
+        # all when `read_only_hint` was true (or `unsafe_passthrough` is
+        # configured) -- the former genuinely changed nothing, so rewind
+        # must not classify it alongside a real irreversible action.
+        read_only = resolved.contract is None and all(
+            e.get("type") == "read" for e in resolved.effects
+        )
         return await self.execute_stage.execute(
             self.session_id,
             step_seq,
@@ -442,4 +457,5 @@ class Lifecycle:
             resolved.contract,
             executor,
             set_hash=self.contract_set.set_hash,
+            read_only=read_only,
         )

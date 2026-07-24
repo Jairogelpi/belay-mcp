@@ -398,7 +398,9 @@ async def test_approved_retry_under_new_step_seq_still_counts_toward_quota() -> 
     )
     cs = ContractSet(contracts={"mail.send": contract}, set_hash="sha256:x")
     ledger = LedgerStore()
-    policy = PolicyDoc(defaults=Defaults(quota=QuotaDefaults(enabled=True, max_irreversible_actions=99)))
+    policy = PolicyDoc(
+        defaults=Defaults(quota=QuotaDefaults(enabled=True, max_irreversible_actions=99))
+    )
     queue = ApprovalQueue(engine=ledger.engine)
     lifecycle = Lifecycle(
         contract_set=cs,
