@@ -26,6 +26,24 @@ Normative shape implemented here:
   Irreversible/conditional-unmet/indeterminate steps in scope always make it
   false -- there is no code path that reports "fully rewound" while any of
   those remain.
+- Verified Rewind (plan-v2): sending an inverse call is not the same claim as
+  proving the system is back the way it was -- `RewindReport.verified_result`
+  distinguishes the two honestly instead of collapsing them into one boolean:
+
+    * `restored`    -- re-querying the real system after compensation matches
+                       the state *captured before the original action ran*
+                       (contract's `capture` snapshot), byte for byte.
+    * `compensated` -- the compensation ran and its declared `verification`
+                       passed, but the post-state isn't identical to the
+                       pre-action snapshot (or no `capture` was declared to
+                       compare against) -- the business effect is neutralized,
+                       not necessarily bit-identical.
+    * `partial`     -- some in-scope steps reached `restored`/`compensated`,
+                       others didn't (irreversible, verification failed,
+                       compensation failed, denied, or never reached because
+                       the rewind halted).
+    * `impossible`  -- no in-scope step reached `restored`/`compensated` --
+                       e.g. every in-scope step was contract-irreversible.
 """
 
 from __future__ import annotations
@@ -51,6 +69,10 @@ StepStatus = Literal["reversible", "irreversible", "conditional_unmet", "indeter
 OutcomeStatus = Literal[
     "compensated", "verification_failed", "compensation_failed", "skipped", "paused", "denied"
 ]
+#: Verified Rewind's honest 4-value taxonomy (see module docstring below):
+#: whether the undo call ran is bookkeeping (`OutcomeStatus`); this is the
+#: claim actually being made about real-world state.
+RewindResult = Literal["restored", "compensated", "partial", "impossible"]
 
 _PLAN_TTL_SECONDS = 600  # mirrors belay.planner.planner's default (spec §5.4)
 
@@ -108,6 +130,10 @@ class RewindStepPlan:
     reason: str | None = None
     compensation: dict[str, Any] | None = None  # {"tool", "args"} when status == "reversible"
     verification: dict[str, Any] | None = None  # {"tool", "args", "expect"} when declared
+    # The contract's `capture` snapshot taken before the *original* action ran
+    # -- the ground truth `restored` compares the post-compensation re-query
+    # against. `None` when the contract declared no `capture` block.
+    pre_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +169,11 @@ class CompensationOutcome:
     tool: str
     status: OutcomeStatus
     detail: dict[str, Any] = field(default_factory=dict)
+    #: Verified Rewind's per-step honest claim. Only ever `restored` or
+    #: `compensated` -- `partial`/`impossible` are session-level aggregates
+    #: computed by `RewindReport.verified_result`, never a single step's own
+    #: claim. `None` for outcomes that never got this far (`paused`, e.g.).
+    result: Literal["restored", "compensated"] | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +195,30 @@ class RewindReport:
             return False
         ok = {o.step_seq for o in self.outcomes if o.status == "compensated"}
         return all(s.step_seq in ok for s in self.plan.steps)
+
+    @property
+    def verified_result(self) -> RewindResult | None:
+        """Verified Rewind's honest session-level claim (see module docstring).
+
+        `None` for a `dry_run` -- nothing executed, so there is no claim to make
+        about real-world state yet, only a plan.
+        """
+        if self.dry_run:
+            return None
+        if not self.plan.steps:
+            return "restored"  # nothing was in scope: vacuously fully restored
+
+        succeeded_by_step = {o.step_seq: o.result for o in self.outcomes if o.result is not None}
+        n_succeeded = len(succeeded_by_step)
+        n_total = len(self.plan.steps)
+
+        if n_succeeded == 0:
+            return "impossible"
+        if n_succeeded < n_total:
+            return "partial"
+        if all(r == "restored" for r in succeeded_by_step.values()):
+            return "restored"
+        return "compensated"
 
 
 async def compensate_one(
@@ -272,6 +327,10 @@ class RewindService:
                 continue
 
             verification = self._verification_for(tool, step_seq, types)
+            captures = types.get("state_captured", [])
+            pre_snapshot = (
+                captures[0].payload.get("snapshot") if captures else None
+            )
             steps.append(
                 RewindStepPlan(
                     step_seq,
@@ -283,6 +342,7 @@ class RewindService:
                         "args": comp_payload["args"],
                     },
                     verification=verification,
+                    pre_snapshot=pre_snapshot if isinstance(pre_snapshot, dict) else None,
                 )
             )
         return RewindPlan(session_id=session_id, to_step=to_step, steps=steps)
@@ -493,6 +553,7 @@ class RewindService:
                     break
                 continue
 
+            v_dict: dict[str, Any] | None = None
             if step.verification is not None:
                 try:
                     v_result = await executor(step.verification["tool"], step.verification["args"])
@@ -527,7 +588,19 @@ class RewindService:
                         break
                     continue
 
-            outcomes.append(CompensationOutcome(step.step_seq, comp_tool, "compensated"))
+            restored = (
+                v_dict is not None
+                and step.pre_snapshot is not None
+                and canonical_bytes(v_dict) == canonical_bytes(step.pre_snapshot)
+            )
+            outcomes.append(
+                CompensationOutcome(
+                    step.step_seq,
+                    comp_tool,
+                    "compensated",
+                    result="restored" if restored else "compensated",
+                )
+            )
 
         report = RewindReport(
             session_id=session_id, dry_run=False, plan=plan, outcomes=outcomes, halted=halted
@@ -537,6 +610,8 @@ class RewindService:
             "rewind_completed",
             {
                 "fully_rewound": report.fully_rewound,
+                "verified_result": report.verified_result,
+                "restored": [o.step_seq for o in outcomes if o.result == "restored"],
                 "compensated": [o.step_seq for o in outcomes if o.status == "compensated"],
                 "skipped": [o.step_seq for o in outcomes if o.status == "skipped"],
                 "failed": [

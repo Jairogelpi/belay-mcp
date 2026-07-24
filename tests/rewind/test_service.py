@@ -338,6 +338,115 @@ async def test_verification_passing_counts_as_compensated() -> None:
 
     assert report.outcomes[0].status == "compensated"
     assert report.fully_rewound is True
+    # No `capture` block was declared on this contract, so there's nothing to
+    # compare the re-query against -- Verified Rewind must not claim byte-exact
+    # `restored` on no evidence, only the weaker "effect neutralized" claim.
+    assert report.outcomes[0].result == "compensated"
+    assert report.verified_result == "compensated"
+
+
+# --- Verified Rewind: restored vs compensated vs partial vs impossible ---------
+
+
+def _create_contract_with_capture() -> Contract:
+    from belay.contracts.model import Capture
+
+    return Contract(
+        belay_contract="0.1",
+        tool="obj.create",
+        reversibility="reversible",
+        undo=Undo(tool="obj.delete", args={"id": "$args.id"}),
+        effects=[Effect(type="create", resource="obj.record", count="1")],
+        capture=Capture(tool="obj.get", args={"id": "$args.id"}, **{"as": "before"}),
+        verification={"tool": "obj.get", "args": {"id": "$args.id"}, "expect": "not_found"},
+    )
+
+
+async def test_restored_when_post_compensation_state_matches_pre_action_snapshot() -> None:
+    """A `capture` before create snapshots "doesn't exist yet"; after compensating
+    (delete) the object, re-querying finds the same "doesn't exist" -- byte-exact
+    match to the pre-action snapshot earns the strong `restored` claim."""
+    ledger = LedgerStore()
+    store = FakeStore()
+    session_id = "s_restored"
+    saga = SagaExecutor(ledger=ledger)
+    create = _create_contract_with_capture()
+    await saga.run_step(session_id, 1, "obj.create", {"id": "a"}, create, store.executor)
+
+    cs = _contract_set(create)
+    service = RewindService(ledger=ledger, contract_set=cs)
+    report = await service.rewind(session_id, store.executor, by="jairo")
+
+    assert report.outcomes[0].result == "restored"
+    assert report.verified_result == "restored"
+
+
+async def test_compensated_when_post_state_differs_from_pre_action_snapshot() -> None:
+    """Verification passes (declared `expect` is satisfied) but the re-queried
+    state isn't identical to what was captured before the original action --
+    the business effect is neutralized, but it's dishonest to call that
+    byte-exact `restored`."""
+    ledger = LedgerStore()
+    store = FakeStore()
+    session_id = "s_compensated_not_restored"
+    saga = SagaExecutor(ledger=ledger)
+    create = _create_contract_with_capture()
+    await saga.run_step(session_id, 1, "obj.create", {"id": "a"}, create, store.executor)
+
+    async def executor_with_side_effect(tool: str, args: dict) -> dict:
+        result = await store.executor(tool, args)
+        if tool == "obj.get":
+            # Real system's re-query differs from the pre-action snapshot
+            # (e.g. an unrelated field changed elsewhere) even though the
+            # declared `expect` ("not_found") is still satisfied.
+            return {**result, "extra_unrelated_field": "changed"}
+        return result
+
+    cs = _contract_set(create)
+    service = RewindService(ledger=ledger, contract_set=cs)
+    report = await service.rewind(session_id, executor_with_side_effect, by="jairo")
+
+    assert report.outcomes[0].status == "compensated"
+    assert report.outcomes[0].result == "compensated"
+    assert report.verified_result == "compensated"
+
+
+async def test_impossible_when_every_in_scope_step_is_irreversible() -> None:
+    ledger = LedgerStore()
+    store = FakeStore()
+    session_id = "s_impossible"
+    saga = SagaExecutor(ledger=ledger)
+    send = _send_contract()
+    await saga.run_step(session_id, 1, "mail.send", {"to": "x@example.com"}, send, store.executor)
+
+    service = RewindService(ledger=ledger, contract_set=_contract_set())
+    report = await service.rewind(session_id, store.executor, by="jairo")
+
+    assert report.verified_result == "impossible"
+
+
+async def test_partial_when_some_but_not_all_in_scope_steps_recover() -> None:
+    ledger = LedgerStore()
+    store = FakeStore()
+    session_id = "s_partial"
+    await _commit_mixed_session(ledger, session_id, store)  # reversible, irreversible, reversible
+
+    service = RewindService(ledger=ledger, contract_set=_contract_set(_create_contract()))
+    report = await service.rewind(session_id, store.executor, by="jairo")
+
+    assert report.verified_result == "partial"
+
+
+async def test_dry_run_has_no_verified_result() -> None:
+    ledger = LedgerStore()
+    store = FakeStore()
+    session_id = "s_dry_vr"
+    await _commit_mixed_session(ledger, session_id, store)
+
+    service = RewindService(ledger=ledger, contract_set=_contract_set(_create_contract()))
+    report = await service.rewind(session_id, store.executor, by="jairo", dry_run=True)
+
+    assert report.verified_result is None
 
 
 # --- honesty (Â§10.3): never "fully rewound" with irreversible steps remaining --

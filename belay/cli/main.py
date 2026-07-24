@@ -509,7 +509,9 @@ def rewind_command(
         return
 
     for outcome in report.outcomes:
-        typer.echo(f"  step {outcome.step_seq}: {outcome.tool} -> {outcome.status}")
+        result_suffix = f" ({outcome.result})" if outcome.result else ""
+        typer.echo(f"  step {outcome.step_seq}: {outcome.tool} -> {outcome.status}{result_suffix}")
+    typer.echo(f"verified result: {report.verified_result}")
     if report.fully_rewound:
         typer.echo("compensation executed · verification passed · session fully compensated")
     else:
