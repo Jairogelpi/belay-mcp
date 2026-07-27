@@ -152,17 +152,79 @@ def test_atomic_write_leaves_original_intact_on_write_failure(tmp_path, monkeypa
     assert leftover_temps == []
 
 
+def test_atomic_restore_is_byte_exact(tmp_path) -> None:
+    from belay.cli.client_configs import atomic_restore
+
+    target = tmp_path / "config.json"
+    backup = tmp_path / "config.json.belay-backup"
+    original_bytes = b'{"a": 1}\r\n\xef\xbb\xbf'  # CRLF + trailing BOM bytes, on purpose
+    backup.write_bytes(original_bytes)
+    target.write_bytes(b'{"a": 1, "belay": {}}\n')
+
+    atomic_restore(target, backup)
+
+    assert target.read_bytes() == original_bytes
+
+
+def test_atomic_restore_leaves_target_intact_on_failure(tmp_path, monkeypatch) -> None:
+    from belay.cli.client_configs import atomic_restore
+
+    target = tmp_path / "config.json"
+    backup = tmp_path / "config.json.belay-backup"
+    target.write_bytes(b"current\n")
+    backup.write_bytes(b"backup\n")
+
+    def _boom(*a, **k):
+        raise OSError("simulated disk failure")
+
+    import os as os_module
+
+    monkeypatch.setattr(os_module, "replace", _boom)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        atomic_restore(target, backup)
+    assert target.read_bytes() == b"current\n"
+    leftover_temps = list(tmp_path.glob(".config.json.*"))
+    assert leftover_temps == []
+
+
+def test_entry_present_json_true_and_false() -> None:
+    from belay.cli.client_configs import entry_present
+
+    existing = json.dumps({"mcpServers": {"belay": {"command": "python"}}})
+    assert entry_present("claude-code", existing, "belay") is True
+    assert entry_present("claude-code", existing, "other") is False
+    assert entry_present("claude-code", "", "belay") is False
+
+
+def test_entry_present_codex_toml() -> None:
+    from belay.cli.client_configs import entry_present
+
+    existing = '[mcp_servers.belay]\ncommand = "python"\n'
+    assert entry_present("codex", existing, "belay") is True
+    assert entry_present("codex", existing, "other") is False
+
+
+def test_entry_present_opencode() -> None:
+    from belay.cli.client_configs import entry_present
+
+    existing = json.dumps({"mcp": {"belay": {"type": "local"}}})
+    assert entry_present("opencode", existing, "belay") is True
+    assert entry_present("opencode", existing, "other") is False
+
+
 def test_manifest_round_trips(tmp_path) -> None:
-    from belay.cli.client_configs import Manifest, load_manifest, write_manifest
+    from belay.cli.client_configs import Manifest, load_manifest, sha256_of, write_manifest
 
     target = tmp_path / "config.json"
     target.write_text("after content", encoding="utf-8")
-    path = write_manifest("claude-code", target, "belay", "before content", "after content", None)
+    before_hash = sha256_of("before content")
+    path = write_manifest("claude-code", target, "belay", before_hash, "after content", None)
     assert path.is_file()
     loaded = load_manifest(target)
     assert isinstance(loaded, Manifest)
     assert loaded.client == "claude-code"
     assert loaded.name == "belay"
+    assert loaded.before_hash == before_hash
     assert loaded.backup_path is None
 
 

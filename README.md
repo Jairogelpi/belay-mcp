@@ -18,13 +18,13 @@ previewable, gated, and — when it goes wrong — reversible."
 > the full lifecycle — contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
 > Appendix C), planner + policy (§5, §6), approvals (§7), the saga executor
 > (§8), and rewind (§10), diagrammed in
-> [`docs/architecture.md`](docs/architecture.md). Seven further entregas
-> (E10-E16, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
-> "What's new since v0.1.0" below. 416 tests,
+> [`docs/architecture.md`](docs/architecture.md). Eight further entregas
+> (E10-E17, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
+> "What's new since v0.1.0" below. 427 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~77% repo-wide** (`fail_under = 77`, CI-enforced floor against
+> **Coverage: ~79.6% repo-wide** (`fail_under = 79`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -111,8 +111,24 @@ conformance:
   `structuredContent` broke any real upstream whose tool declares
   `additionalProperties: false`, which the example servers never did.
 - **`belay init --client ...`** registers Belay in Claude Desktop/Code/
-  Cursor's MCP config in one command, merged non-destructively alongside
-  whatever other MCP servers are already configured.
+  Cursor/Codex/OpenCode's MCP config in one command (E17), merged
+  non-destructively alongside whatever other MCP servers are already
+  configured — see "Registering with an MCP client" below.
+  **`belay uninstall`/`belay doctor`** (E17) use a `.belay-manifest.json`
+  written alongside each config as the one source of truth for whether the
+  file changed since install, rather than guessing from content. E17.1
+  hardened the lifecycle after review found it wasn't reinstall-safe:
+  running `init` twice no longer overwrites the pre-install backup with
+  already-belay content (so `uninstall` still restores the *true* original,
+  byte-for-byte, atomically); `uninstall` uses the name actually recorded in
+  the manifest, not a CLI default, so `init --name foo` is always fully
+  removable; `init`'s dry-run preview and its real write can no longer
+  diverge (a config changed in that window aborts the write instead of being
+  silently clobbered); a config uninstalled back to a state that never
+  existed before install is deleted, not left as an empty stub; a failed
+  manifest write rolls the config back instead of leaving belay
+  installed-but-unmanaged; and `doctor` reports **BROKEN** rather than
+  "registered" when the manifest exists but the entry itself doesn't.
 - **`belay draft-contracts`** proposes a starting contract per upstream tool
   from its live MCP schema/annotations — see "Drafting contracts from a
   live server" below.
@@ -517,7 +533,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E14 | Identity attribution | §9, §12 (extended) | done |
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
-| E17 | `docs/traceability.md` generator, CI-enforced | §8 (plan.md) | done |
+| E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
 
 ## Conformance
 

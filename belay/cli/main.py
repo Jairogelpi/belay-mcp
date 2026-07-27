@@ -294,23 +294,91 @@ def _render_client_config(client: str, target: Path, wrap_path: Path, name: str)
     return json.dumps(doc, indent=2) + "\n"
 
 
-def _register_client(client: str, wrap_path: Path, name: str, scope: str = "project") -> Path:
-    """Merge a `belay` entry into one client's MCP config. Returns the config path touched.
+def _write_client_config(client: str, target: Path, name: str, new_text: str,
+                          before_text: str | None) -> None:
+    """Write `new_text` to `target` and record a manifest for it. `before_text`
+    must be the *actual current content* of `target` (or `None` if it doesn't
+    exist) -- callers that previewed `new_text`/`before_text` earlier are
+    responsible for re-verifying `target` still matches `before_text` right
+    before calling this, so a write never silently clobbers a change that
+    happened in the gap between preview and write (see `init`'s pre-write
+    re-check).
 
-    Writes go through `atomic_write_with_backup` (temp file + `os.replace`,
-    plus a `.belay-backup` of anything overwritten) -- a crash mid-write
-    leaves the original file intact, never half-written. Also writes a
-    `.belay-manifest.json` (before/after content hash, backup path, timestamp)
-    that `belay uninstall`/`belay doctor` use to know whether the file has
-    changed since, without guessing from content alone.
+    Writes go through `atomic_write_with_backup`/`atomic_write` (temp file +
+    `os.replace`) -- a crash mid-write leaves the original file intact, never
+    half-written. Also writes a `.belay-manifest.json` (before/after content
+    hash, backup path, timestamp) that `belay uninstall`/`belay doctor` use to
+    know whether the file has changed since, without guessing from content
+    alone.
+
+    Reinstall handling (running `init` again over a config `belay` already
+    manages) is the subtle part, because `<target>.belay-backup` is a fixed
+    path: naively re-backing-up on every install overwrites that file with
+    whatever's on disk *right now* -- which, on a reinstall, already contains
+    the belay entry. A later `uninstall` "restoring" that backup would then
+    put back a belay-containing file and declare success. Three cases:
+
+    - No prior manifest (first-ever install here): back up normally.
+    - Prior manifest, and the file's current hash still matches what that
+      manifest recorded as `after_hash` (nothing touched it since): this is a
+      clean reinstall. Carry the *original* `before_hash`/`backup_path`
+      forward unchanged instead of re-deriving them from the current
+      (already-belay) content, and don't touch the backup file on disk --
+      it's still the correct one.
+    - Prior manifest, but the current hash doesn't match (something else
+      edited the file since -- another MCP server added, etc.): the old
+      backup no longer represents a safe full-revert target. Never let a
+      future `uninstall` restore it wholesale -- record `backup_path=None` so
+      `uninstall` always falls back to surgical (belay-entry-only) removal
+      for this file from here on.
     """
-    from belay.cli.client_configs import atomic_write_with_backup, write_manifest
+    from belay.cli.client_configs import (
+        atomic_write,
+        atomic_write_with_backup,
+        load_manifest,
+        sha256_of,
+        write_manifest,
+    )
 
+    prior_manifest = load_manifest(target)
+    unchanged_reinstall = (
+        prior_manifest is not None
+        and before_text is not None
+        and sha256_of(before_text) == prior_manifest.after_hash
+    )
+    if unchanged_reinstall:
+        assert prior_manifest is not None  # narrows for type checkers
+        record_before_hash = prior_manifest.before_hash
+        record_backup_path = (
+            Path(prior_manifest.backup_path) if prior_manifest.backup_path else None
+        )
+        atomic_write(target, new_text)
+    elif prior_manifest is not None:
+        record_before_hash = sha256_of(before_text) if before_text is not None else None
+        record_backup_path = None
+        atomic_write(target, new_text)
+    else:
+        record_before_hash = sha256_of(before_text) if before_text is not None else None
+        record_backup_path = atomic_write_with_backup(target, new_text)
+
+    try:
+        write_manifest(client, target, name, record_before_hash, new_text, record_backup_path)
+    except BaseException:
+        # Never leave belay "installed" (config written) without the manifest
+        # that makes it manageable -- put the config back exactly as it was.
+        if before_text is not None:
+            atomic_write(target, before_text)
+        else:
+            target.unlink(missing_ok=True)
+        raise
+
+
+def _register_client(client: str, wrap_path: Path, name: str, scope: str = "project") -> Path:
+    """Merge a `belay` entry into one client's MCP config. Returns the config path touched."""
     target = _client_config_path(client, scope)
     before_text = target.read_text(encoding="utf-8") if target.is_file() else None
     new_text = _render_client_config(client, target, wrap_path, name)
-    backup_path = atomic_write_with_backup(target, new_text)
-    write_manifest(client, target, name, before_text, new_text, backup_path)
+    _write_client_config(client, target, name, new_text, before_text)
     return target
 
 
@@ -388,21 +456,24 @@ def init(
         raise typer.Exit(code=1)
 
     # Preview pass: render every client's new config text without writing anything,
-    # so the confirmation below (and --dry-run) reflect exactly what will happen --
-    # never a promise that doesn't match the real write pass right after it.
-    previews: list[tuple[str, Path, str]] = []
+    # so the confirmation below (and --dry-run) reflect exactly what will happen.
+    # Captures `before_text` too, so the pre-write re-check below and the actual
+    # write both use this exact snapshot -- the write pass never re-renders from
+    # a fresh disk read, so it cannot diverge from what was previewed/confirmed.
+    previews: list[tuple[str, Path, str | None, str]] = []
     for c in clients:
         target = _client_config_path(c, scope)
+        before_text = target.read_text(encoding="utf-8") if target.is_file() else None
         try:
             new_text = _render_client_config(c, target, wrap_path, name)
         except ValueError as exc:
             typer.echo(f"error rendering {c}: {exc} -- nothing was written", err=True)
             raise typer.Exit(code=1) from None
-        previews.append((c, target, new_text))
+        previews.append((c, target, before_text, new_text))
 
     typer.echo(f"this will register '{name}' in {len(previews)} config file(s):")
-    for c, target, _ in previews:
-        exists = "update" if target.is_file() else "create"
+    for c, target, before_text, _ in previews:
+        exists = "update" if before_text is not None else "create"
         typer.echo(f"  {exists}: {target}  ({c})")
 
     if dry_run:
@@ -412,9 +483,22 @@ def init(
     if not yes:
         typer.confirm("Proceed?", abort=True)
 
-    for c, _, _ in previews:
+    # Re-verify nothing changed on disk since the preview above, before writing
+    # anything. All-or-nothing: if any file moved since preview, abort without
+    # writing to any of them, rather than risk silently clobbering whatever
+    # changed it (another process, the user, etc.) in that window.
+    for c, target, before_text, _ in previews:
+        current_text = target.read_text(encoding="utf-8") if target.is_file() else None
+        if current_text != before_text:
+            typer.echo(
+                f"error: {target} ({c}) changed after preview -- aborting without writing anything",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+    for c, target, before_text, new_text in previews:
         try:
-            target = _register_client(c, wrap_path, name, scope)
+            _write_client_config(c, target, name, new_text, before_text)
         except ValueError as exc:
             typer.echo(f"error registering {c}: {exc} -- nothing was written", err=True)
             raise typer.Exit(code=1) from None
@@ -429,22 +513,33 @@ def uninstall(
         "--client",
         help="MCP client(s) to remove Belay from, comma-separated, or 'all'.",
     ),
-    name: str = typer.Option("belay", "--name", help="MCP server name to remove."),
     scope: str = typer.Option("project", "--scope", help="Same meaning as `belay init --scope`."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
     """Remove Belay's entry from one or more clients' MCP configs.
 
-    Uses the `.belay-manifest.json` written by `belay init` to decide how:
-    if the config's current content hash matches what `belay init` produced
-    (nothing else touched the file since), the original pre-install backup
-    is restored in full. If the file changed since (the user added another
-    MCP server, edited something else), restoring the backup would discard
-    that -- instead, only the `belay` entry itself is surgically removed,
-    leaving everything else exactly as it is now. Either way, nothing is
-    guessed: the manifest's hash comparison is the one source of truth.
+    Uses the `.belay-manifest.json` written by `belay init` to decide how --
+    including which entry name to remove (`manifest.name`, i.e. whatever
+    `belay init --name ...` actually registered; there is deliberately no
+    `--name` override here, since guessing wrong would silently leave the
+    real entry installed while claiming success):
+
+    - Current content hash matches the manifest's `after_hash` (nothing else
+      touched the file since install) and `before_hash` is `None` (the file
+      didn't exist before `belay init` created it): delete the file --
+      belay's the only reason it exists.
+    - Current content hash matches `after_hash` and a backup is on record:
+      restore that pre-install backup in full, byte-for-byte.
+    - Anything else (hash mismatch, i.e. the file changed since install --
+      another MCP server added, some other edit -- or no backup was ever
+      safe to trust, e.g. an install over an externally-modified file):
+      surgically remove only the belay entry itself, leaving everything else
+      exactly as it is now. Nothing is guessed: the manifest is the one
+      source of truth.
     """
     from belay.cli.client_configs import (
+        Manifest,
+        atomic_restore,
         atomic_write_with_backup,
         load_manifest,
         manifest_path,
@@ -456,48 +551,57 @@ def uninstall(
     clients = (
         list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
     )
-    plan: list[tuple[str, Path, str]] = []  # (client, target, action)
+    # (client, target, action, manifest-or-None)
+    plan: list[tuple[str, Path, str, Manifest | None]] = []
     for c in clients:
         if c not in _CLIENT_CONFIG_PATHS:
             typer.echo(f"error: unknown --client {c!r}", err=True)
             raise typer.Exit(code=1)
         target = _client_config_path(c, scope)
         if not target.is_file():
-            plan.append((c, target, "skip (no config file)"))
+            plan.append((c, target, "skip (no config file)", None))
             continue
         manifest = load_manifest(target)
         if manifest is None:
-            plan.append((c, target, "skip (no belay manifest -- was this installed by belay?)"))
+            plan.append(
+                (c, target, "skip (no belay manifest -- was this installed by belay?)", None)
+            )
             continue
         current_hash = sha256_of(target.read_text(encoding="utf-8"))
-        if current_hash == manifest.after_hash and manifest.backup_path:
-            plan.append((c, target, "restore full pre-install backup"))
+        if current_hash != manifest.after_hash:
+            action = f"surgically remove only the '{manifest.name}' entry"
+        elif manifest.before_hash is None:
+            action = "delete file (belay created it; nothing else ever touched it)"
+        elif manifest.backup_path:
+            action = "restore full pre-install backup"
         else:
-            plan.append((c, target, "surgically remove only the belay entry"))
+            action = f"surgically remove only the '{manifest.name}' entry"
+        plan.append((c, target, action, manifest))
 
     typer.echo(f"this will modify {len([p for p in plan if 'skip' not in p[2]])} config file(s):")
-    for c, target, action in plan:
+    for c, target, action, _ in plan:
         typer.echo(f"  {target} ({c}): {action}")
 
     if not yes:
         typer.confirm("Proceed?", abort=True)
 
-    for c, target, action in plan:
+    for c, target, action, manifest in plan:
         if action.startswith("skip"):
             continue
-        if action.startswith("restore"):
-            manifest = load_manifest(target)
-            assert manifest is not None and manifest.backup_path is not None
-            backup = Path(manifest.backup_path)
-            target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+        assert manifest is not None
+        if action.startswith("delete file"):
+            target.unlink()
+        elif action.startswith("restore"):
+            assert manifest.backup_path is not None
+            atomic_restore(target, Path(manifest.backup_path))
         else:
             existing = target.read_text(encoding="utf-8")
             if c == "codex":
-                new_text = remove_codex_entry(existing, name)
+                new_text = remove_codex_entry(existing, manifest.name)
             elif c == "opencode":
-                new_text = remove_json_mcp_entry(existing, name, key="mcp")
+                new_text = remove_json_mcp_entry(existing, manifest.name, key="mcp")
             else:
-                new_text = remove_json_mcp_entry(existing, name)
+                new_text = remove_json_mcp_entry(existing, manifest.name)
             atomic_write_with_backup(target, new_text)
         manifest_path(target).unlink(missing_ok=True)
         typer.echo(f"removed belay from {target}")
@@ -510,14 +614,19 @@ def doctor(
     ),
     scope: str = typer.Option("project", "--scope", help="Same meaning as `belay init --scope`."),
 ) -> None:
-    """Report whether each client's config is registered, modified since, or missing.
+    """Report whether each client's config is registered, modified since, missing,
+    or BROKEN.
 
     Read-only -- never writes anything. For each client: whether Belay is
-    registered there, whether the file has changed since `belay init` ran
-    (per the recorded manifest hash), and whether a pre-install backup
-    exists to restore from.
+    actually registered there right now, whether the file has changed since
+    `belay init` ran (per the recorded manifest hash), and whether a
+    pre-install backup exists to restore from. A manifest existing is not
+    proof the entry is still there -- if the file (or just the belay table/
+    key within it) was hand-edited so the entry itself is gone, that's
+    reported as BROKEN rather than "registered", since `belay uninstall`
+    would otherwise have nothing to actually remove.
     """
-    from belay.cli.client_configs import load_manifest, sha256_of
+    from belay.cli.client_configs import entry_present, load_manifest, sha256_of
 
     clients = (
         list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
@@ -534,7 +643,18 @@ def doctor(
         if manifest is None:
             typer.echo(f"{c}: config exists at {target}, but no belay manifest (not belay-managed)")
             continue
-        current_hash = sha256_of(target.read_text(encoding="utf-8"))
+        current_text = target.read_text(encoding="utf-8")
+        try:
+            present = entry_present(c, current_text, manifest.name)
+        except (ValueError, LookupError):
+            present = False  # config no longer parses as this client's format
+        if not present:
+            typer.echo(
+                f"{c}: BROKEN -- manifest says '{manifest.name}' should be registered at "
+                f"{target}, but that entry is not there"
+            )
+            continue
+        current_hash = sha256_of(current_text)
         if current_hash == manifest.after_hash:
             status = "unchanged since install"
         else:

@@ -114,16 +114,21 @@ class Manifest:
         )
 
 
-def write_manifest(client: str, target: Path, name: str, before_text: str | None, after_text: str,
+def write_manifest(client: str, target: Path, name: str, before_hash: str | None, after_text: str,
                     backup_path: Path | None) -> Path:
-    """Record what `atomic_write_with_backup` just did -- the one source `belay
+    """Record what this install just did -- the one source `belay
     uninstall`/`belay doctor` trust to know whether the file has changed since,
-    without guessing from content alone."""
+    without guessing from content alone.
+
+    `before_hash` (not raw text) so a reinstall over an unmodified belay-managed
+    config can pass through the *original* pre-install hash from the prior
+    manifest, rather than hashing the already-belay-containing content that was
+    on disk immediately before this write -- see `_register_client`."""
     manifest = Manifest(
         client=client,
         target=str(target),
         name=name,
-        before_hash=sha256_of(before_text) if before_text is not None else None,
+        before_hash=before_hash,
         after_hash=sha256_of(after_text),
         backup_path=str(backup_path) if backup_path else None,
         installed_at=datetime.now(UTC).isoformat(),
@@ -138,6 +143,27 @@ def load_manifest(target: Path) -> Manifest | None:
     if not path.is_file():
         return None
     return Manifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def entry_present(client: str, existing: str, name: str) -> bool:
+    """Whether `name`'s entry is actually present in `existing`, parsed per
+    `client`'s config format. `belay doctor` uses this to catch a manifest
+    that no longer reflects reality -- e.g. the belay entry (or the whole
+    relevant table/key) was hand-edited out without going through `belay
+    uninstall` -- and report BROKEN instead of claiming it's still registered."""
+    if not existing.strip():
+        return False
+    if client == "codex":
+        doc = tomlkit.parse(existing)
+        servers = doc.get("mcp_servers")
+        return isinstance(servers, (tomlkit.items.Table, dict)) and name in servers
+    if client == "opencode":
+        doc = json.loads(existing)
+        mcp = doc.get("mcp")
+        return isinstance(mcp, dict) and name in mcp
+    doc = json.loads(existing)
+    servers = doc.get("mcpServers")
+    return isinstance(servers, dict) and name in servers
 
 
 def remove_codex_entry(existing: str, name: str) -> str:
@@ -161,28 +187,15 @@ def remove_json_mcp_entry(existing: str, name: str, key: str = "mcpServers") -> 
     return json.dumps(doc, indent=2) + "\n"
 
 
-def atomic_write_with_backup(target: Path, new_text: str) -> Path | None:
-    """Write `new_text` to `target` atomically (temp file + `os.replace`), after
-    backing up any existing content to `<target>.belay-backup` (private
-    permissions, POSIX only -- Windows ACLs aren't touched, the file just isn't
-    world-writable by default there either).
-
-    Returns the backup path, or `None` if `target` didn't exist yet (nothing to
-    back up). Never leaves `target` half-written: the temp file is renamed into
-    place in one filesystem operation, so a crash mid-write leaves the original
-    untouched, not corrupted.
-    """
-    backup_path: Path | None = None
-    if target.is_file():
-        backup_path = target.with_name(target.name + ".belay-backup")
-        shutil.copy2(target, backup_path)
-        if os.name == "posix":
-            os.chmod(backup_path, 0o600)
+def atomic_write(target: Path, new_text: str) -> None:
+    """Write `new_text` to `target` atomically (temp file + `os.replace`), no backup.
+    Never leaves `target` half-written: the temp file is renamed into place in one
+    filesystem operation, so a crash mid-write leaves the original untouched, not
+    corrupted."""
+    import contextlib
 
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", text=True)
-    import contextlib
-
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(new_text)
@@ -191,4 +204,42 @@ def atomic_write_with_backup(target: Path, new_text: str) -> Path | None:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
+
+
+def atomic_write_with_backup(target: Path, new_text: str) -> Path | None:
+    """Write `new_text` to `target` atomically (temp file + `os.replace`), after
+    backing up any existing content to `<target>.belay-backup` (private
+    permissions, POSIX only -- Windows ACLs aren't touched, the file just isn't
+    world-writable by default there either).
+
+    Returns the backup path, or `None` if `target` didn't exist yet (nothing to
+    back up).
+    """
+    backup_path: Path | None = None
+    if target.is_file():
+        backup_path = target.with_name(target.name + ".belay-backup")
+        shutil.copy2(target, backup_path)
+        if os.name == "posix":
+            os.chmod(backup_path, 0o600)
+
+    atomic_write(target, new_text)
     return backup_path
+
+
+def atomic_restore(target: Path, backup: Path) -> None:
+    """Restore `backup` onto `target`, byte-for-byte (binary copy, not text
+    decode/encode -- avoids newline translation or encoding-error surprises) and
+    atomically (temp file + `os.replace`, matching `atomic_write_with_backup`'s
+    crash-safety: a failure mid-restore leaves `target` untouched)."""
+    import contextlib
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(backup.read_bytes())
+        os.replace(tmp_name, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise

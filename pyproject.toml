@@ -94,10 +94,11 @@ markers = [
 source = ["belay"]
 
 [tool.coverage.report]
-# 79% real, measured, as of the adoption/DX entregas (draft-contracts,
-# dashboard, replay, triage, export-pr, explore, intent contract, causal,
-# rewind --intent, verify-test). Locked in as a floor against regressions --
-# raise it as more integration tests land, target 90% (plan.md §0), but
-# never lower it silently.
-fail_under = 77
+# 79.65% real, measured, after E17.1's init/uninstall/doctor lifecycle tests
+# (reinstall-preserves-backup, missing-file-then-uninstall, manifest.name
+# surgical removal, dry-run/write TOCTOU abort, manifest-write-failure
+# rollback, atomic byte-exact restore, doctor BROKEN detection). Locked in as
+# a floor against regressions -- raise it as more integration tests land,
+# target 90% (plan.md §0), but never lower it silently.
+fail_under = 79
 exclude_also = ["if TYPE_CHECKING:"]
