@@ -93,6 +93,25 @@ conformance:
   `examples/demo_self_explain.py` the agent reads its own explanation,
   narrows its request, and gets `allow` — with zero human approval step.
 
+### Adoption/DX (not spec-numbered — onboarding, not lifecycle)
+
+- **Any stdio MCP server, not just Python** — `belay wrap --command/--arg`
+  launches anything (`npx`, a compiled binary, ...); previously hardcoded to
+  `python server.py`. Found and fixed while wrapping the real
+  `@modelcontextprotocol/server-filesystem`.
+- **Fixed: strict `outputSchema` upstreams** — the self-explain payload
+  (E16) moved from `structuredContent` to MCP's `meta` field; putting it in
+  `structuredContent` broke any real upstream whose tool declares
+  `additionalProperties: false`, which the example servers never did.
+- **`belay init --client ...`** registers Belay in Claude Desktop/Code/
+  Cursor's MCP config in one command, merged non-destructively alongside
+  whatever other MCP servers are already configured.
+- **`belay draft-contracts`** proposes a starting contract per upstream tool
+  from its live MCP schema/annotations — see "Drafting contracts from a
+  live server" below.
+- **`belay dashboard`** renders a static HTML snapshot of a ledger's
+  sessions/steps/approvals — see "Dashboard" below.
+
 ## How it fits
 
 ```
@@ -112,6 +131,10 @@ See [`docs/architecture.md`](docs/architecture.md) for the full diagram and
 pip install belay-mcp   # not yet published to PyPI — see "Release status" below
 ```
 
+An npm wrapper (`npm/`) also exists for `npx belay-mcp ...` — see
+"Release status" below; it `pip install`s the matching version under the
+hood and needs a Python 3.12+ interpreter on `PATH`.
+
 For development:
 
 ```bash
@@ -120,6 +143,60 @@ cd belay-mcp
 pip install -e ".[dev]"
 pytest
 ```
+
+### Wrapping a non-Python MCP server
+
+`belay wrap` defaults to launching `python <server_dir>/server.py`, but any
+stdio MCP server works via `--command`/`--arg`:
+
+```bash
+belay wrap ./sandbox --contracts contracts/fs.yaml \
+  --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg ./sandbox
+```
+
+### Registering with an MCP client (Claude Desktop / Claude Code / Cursor)
+
+```bash
+belay init --client claude-desktop --config belay.wrap.json
+```
+
+Merges a `belay` entry into the client's `mcpServers` config (autodetected
+per-OS path for Claude Desktop; `.mcp.json` / `.cursor/mcp.json` in the
+project root for the others) — other MCP servers already configured are
+left untouched. Restart the client afterward.
+
+### Drafting contracts from a live server
+
+Writing a contract by hand per tool is real friction. `belay draft-contracts`
+connects to the real upstream, reads each tool's MCP `readOnlyHint`/
+`destructiveHint` and name (no LLM), and proposes a starting contract per
+tool — read/write/delete tools sharing a resource name (`write_x`/`read_x`,
+`delete_x`/`read_x`) are paired into capture+undo contracts, mirroring the
+hand-written pattern in `examples/contracts/fs.yaml`; everything else
+defaults to `irreversible`, the safe default when no undo path can be
+inferred:
+
+```bash
+belay draft-contracts ./sandbox --command npx --arg -y \
+  --arg @modelcontextprotocol/server-filesystem --arg ./sandbox \
+  -o contracts_draft.yaml
+```
+
+Every draft is `provenance.verified: false` — review and correct each one
+before use; nothing downstream trusts an unverified contract's correctness,
+only its presence.
+
+### Dashboard
+
+```bash
+belay dashboard --db belay.db -o dashboard.html
+```
+
+A static HTML snapshot of one ledger: every session's steps with their
+verdicts, and pending approvals with the exact `belay approvals
+approve/reject` command to run. No server, no live DB access from the page
+(refresh by re-running the command); approval stays CLI-only and
+human-typed by design (spec §7, §12 no-self-approval).
 
 ## Quickstart
 
@@ -243,6 +320,10 @@ tag with E10-E17 (see "What's new since v0.1.0" above); no new tag has been
 cut for those yet. See
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
 [`CHANGELOG.md`](CHANGELOG.md).
+
+An npm wrapper package (`npm/`, also `belay-mcp`) is written and locally
+verified but likewise **not published to npm yet** — same manual step,
+same reason.
 
 ## Contributing
 

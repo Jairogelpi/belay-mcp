@@ -152,10 +152,25 @@ def verify_evidence_cmd(
 @app.command()
 def wrap(
     server_dir: str = typer.Argument(
-        ..., help="Directory of the upstream MCP server (must contain server.py)."
+        ...,
+        help="Directory of the upstream MCP server (must contain server.py), "
+        "unless --command overrides the launch entirely.",
     ),
     contracts: list[str] = typer.Option(  # noqa: B008
         ..., "--contracts", help="Path to a contract document (repeatable)."
+    ),
+    command: str = typer.Option(
+        "",
+        "--command",
+        help="Executable to launch the upstream server (e.g. 'npx'). "
+        "Overrides the default 'python server_dir/server.py' launch -- "
+        "use for non-Python MCP servers.",
+    ),
+    arg: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--arg",
+        help="Argument to pass to --command (repeatable, in order). "
+        "Ignored if --command is not set.",
     ),
     unsafe_passthrough: str = typer.Option(
         "",
@@ -182,11 +197,19 @@ def wrap(
     from belay.contracts.loader import load_contract_set
     from belay.proxy.config import UpstreamCommand, WrapConfig
 
-    server_path = Path(server_dir).resolve()
-    entry = server_path / "server.py"
-    if not entry.is_file():
-        typer.echo(f"error: {entry} not found (expected an MCP server entry point)", err=True)
-        raise typer.Exit(code=1)
+    if command:
+        upstream = UpstreamCommand(command=command, args=list(arg))
+    else:
+        server_path = Path(server_dir).resolve()
+        entry = server_path / "server.py"
+        if not entry.is_file():
+            typer.echo(
+                f"error: {entry} not found (expected an MCP server entry point, "
+                "or pass --command for a non-Python server)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        upstream = UpstreamCommand(command=sys.executable, args=[str(entry)])
 
     # Validate the contract set now so `wrap` fails fast on bad contracts,
     # rather than at first `run`.
@@ -194,7 +217,7 @@ def wrap(
 
     tools = [t.strip() for t in unsafe_passthrough.split(",") if t.strip()]
     config = WrapConfig(
-        upstream=UpstreamCommand(command=sys.executable, args=[str(entry)]),
+        upstream=upstream,
         contracts=[str(Path(c).resolve()) for c in contracts],
         unsafe_passthrough=tools,
         db=db,
@@ -203,6 +226,187 @@ def wrap(
     )
     config.save(out)
     typer.echo(f"wrote {out}")
+
+
+_CLIENT_CONFIG_PATHS: dict[str, str] = {
+    "claude-desktop": "~claude-desktop~",  # resolved per-OS below
+    "claude-code": ".mcp.json",
+    "cursor": ".cursor/mcp.json",
+}
+
+
+def _claude_desktop_config_path() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+    if sys.platform == "win32":
+        import os
+
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))
+        return Path(appdata) / "Claude/claude_desktop_config.json"
+    return Path.home() / ".config/Claude/claude_desktop_config.json"
+
+
+def _client_config_path(client: str) -> Path:
+    if client == "claude-desktop":
+        return _claude_desktop_config_path()
+    return Path(_CLIENT_CONFIG_PATHS[client]).resolve()
+
+
+@app.command()
+def init(
+    client: str = typer.Option(
+        ...,
+        "--client",
+        help="MCP client to register Belay with: claude-desktop, claude-code, or cursor.",
+    ),
+    config: str = typer.Option(
+        "belay.wrap.json",
+        "--config",
+        "-c",
+        help="Wrap config path written by `belay wrap` (must already exist).",
+    ),
+    name: str = typer.Option(
+        "belay", "--name", help="MCP server name the client will list Belay under."
+    ),
+) -> None:
+    """Register Belay as an MCP server in a client's config (one command, no manual JSON).
+
+    Merges into the client's existing `mcpServers` block -- other servers the
+    agent already talks to are left untouched, so the agent sees Belay
+    alongside its other tools rather than in place of them.
+    """
+    import json
+
+    if client not in _CLIENT_CONFIG_PATHS:
+        typer.echo(
+            f"error: unknown --client {client!r} (expected one of: "
+            f"{', '.join(_CLIENT_CONFIG_PATHS)})",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    wrap_path = Path(config).resolve()
+    if not wrap_path.is_file():
+        typer.echo(
+            f"error: {wrap_path} not found -- run `belay wrap` first to create it", err=True
+        )
+        raise typer.Exit(code=1)
+
+    target = _client_config_path(client)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    doc: dict[str, object] = {}
+    if target.is_file():
+        text = target.read_text(encoding="utf-8").strip()
+        if text:
+            doc = json.loads(text)
+
+    servers = doc.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        typer.echo(f"error: {target} has a non-object 'mcpServers' -- fix it by hand", err=True)
+        raise typer.Exit(code=1)
+    servers[name] = {
+        "command": sys.executable,
+        "args": ["-m", "belay.cli.main", "run", "--config", str(wrap_path)],
+    }
+
+    target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    typer.echo(f"registered '{name}' in {target}")
+    typer.echo("restart the client for the change to take effect")
+
+
+@app.command()
+def dashboard(
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    out: str = typer.Option(
+        "belay-dashboard.html", "--out", "-o", help="Where to write the dashboard HTML."
+    ),
+) -> None:
+    """Render a static HTML snapshot of a ledger: sessions, steps, and approvals.
+
+    No server, no live DB access from the page -- a snapshot, refreshed by
+    re-running this command. Pending approvals show the exact `belay
+    approvals approve/reject` command to run rather than a clickable button
+    (spec §7/§12: approval is a CLI-only, human-typed action by design).
+    """
+    from belay.cli.dashboard import render_dashboard
+
+    if not Path(db).is_file():
+        typer.echo(f"error: {db} not found", err=True)
+        raise typer.Exit(code=1)
+
+    html = render_dashboard(db)
+    Path(out).write_text(html, encoding="utf-8")
+    typer.echo(f"wrote {out}")
+
+
+@app.command(name="draft-contracts")
+def draft_contracts_command(
+    server_dir: str = typer.Argument(
+        ...,
+        help="Directory of the upstream MCP server (must contain server.py), "
+        "unless --command overrides the launch entirely.",
+    ),
+    command: str = typer.Option(
+        "", "--command", help="Executable to launch the upstream server (e.g. 'npx')."
+    ),
+    arg: list[str] = typer.Option(  # noqa: B008
+        [], "--arg", help="Argument to pass to --command (repeatable, in order)."
+    ),
+    out: str = typer.Option(
+        "contracts_draft.yaml", "--out", "-o", help="Where to write the draft contract set."
+    ),
+) -> None:
+    """Propose a starting contract per upstream tool from its MCP name/annotations.
+
+    Connects to the real upstream, reads each tool's `readOnlyHint`/
+    `destructiveHint` and name (no LLM involved), and drafts a contract per
+    tool -- every one `provenance.verified: false`, meant for human review
+    and editing, never trusted as-is (spec §4.7's `verified` flag exists
+    exactly for this: Belay never treats an unreviewed contract as ground
+    truth). Read/write/delete tools sharing a resource name are paired into
+    capture+undo contracts, mirroring the hand-written pattern in
+    `examples/contracts/fs.yaml`; everything else defaults to `irreversible`
+    -- the safe default when no undo path can be inferred.
+    """
+    import os
+
+    import anyio
+    import yaml
+
+    from belay.contracts.draft import draft_contracts
+    from belay.proxy.config import UpstreamCommand
+    from belay.proxy.upstream import connect_stdio
+
+    if command:
+        upstream = UpstreamCommand(command=command, args=list(arg))
+    else:
+        server_path = Path(server_dir).resolve()
+        entry = server_path / "server.py"
+        if not entry.is_file():
+            typer.echo(
+                f"error: {entry} not found (expected an MCP server entry point, "
+                "or pass --command for a non-Python server)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        upstream = UpstreamCommand(command=sys.executable, args=[str(entry)])
+
+    async def _main() -> None:
+        async with connect_stdio(
+            upstream.command, upstream.args, env=dict(os.environ)
+        ) as client:
+            tools = await client.list_tools()
+            results = draft_contracts(tools)
+            docs = [r.document for r in results]
+            text = yaml.safe_dump_all(docs, sort_keys=False, default_flow_style=False)
+            Path(out).write_text(text, encoding="utf-8")
+            typer.echo(f"wrote {len(docs)} draft contract(s) to {out}")
+            for r in results:
+                typer.echo(f"  {r.tool_name}: {r.note}")
+            typer.echo("review every one before use -- all are provenance.verified: false")
+
+    anyio.run(_main)
 
 
 @app.command()

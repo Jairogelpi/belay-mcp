@@ -140,8 +140,8 @@ async def test_call_tool_allow_carries_minimal_explanation_for_symmetry() -> Non
     async with create_connected_server_and_client_session(proxy.mcp_server) as client:
         result = await client.call_tool("fs.list_files", {})
         assert not result.isError
-        assert result.structuredContent is not None
-        explanation = result.structuredContent["explanation"]
+        assert result.meta is not None
+        explanation = result.meta["belay/explanation"]
         assert explanation["verdict"] == "allow"
         assert explanation["dimensions"] == []
 

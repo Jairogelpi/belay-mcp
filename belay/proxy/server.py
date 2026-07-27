@@ -77,14 +77,19 @@ class BelayProxyServer:
                     isError=True,
                 )
             if isinstance(result, CallToolResult):
-                # E16: fold the allow-path Explanation into `structuredContent`,
-                # additively -- the upstream's own `content`/other fields are
-                # untouched, existing clients/tests reading them see no change.
+                # E16: fold the allow-path Explanation into `meta` (MCP's
+                # out-of-band extension field, spec-exempt from the tool's
+                # declared `outputSchema`) -- NOT `structuredContent`, which
+                # real upstreams often validate strictly
+                # (`additionalProperties: false`); putting it there broke
+                # every such upstream (found wrapping the real
+                # `@modelcontextprotocol/server-filesystem`). `content`/
+                # `structuredContent` stay untouched either way.
                 explanation = self.lifecycle.last_explanation
                 if explanation is not None:
-                    structured = dict(result.structuredContent or {})
-                    structured.setdefault("explanation", explanation)
-                    result = result.model_copy(update={"structuredContent": structured})
+                    meta = dict(result.meta or {})
+                    meta.setdefault("belay/explanation", explanation)
+                    result = result.model_copy(update={"meta": meta})
                 return result
             # A structured, non-error status payload (spec §7.3
             # `pending_approval`) -- not a raw error, not the upstream's
