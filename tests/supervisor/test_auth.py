@@ -63,3 +63,57 @@ def test_token_file_is_not_world_or_group_readable_on_posix(tmp_path: Path) -> N
     load_or_create_authkey(path)
     mode = path.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_truncated_token_file_is_regenerated_not_used_as_is(tmp_path: Path) -> None:
+    path = tmp_path / "install.key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"only-5")  # far short of TOKEN_LENGTH (32)
+
+    token = load_or_create_authkey(path)
+    assert len(token) == 32
+    assert token != b"only-5"
+    assert path.read_bytes() == token  # regenerated file matches what was returned
+
+
+def test_empty_token_file_is_regenerated(tmp_path: Path) -> None:
+    path = tmp_path / "install.key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+
+    token = load_or_create_authkey(path)
+    assert len(token) == 32
+
+
+def test_oversized_token_file_is_regenerated_not_used_as_is(tmp_path: Path) -> None:
+    """Not just short -- a token file that's grown too long (corrupted,
+    concatenated, or replaced with something else the right length by
+    coincidence isn't the point) must also never be used as-is."""
+    path = tmp_path / "install.key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * 64)
+
+    token = load_or_create_authkey(path)
+    assert len(token) == 32
+    assert token != b"x" * 64
+
+
+def test_repeated_corruption_eventually_raises_instead_of_looping_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path that can never hold a valid token (e.g. a filesystem/read path
+    that's fundamentally broken, not just one bad file) must fail loudly --
+    never silently fall back to running unauthenticated, and never recurse
+    forever trying to repair it. Patches `Path.read_bytes` itself (not just
+    `_read_complete_token`) so even a freshly (successfully) written
+    replacement file still reads back as corrupted -- otherwise the
+    regenerate-once-and-succeed path (already covered by the tests above)
+    is all this would actually exercise."""
+    path = tmp_path / "install.key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"still-broken-no-matter-how-many-times-we-try")
+
+    monkeypatch.setattr(Path, "read_bytes", lambda self: b"short")
+
+    with pytest.raises(RuntimeError, match="expected 32"):
+        load_or_create_authkey(path)
