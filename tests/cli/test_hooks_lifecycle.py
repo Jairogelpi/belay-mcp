@@ -23,8 +23,20 @@ runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.chdir(tmp_path)
+    yield
+    # `belay hooks run` may have spawned a real detached supervisor process
+    # (tests below that exercise it end-to-end deliberately do, to prove the
+    # spawn+connect+respond round-trip actually works, not just the
+    # decision logic) -- stop it so test runs don't accumulate orphaned
+    # background processes. Harmless (a no-op) for tests that never touched
+    # a supervisor at all.
+    from belay.supervisor.addressing import supervisor_identity
+    from belay.supervisor.client import send_shutdown
+
+    for db_name in ("test.db", "belay-hooks.db"):
+        send_shutdown(supervisor_identity((tmp_path / db_name).resolve()))
 
 
 def _settings_path(tmp_path: Path) -> Path:
@@ -102,7 +114,13 @@ def test_doctor_reports_unchanged_since_install(tmp_path: Path) -> None:
 
 def test_hooks_run_pretooluse_allows_safe_command_end_to_end(tmp_path: Path) -> None:
     payload = json.dumps(
-        {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "git status"}}
+        {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_allow_test",
+        }
     )
     result = runner.invoke(app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=payload)
     assert result.exit_code == 0, result.output
@@ -112,7 +130,13 @@ def test_hooks_run_pretooluse_allows_safe_command_end_to_end(tmp_path: Path) -> 
 
 def test_hooks_run_pretooluse_denies_and_queues_unsafe_command(tmp_path: Path) -> None:
     payload = json.dumps(
-        {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "rm -rf /tmp/x"}}
+        {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /tmp/x"},
+            "tool_use_id": "toolu_deny_test",
+        }
     )
     result = runner.invoke(app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=payload)
     assert result.exit_code == 0, result.output

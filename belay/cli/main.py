@@ -693,18 +693,22 @@ def hooks_run(
     db: str = typer.Option(
         "belay-hooks.db",
         "--db",
-        help="Approval queue database -- the same file `belay approvals` reads.",
+        help="Approval queue database -- the same file `belay approvals` reads, and the one "
+        "this install's supervisor process is identified by (spec ARCH-003).",
+    ),
+    host: str = typer.Option(
+        "claude-code", "--host", help="Which host adapter normalizes this event."
     ),
 ) -> None:
-    """Hook entrypoint: reads the calling agent's JSON payload from stdin, decides,
-    prints the response JSON to stdout, exits 0. Not for direct human use -- this is
-    what `belay hooks install` points the agent's own hook config at.
+    """Hook entrypoint: reads the calling agent's JSON payload from stdin, sends it to
+    this install's local supervisor (spawning it on demand if it isn't already running --
+    spec ARCH-001/008), prints the decision JSON to stdout, exits 0. Not for direct human
+    use -- this is what `belay hooks install` points the agent's own hook config at.
 
-    Malformed stdin, or an event this first slice doesn't handle yet
-    (anything but PreToolUse), exits 0 with no output -- normal flow applies,
-    same as a hook that declined to make a decision. A safety gate that
-    crashes or blocks on its own confusion would be worse than one that
-    defers.
+    Malformed stdin, or an event this first slice doesn't handle yet (anything but
+    PreToolUse), exits 0 with no output -- normal flow applies, same as a hook that
+    declined to make a decision. If the supervisor can't be reached at all, the
+    connection itself fails closed (deny) rather than this command crashing or hanging.
     """
     import json
 
@@ -716,11 +720,73 @@ def hooks_run(
     if event != "PreToolUse":
         return
 
-    from belay.hooks.gate import handle_pre_tool_use
+    from belay.supervisor.addressing import supervisor_identity
+    from belay.supervisor.client import send_hook_event
 
-    queue = _approval_queue(db)
-    result = handle_pre_tool_use(payload, queue)
+    db_path = Path(db).resolve()
+    identity = supervisor_identity(db_path)
+    result = send_hook_event(identity, str(db_path), host, payload)
     typer.echo(json.dumps(result))
+
+
+supervisor_app = typer.Typer(
+    name="supervisor",
+    help="The per-install local supervisor (spec ARCH-001) that `belay hooks run` talks "
+    "to. Rarely invoked directly -- `belay hooks run` starts one on demand.",
+    no_args_is_help=True,
+)
+app.add_typer(supervisor_app, name="supervisor")
+
+
+@supervisor_app.command("serve")
+def supervisor_serve(
+    db: str = typer.Option("belay-hooks.db", "--db", help="Approval queue database to serve."),
+) -> None:
+    """Run the supervisor in the foreground (blocks). `belay hooks run` normally spawns
+    this itself, detached, when no supervisor is already listening -- direct use is for
+    debugging or explicit service-manager integration."""
+    import logging
+
+    from belay.supervisor.addressing import supervisor_identity
+    from belay.supervisor.server import Supervisor
+
+    logging.basicConfig(level=logging.INFO)
+    db_path = Path(db).resolve()
+    identity = supervisor_identity(db_path)
+    Supervisor(identity, str(db_path)).serve_forever()
+
+
+@supervisor_app.command("status")
+def supervisor_status(
+    db: str = typer.Option("belay-hooks.db", "--db", help="Approval queue database to check."),
+) -> None:
+    """Report whether this install's supervisor is currently reachable."""
+    from belay.supervisor.addressing import supervisor_identity
+    from belay.supervisor.lifecycle import is_listening
+
+    db_path = Path(db).resolve()
+    identity = supervisor_identity(db_path)
+    if is_listening(identity):
+        typer.echo(f"running -- listening on {identity.address}")
+    else:
+        typer.echo("not running")
+        raise typer.Exit(code=1)
+
+
+@supervisor_app.command("stop")
+def supervisor_stop(
+    db: str = typer.Option("belay-hooks.db", "--db", help="Approval queue database to stop."),
+) -> None:
+    """Ask this install's supervisor to stop, if one is running."""
+    from belay.supervisor.addressing import supervisor_identity
+    from belay.supervisor.client import send_shutdown
+
+    db_path = Path(db).resolve()
+    identity = supervisor_identity(db_path)
+    if send_shutdown(identity):
+        typer.echo(f"stopped supervisor for {db_path}")
+    else:
+        typer.echo("not running")
 
 
 @hooks_app.command("install")

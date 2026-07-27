@@ -21,7 +21,7 @@ previewable, gated, and — when it goes wrong — reversible."
 > [`docs/architecture.md`](docs/architecture.md). Nine further entregas
 > (E10-E18, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code/Bash
-> only, said plainly in its own section below). 510 tests,
+> only, said plainly in its own section below). 532 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
@@ -435,6 +435,43 @@ pre-write re-check that aborts on an external edit instead of clobbering it,
 and `belay hooks uninstall`/`belay hooks doctor` with the identical
 restore-vs-surgical/BROKEN-detection logic.
 
+#### Local supervisor
+
+Every decision is made by a persistent, authenticated **local supervisor**
+(`belay/supervisor/`), not a fresh cold-start per tool call: `belay hooks
+run` (what the hook config actually invokes) is a thin IPC client that
+connects to it, spawning one on demand if none is running yet.
+
+```bash
+belay supervisor status --db belay-hooks.db   # running -- listening on ...
+belay supervisor stop --db belay-hooks.db     # ask it to shut down
+```
+
+- **Never an unauthenticated TCP port** — the client talks to the
+  supervisor over a Windows named pipe or a POSIX Unix domain socket (via
+  Python's stdlib `multiprocessing.connection`, which does an HMAC
+  challenge-response handshake with an installation-scoped capability token
+  before any payload crosses the wire — no new dependency, no token ever
+  sent in plaintext). The token lives outside the project directory
+  (`~/.belay/keys/…`, `0600` on POSIX), so an agent restricted to
+  project-directory tool calls can't read or forge it.
+- **Fails closed.** If the supervisor can't be reached or a request times
+  out, the answer is `deny`, not `allow` and not a hang — never leaves a
+  `PreToolUse` call unanswered.
+- **Duplicate event IDs are idempotent** — the exact same tool-call retried
+  gets the exact same answer, even if the underlying approval state changed
+  in between (e.g. a human approved it between the two retries); a
+  genuinely new event for the same command sees the current state.
+- One supervisor per install (keyed by the resolved `--db` path), not a
+  single global daemon shared across unrelated projects.
+- Host-agnostic by construction: the supervisor normalizes every event into
+  one common shape (spec §7.1-style: installation id, host/adapter version,
+  correlation id, phase, surface, normalized tool identity, structured
+  args, cwd/repo identity, OS user obtained independently of the payload,
+  monotonic + wall-clock timestamps) before the classifier ever sees it —
+  adding Codex later is a new adapter module, not a rewrite of the decision
+  logic in `belay/hooks/gate.py`.
+
 ### Wrapping a non-Python MCP server
 
 `belay wrap` defaults to launching `python <server_dir>/server.py`, but any
@@ -595,7 +632,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: `belay hooks install` — deterministic Bash risk classifier + PreToolUse hook, routed through the same `ApprovalQueue` as the MCP path | §7 (extended), adoption/DX | **first slice** — Claude Code/Bash only |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed), `belay hooks install`, deterministic Bash risk classifier, routed through the same `ApprovalQueue` as the MCP path | §7 (extended), ARCH-001–008 (adoption/DX) | **first slice** — Claude Code/Bash only |
 
 ## Conformance
 
