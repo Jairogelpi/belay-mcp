@@ -171,6 +171,7 @@ def build_proof_body(
     intent: str | None,
     allowed_scope: list[str] | None,
     rewind_plan_lines: list[str] | None,
+    intent_verified: bool | None = None,
 ) -> str:
     """A "proof-carrying PR" body answering a reviewer's actual questions, not just a diff list.
 
@@ -190,7 +191,27 @@ def build_proof_body(
         f"paper trail, not a new gate)."
     ]
 
-    asked_text = intent if intent else "_not declared (no intent contract given)_"
+    if intent is None:
+        asked_text = "_not declared (no intent contract given)_"
+    elif intent_verified is True:
+        asked_text = (
+            f"{intent}\n\n_verified: this contract's hash matches the one recorded in "
+            f"`session_started` when the session began -- it is not merely the file "
+            f"`--intent-contract` happened to be pointed at afterward._"
+        )
+    elif intent_verified is False:
+        asked_text = (
+            f"{intent}\n\n**⚠ UNVERIFIED**: this contract's hash does NOT match the one "
+            f"recorded in `session_started` -- the file given to `export-pr` differs from "
+            f"whatever (if anything) actually governed this session. Do not trust this "
+            f"section without checking `belay causal {session_id}` directly."
+        )
+    else:
+        asked_text = (
+            f"{intent}\n\n_not verified: this session recorded no intent contract hash "
+            f"(it likely ran without `belay run --intent-contract`) -- this is asserted "
+            f"from the file given to export-pr, not cryptographically tied to the session._"
+        )
     sections.append("\n### What was asked?\n" + asked_text)
 
     deviations = []

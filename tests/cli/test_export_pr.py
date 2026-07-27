@@ -14,6 +14,7 @@ from belay.cli.export_pr import (
     ExportPrError,
     _confine_to_repo,
     apply_changes,
+    build_proof_body,
     extract_file_changes,
 )
 from belay.ledger.store import LedgerStore
@@ -110,3 +111,24 @@ def test_apply_changes_refuses_dirty_worktree(tmp_path) -> None:
     )
     with pytest.raises(ExportPrError, match="uncommitted changes"):
         apply_changes(tmp_path, [change])
+
+
+def test_build_proof_body_marks_verified_intent() -> None:
+    body = build_proof_body(
+        "s_1", [], [], "", "Add timezone", None, None, intent_verified=True
+    )
+    assert "_verified: this contract's hash matches" in body
+    assert "UNVERIFIED" not in body
+
+
+def test_build_proof_body_flags_unverified_intent() -> None:
+    body = build_proof_body(
+        "s_1", [], [], "", "Add timezone", None, None, intent_verified=False
+    )
+    assert "UNVERIFIED" in body
+    assert "does NOT match" in body
+
+
+def test_build_proof_body_no_intent_says_not_declared() -> None:
+    body = build_proof_body("s_1", [], [], "", None, None, None, intent_verified=None)
+    assert "not declared" in body

@@ -269,11 +269,23 @@ class Lifecycle:
         `on_behalf_of` is optional: the identity that directly launched this
         session (e.g. a scheduler service account) may differ from the
         accountable human it acts for.
+
+        If `self.intent_contract` is set, its canonical hash (same mechanism
+        as `set_hash`, `belay/canonical.py`) is folded into `session_started`'s
+        payload -- part of the hash chain and therefore the signed evidence
+        bundle (E13) from the moment the session starts, not a fact asserted
+        after the fact by whatever `--intent-contract` file `belay export-pr`
+        happens to be pointed at later (adoption/DX, not spec-numbered).
         """
+        payload: dict[str, Any] = {"tool_count": len(self.contract_set.contracts)}
+        if self.intent_contract is not None:
+            from belay.canonical import canonical_hash
+
+            payload["intent_contract_hash"] = canonical_hash(self.intent_contract.model_dump())
         self.ledger.append(
             self.session_id,
             "session_started",
-            {"tool_count": len(self.contract_set.contracts)},
+            payload,
             set_hash=self.contract_set.set_hash,
             initiated_by=initiated_by,
             on_behalf_of=on_behalf_of,

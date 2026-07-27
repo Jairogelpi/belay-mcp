@@ -663,12 +663,25 @@ def export_pr(
 
     intent_text: str | None = None
     allowed_scope: list[str] | None = None
+    intent_verified: bool | None = None
     if intent_contract:
+        from belay.canonical import canonical_hash
         from belay.intent.loader import load_intent_contract
 
         ic = load_intent_contract(intent_contract)
         intent_text = ic.intent
         allowed_scope = ic.allowed_scope
+
+        recorded_hash = next(
+            (
+                e.payload.get("intent_contract_hash")
+                for e in events
+                if e.type == "session_started"
+            ),
+            None,
+        )
+        if recorded_hash is not None:
+            intent_verified = recorded_hash == canonical_hash(ic.model_dump())
 
     rewind_plan_lines: list[str] | None = None
     if config:
@@ -697,7 +710,14 @@ def export_pr(
 
     body_path = repo_path / f".belay-pr-body-{session_id}.md"
     body = build_proof_body(
-        session_id, events, changes, evidence_note, intent_text, allowed_scope, rewind_plan_lines
+        session_id,
+        events,
+        changes,
+        evidence_note,
+        intent_text,
+        allowed_scope,
+        rewind_plan_lines,
+        intent_verified,
     )
     body_path.write_text(body, encoding="utf-8")
 

@@ -129,6 +129,14 @@ conformance:
   (or `belay export-pr`'s PR body) to judge — claiming to machine-verify
   "the public API wasn't touched" without real static analysis would be
   worse than not checking it. See `examples/contracts/intent-timezone.yaml`.
+  Its canonical hash (`belay/canonical.py`, same mechanism as contracts'
+  `set_hash`) is folded into `session_started`'s payload the moment the
+  session begins — part of the hash chain and the signed evidence bundle
+  (E13) from the start, not a fact asserted after the fact. `belay
+  export-pr --intent-contract` compares the file it's given against that
+  recorded hash and labels its "What was asked?" section: **verified**
+  (hashes match), **⚠ UNVERIFIED** (flagged loudly, never silently
+  trusted), or **not verified** (the session recorded no hash at all).
 
 ```bash
 belay run --config belay.wrap.json --intent-contract intent.yaml
