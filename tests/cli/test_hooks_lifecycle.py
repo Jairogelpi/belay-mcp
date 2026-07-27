@@ -25,6 +25,13 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.chdir(tmp_path)
+    # Without this, every test here (and the real subprocess `belay hooks
+    # run` spawns) resolves BELAY_HOME to this machine's REAL
+    # ~/.belay / %LOCALAPPDATA%\belay -- confirmed the hard way: an earlier
+    # run of this suite left dozens of real key/data files there.
+    # subprocess.Popen inherits os.environ by default, so this env var
+    # reaches the detached supervisor process too, not just this process.
+    monkeypatch.setenv("BELAY_HOME", str(tmp_path / "belay-home"))
     yield
     # `belay hooks run` may have spawned a real detached supervisor process
     # (tests below that exercise it end-to-end deliberately do, to prove the
@@ -143,7 +150,16 @@ def test_hooks_run_pretooluse_denies_and_queues_unsafe_command(tmp_path: Path) -
     out = json.loads(result.stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    list_result = runner.invoke(app, ["approvals", "list", "--db", "test.db"])
+    # "test.db" is only ever an identity anchor now (P0 fix: the real data
+    # lives outside the project, never in a file the gated agent's own
+    # tools could reach) -- resolve the real path the same way `belay hooks
+    # install`'s own printed message tells a human to.
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity((tmp_path / "test.db").resolve()).data_path
+    assert not (tmp_path / "test.db").exists()  # nothing was ever created in the project
+
+    list_result = runner.invoke(app, ["approvals", "list", "--db", str(data_path)])
     assert "pending" in list_result.output
     assert "rm -rf /tmp/x" not in list_result.output  # plan dict isn't dumped raw, just tool/id
 

@@ -11,6 +11,7 @@ server/client protocol logic in isolation, fast.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Iterator
@@ -24,13 +25,15 @@ from belay.supervisor.addressing import SupervisorIdentity, supervisor_identity
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.protocol import SupervisorRequest, SupervisorResponse
 from belay.supervisor.server import Supervisor
+from belay.supervisor.wire import recv_json, send_json
 
 
 @pytest.fixture
 def running_supervisor(tmp_path: Path) -> Iterator[tuple[SupervisorIdentity, str]]:
-    db_path = str((tmp_path / "belay-hooks.db").resolve())
-    identity = supervisor_identity(Path(db_path), belay_home=tmp_path / "home")
-    supervisor = Supervisor(identity, db_path)
+    # never opened directly -- identity seed only
+    project_anchor = (tmp_path / "belay-hooks.db").resolve()
+    identity = supervisor_identity(project_anchor, belay_home=tmp_path / "home")
+    supervisor = Supervisor(identity)
     thread = threading.Thread(target=supervisor.serve_forever, daemon=True)
     thread.start()
 
@@ -48,11 +51,13 @@ def running_supervisor(tmp_path: Path) -> Iterator[tuple[SupervisorIdentity, str
     if not started:
         pytest.fail("supervisor never started listening")
 
-    yield identity, db_path
+    # The REAL data location -- what a human's `belay approvals` CLI (a
+    # separate process from the supervisor) would point `--db` at.
+    yield identity, str(identity.data_path)
 
     try:
         conn = Client(identity.address, authkey=authkey)
-        conn.send(SupervisorRequest(kind="shutdown").to_wire())
+        send_json(conn, SupervisorRequest(kind="shutdown").to_wire())
         conn.close()
     except OSError:
         pass
@@ -63,8 +68,8 @@ def _send(identity: SupervisorIdentity, request: SupervisorRequest) -> Superviso
     authkey = load_or_create_authkey(identity.authkey_path)
     conn = Client(identity.address, authkey=authkey)
     try:
-        conn.send(request.to_wire())
-        return SupervisorResponse.from_wire(conn.recv())
+        send_json(conn, request.to_wire())
+        return SupervisorResponse.from_wire(recv_json(conn))
     finally:
         conn.close()
 
@@ -111,16 +116,63 @@ def test_hook_event_for_unknown_host_is_denied(
     assert "unsupported host" in out["permissionDecisionReason"]
 
 
-def test_malformed_request_does_not_crash_the_supervisor(
+def test_wrong_shaped_json_request_does_not_crash_the_supervisor(
     running_supervisor: tuple[SupervisorIdentity, str],
 ) -> None:
     identity, _ = running_supervisor
     authkey = load_or_create_authkey(identity.authkey_path)
     conn = Client(identity.address, authkey=authkey)
-    conn.send({"totally": "not a valid request shape"})
-    response = SupervisorResponse.from_wire(conn.recv())
+    send_json(conn, {"totally": "not a valid request shape"})
+    response = SupervisorResponse.from_wire(recv_json(conn))
     conn.close()
     assert response.ok is False
+
+    # The supervisor must still be alive and answering afterward.
+    assert _send(identity, SupervisorRequest(kind="ping")).ok
+
+
+def test_pickled_request_is_rejected_not_unpickled(
+    running_supervisor: tuple[SupervisorIdentity, str],
+) -> None:
+    """The whole point of moving off `Connection.send`/`.recv`: bytes that
+    happen to be a valid pickle stream (what the old, vulnerable wire format
+    would have silently deserialized -- and executed, for a malicious
+    payload) must be rejected as malformed JSON, never unpickled."""
+    identity, _ = running_supervisor
+    authkey = load_or_create_authkey(identity.authkey_path)
+    conn = Client(identity.address, authkey=authkey)
+    conn.send({"totally": "a pickled object, not JSON"})  # Connection.send() pickles this
+    response = SupervisorResponse.from_wire(recv_json(conn))
+    conn.close()
+    assert response.ok is False
+    assert response.error == "malformed request"
+
+    # The supervisor must still be alive and answering afterward.
+    assert _send(identity, SupervisorRequest(kind="ping")).ok
+
+
+def test_oversized_message_is_rejected_not_buffered(
+    running_supervisor: tuple[SupervisorIdentity, str],
+) -> None:
+    from belay.supervisor.wire import MAX_MESSAGE_BYTES
+
+    identity, _ = running_supervisor
+    authkey = load_or_create_authkey(identity.authkey_path)
+    conn = Client(identity.address, authkey=authkey)
+    huge = {"kind": "ping", "padding": "x" * (MAX_MESSAGE_BYTES + 1024)}
+    try:
+        # The server-side `recv_bytes(maxlength=...)` is what actually
+        # enforces the limit (confirmed via its log line below) -- the
+        # client's own send_bytes() of a single ~1MB+ message can itself
+        # fail at the transport layer on some platforms (observed: a
+        # Windows named pipe write that large can break the pipe outright)
+        # before the server even finishes rejecting it. Either way is a
+        # correctly-refused oversized message, not a crash.
+        conn.send_bytes(json.dumps(huge).encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        conn.close()
 
     # The supervisor must still be alive and answering afterward.
     assert _send(identity, SupervisorRequest(kind="ping")).ok
@@ -169,9 +221,9 @@ def test_duplicate_event_id_returns_cached_response_even_after_approval(
 
 
 def test_shutdown_stops_serve_forever(tmp_path: Path) -> None:
-    db_path = str((tmp_path / "belay-hooks.db").resolve())
-    identity = supervisor_identity(Path(db_path), belay_home=tmp_path / "home")
-    supervisor = Supervisor(identity, db_path)
+    project_anchor = (tmp_path / "belay-hooks.db").resolve()
+    identity = supervisor_identity(project_anchor, belay_home=tmp_path / "home")
+    supervisor = Supervisor(identity)
     thread = threading.Thread(target=supervisor.serve_forever, daemon=True)
     thread.start()
 

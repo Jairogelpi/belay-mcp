@@ -1,8 +1,10 @@
 """The local supervisor (spec ARCH-001/002/006/007): a persistent,
 authenticated process holding the `ApprovalQueue`'s connection warm (so a
 hook decision doesn't pay Python interpreter cold-start on every single tool
-call) and providing duplicate-event idempotency across the lifetime of one
-supervisor process.
+call) and providing duplicate-event idempotency that survives a restart
+(`belay/supervisor/idempotency.py` -- SQLite-backed, not an in-memory dict:
+a P0 review correctly found that losing an in-memory cache on restart could
+re-decide a retried event against changed approval state).
 
 Listens on a `multiprocessing.connection` address (a Windows named pipe or a
 POSIX Unix domain socket -- never an unauthenticated TCP port, spec
@@ -10,6 +12,13 @@ ARCH-002) with an installation-scoped `authkey` (spec ARCH-003/004,
 `belay/supervisor/auth.py`); `multiprocessing.connection` performs an
 HMAC-based challenge-response handshake using that key before any payload is
 exchanged, so the token itself never crosses the wire.
+
+All durable state (`ApprovalRow`, `HookEventRow`) lives in
+`identity.data_path`, under `belay_home()` -- never inside the project this
+supervisor is gating. A prior version defaulted to a project-local
+`belay-hooks.db`, which a P0 review correctly flagged: an agent with
+ordinary project-directory write access could reach that file directly and
+edit its own approval state by hand.
 """
 
 from __future__ import annotations
@@ -25,12 +34,16 @@ from multiprocessing.connection import Listener
 from multiprocessing.context import AuthenticationError
 from typing import Any
 
+from sqlalchemy import create_engine
+
 from belay.approvals.queue import ApprovalQueue
 from belay.hooks import claude_code_adapter, gate
 from belay.hooks.gate import GateDecision
 from belay.supervisor.addressing import SupervisorIdentity
 from belay.supervisor.auth import load_or_create_authkey
+from belay.supervisor.idempotency import IdempotencyStore, content_digest, event_key
 from belay.supervisor.protocol import HookEvent, SupervisorRequest, SupervisorResponse
+from belay.supervisor.wire import WireError, recv_json, send_json
 
 logger = logging.getLogger("belay.supervisor")
 
@@ -56,18 +69,25 @@ def _unknown_host_response(host: str) -> dict[str, Any]:
     }
 
 
+def _collision_response(hook_event_name: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "belay: event id collision -- the same event id/session/"
+            "phase was already decided with different content; denying rather than trusting "
+            "either version",
+        }
+    }
+
+
 class Supervisor:
-    def __init__(self, identity: SupervisorIdentity, db_path: str) -> None:
+    def __init__(self, identity: SupervisorIdentity) -> None:
         self._identity = identity
-        self._queue = ApprovalQueue(db_url=f"sqlite:///{db_path}")
-        #: Duplicate event IDs MUST be idempotent (spec ARCH-006). In-memory
-        #: is sufficient: the underlying decision is already idempotent by
-        #: construction (deterministic classification + the durable
-        #: ApprovalQueue lookup by plan_id), so losing this cache on
-        #: restart never changes the *correctness* of a re-decided event --
-        #: it only means a retried event after a restart is re-evaluated
-        #: instead of instantly replayed, which produces the same answer.
-        self._seen_events: dict[str, dict[str, Any]] = {}
+        identity.data_path.parent.mkdir(parents=True, exist_ok=True)
+        engine = create_engine(f"sqlite:///{identity.data_path}", future=True)
+        self._queue = ApprovalQueue(engine=engine)
+        self._idempotency = IdempotencyStore(engine)
 
     def handle_hook_event(self, host: str, raw_payload: dict[str, Any]) -> dict[str, Any]:
         adapter = _ADAPTERS.get(host)
@@ -86,14 +106,31 @@ class Supervisor:
                 }
             }
 
-        if event.event_id and event.event_id in self._seen_events:
-            return self._seen_events[event.event_id]
+        if not event.event_id:
+            # No durable key can be formed without one -- gate.evaluate()
+            # denies this itself (ambiguous identity, spec §7.1), every
+            # time, so there's nothing useful to cache anyway.
+            return render(gate.evaluate(event, self._queue))
+
+        key = event_key(event.installation_id, event.host, event.host_session_id,
+                         event.event_id, event.phase)
+        digest = content_digest(event)
+
+        cached = self._idempotency.get(key)
+        if cached is not None:
+            if cached.request_digest != digest:
+                return _collision_response(event.phase)
+            return cached.response
 
         decision = gate.evaluate(event, self._queue)
         response = render(decision)
-        if event.event_id:
-            self._seen_events[event.event_id] = response
-        return response
+        winner = self._idempotency.record_if_absent(key, digest, response)
+        if winner.request_digest != digest:
+            # Lost a race against a DIFFERENT-content event with the same
+            # key (only possible under real concurrency) -- same collision
+            # handling as the non-racing case above.
+            return _collision_response(event.phase)
+        return winner.response
 
     def serve_forever(self) -> None:
         authkey = load_or_create_authkey(self._identity.authkey_path)
@@ -141,26 +178,27 @@ class Supervisor:
 
     def _handle_request(self, conn: Any) -> str | None:
         try:
-            raw = conn.recv()
+            raw = recv_json(conn)
         except EOFError:
             return None  # peer connected and disconnected without sending anything -- benign
+        except WireError as exc:
+            logger.warning("rejected a malformed/oversized message: %s", exc)
+            send_json(conn, SupervisorResponse(ok=False, error="malformed request").to_wire())
+            return None
 
-        request: SupervisorRequest | None
         try:
-            request = SupervisorRequest(**raw) if isinstance(raw, dict) else None
-        except TypeError:
-            request = None
-
-        if request is None:
-            conn.send(SupervisorResponse(ok=False, error="malformed request").to_wire())
+            request = SupervisorRequest.from_wire(raw)
+        except ValueError as exc:
+            response = SupervisorResponse(ok=False, error=f"malformed request: {exc}")
+            send_json(conn, response.to_wire())
             return None
 
         if request.kind == "ping":
-            conn.send(SupervisorResponse(ok=True, payload={"pong": True}).to_wire())
+            send_json(conn, SupervisorResponse(ok=True, payload={"pong": True}).to_wire())
             return None
 
         if request.kind == "shutdown":
-            conn.send(SupervisorResponse(ok=True, payload={"stopping": True}).to_wire())
+            send_json(conn, SupervisorResponse(ok=True, payload={"stopping": True}).to_wire())
             return "shutdown"
 
         if request.kind == "hook_event" and isinstance(request.event, dict):
@@ -168,13 +206,14 @@ class Supervisor:
             payload = {k: v for k, v in request.event.items() if k != "_host"}
             try:
                 result = self.handle_hook_event(host, payload)
-                conn.send(SupervisorResponse(ok=True, payload=result).to_wire())
+                send_json(conn, SupervisorResponse(ok=True, payload=result).to_wire())
             except Exception as exc:  # never let a bad event kill the supervisor
                 logger.exception("error handling hook event")
-                conn.send(SupervisorResponse(ok=False, error=str(exc)).to_wire())
+                send_json(conn, SupervisorResponse(ok=False, error=str(exc)).to_wire())
             return None
 
-        conn.send(
-            SupervisorResponse(ok=False, error=f"unknown request kind {request.kind!r}").to_wire()
+        send_json(
+            conn,
+            SupervisorResponse(ok=False, error=f"unknown request kind {request.kind!r}").to_wire(),
         )
         return None

@@ -76,3 +76,28 @@ class IdempotencyRow(Base):
     step_seq: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16))
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
+class HookEventRow(Base):
+    """One row per hook event the supervisor (`belay/supervisor/`) has
+    decided (spec ARCH-006: duplicate event IDs MUST be idempotent --
+    durably, across a supervisor restart, not merely for one process's
+    in-memory lifetime). A distinct table/key scheme from `IdempotencyRow`
+    above on purpose: that one is the saga executor's own MCP-call
+    idempotency (session_id+step_seq scoped, "calling"/"done" lifecycle);
+    this one is native-hook-event scoped
+    (installation+host+session+event_id+phase) and single-shot (a key is
+    written once, at decision time, never transitions states).
+
+    `request_digest` guards against an ID collision: the same key seen
+    again with *different* content (a different command, cwd, etc.) is
+    never answered from either version -- see
+    `belay/supervisor/idempotency.py`.
+    """
+
+    __tablename__ = "hook_events"
+
+    event_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    request_digest: Mapped[str] = mapped_column(String(64))
+    response: Mapped[dict[str, Any]] = mapped_column(JSON)
+    decided_at: Mapped[str] = mapped_column(String(64))

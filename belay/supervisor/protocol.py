@@ -5,12 +5,14 @@ it ever reaches the decision logic in `belay/hooks/`, so `belay/hooks/gate.py`
 never has to know which host it's talking to -- one normalized shape, one
 decision path, regardless of how many adapters exist later.
 
-Only plain JSON-serializable dicts cross the wire (never a pickled dataclass
-or arbitrary object): `to_wire()`/`from_wire()` round-trip through a plain
-dict deliberately, even though `multiprocessing.connection` would happily
-pickle a dataclass directly -- the channel is authenticated before any
-payload is exchanged, but keeping the wire format to plain JSON-shaped data
-is a second, independent boundary that costs nothing here.
+Only plain JSON-shaped dicts cross the wire, over `belay/supervisor/wire.py`
+(`send_json`/`recv_json`) -- never `Connection.send()`/`.recv()`, which
+pickle their argument (see `wire.py`'s docstring for why that matters
+against an authenticated-but-not-necessarily-trustworthy peer).
+`SupervisorRequest.from_wire`/`SupervisorResponse.from_wire` validate every
+field's type explicitly before constructing anything; a malformed dict
+raises `ValueError`, never silently coerces or partially constructs an
+object from data that doesn't match this shape.
 """
 
 from __future__ import annotations
@@ -63,10 +65,6 @@ class HookEvent:
     def to_wire(self) -> dict[str, Any]:
         return asdict(self)
 
-    @classmethod
-    def from_wire(cls, data: dict[str, Any]) -> HookEvent:
-        return cls(**data)
-
 
 def local_os_user() -> str:
     """The OS user identity, obtained from the OS itself -- never from
@@ -86,6 +84,9 @@ def now_fields() -> tuple[int, str]:
     return time.monotonic_ns(), datetime.now(UTC).isoformat()
 
 
+_REQUEST_KINDS = frozenset({"hook_event", "ping", "shutdown"})
+
+
 @dataclass(frozen=True)
 class SupervisorRequest:
     kind: Literal["hook_event", "ping", "shutdown"]
@@ -93,6 +94,21 @@ class SupervisorRequest:
 
     def to_wire(self) -> dict[str, Any]:
         return {"kind": self.kind, "event": self.event}
+
+    @classmethod
+    def from_wire(cls, data: dict[str, Any]) -> SupervisorRequest:
+        """Raises `ValueError` on anything that doesn't match this shape --
+        never partially constructs a request from data this module doesn't
+        recognize."""
+        if set(data.keys()) - {"kind", "event"}:
+            raise ValueError(f"unexpected fields: {sorted(set(data.keys()) - {'kind', 'event'})}")
+        kind = data.get("kind")
+        if kind not in _REQUEST_KINDS:
+            raise ValueError(f"'kind' must be one of {sorted(_REQUEST_KINDS)}, got {kind!r}")
+        event = data.get("event")
+        if event is not None and not isinstance(event, dict):
+            raise ValueError(f"'event' must be an object or null, got {type(event).__name__}")
+        return cls(kind=kind, event=event)
 
 
 @dataclass(frozen=True)
@@ -106,4 +122,13 @@ class SupervisorResponse:
 
     @classmethod
     def from_wire(cls, data: dict[str, Any]) -> SupervisorResponse:
-        return cls(ok=data["ok"], payload=data.get("payload") or {}, error=data.get("error"))
+        """Raises `ValueError` on anything that doesn't match this shape."""
+        if not isinstance(data.get("ok"), bool):
+            raise ValueError(f"'ok' must be a boolean, got {data.get('ok')!r}")
+        payload = data.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"'payload' must be an object, got {type(payload).__name__}")
+        error = data.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ValueError(f"'error' must be a string or null, got {type(error).__name__}")
+        return cls(ok=data["ok"], payload=payload, error=error)

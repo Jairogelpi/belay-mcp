@@ -675,6 +675,15 @@ app.add_typer(hooks_app, name="hooks")
 
 _HOOKS_SUPPORTED_CLIENTS = ("claude-code",)
 
+_DB_ANCHOR_HELP = (
+    "Project identity anchor (a path unique to this project/install). Despite the "
+    "flag name, this is never opened directly as a database -- it's hashed into a "
+    "private storage location under this user's belay home directory, so the project "
+    "(and anything running inside it) can't reach the real approvals data. Pick any "
+    "stable path; the conventional default works for that purpose without meaning "
+    "anything else."
+)
+
 
 def _claude_settings_path(scope: str = "project") -> Path:
     if scope == "user":
@@ -690,12 +699,7 @@ def _hooks_command_for(db: str) -> str:
 @hooks_app.command("run")
 def hooks_run(
     event: str = typer.Argument(..., help="Hook event name from the agent, e.g. PreToolUse."),
-    db: str = typer.Option(
-        "belay-hooks.db",
-        "--db",
-        help="Approval queue database -- the same file `belay approvals` reads, and the one "
-        "this install's supervisor process is identified by (spec ARCH-003).",
-    ),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
     host: str = typer.Option(
         "claude-code", "--host", help="Which host adapter normalizes this event."
     ),
@@ -740,7 +744,7 @@ app.add_typer(supervisor_app, name="supervisor")
 
 @supervisor_app.command("serve")
 def supervisor_serve(
-    db: str = typer.Option("belay-hooks.db", "--db", help="Approval queue database to serve."),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
 ) -> None:
     """Run the supervisor in the foreground (blocks). `belay hooks run` normally spawns
     this itself, detached, when no supervisor is already listening -- direct use is for
@@ -751,23 +755,22 @@ def supervisor_serve(
     from belay.supervisor.server import Supervisor
 
     logging.basicConfig(level=logging.INFO)
-    db_path = Path(db).resolve()
-    identity = supervisor_identity(db_path)
-    Supervisor(identity, str(db_path)).serve_forever()
+    identity = supervisor_identity(Path(db).resolve())
+    Supervisor(identity).serve_forever()
 
 
 @supervisor_app.command("status")
 def supervisor_status(
-    db: str = typer.Option("belay-hooks.db", "--db", help="Approval queue database to check."),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
 ) -> None:
     """Report whether this install's supervisor is currently reachable."""
     from belay.supervisor.addressing import supervisor_identity
     from belay.supervisor.lifecycle import is_listening
 
-    db_path = Path(db).resolve()
-    identity = supervisor_identity(db_path)
+    identity = supervisor_identity(Path(db).resolve())
     if is_listening(identity):
         typer.echo(f"running -- listening on {identity.address}")
+        typer.echo(f"data: {identity.data_path}")
     else:
         typer.echo("not running")
         raise typer.Exit(code=1)
@@ -775,16 +778,15 @@ def supervisor_status(
 
 @supervisor_app.command("stop")
 def supervisor_stop(
-    db: str = typer.Option("belay-hooks.db", "--db", help="Approval queue database to stop."),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
 ) -> None:
     """Ask this install's supervisor to stop, if one is running."""
     from belay.supervisor.addressing import supervisor_identity
     from belay.supervisor.client import send_shutdown
 
-    db_path = Path(db).resolve()
-    identity = supervisor_identity(db_path)
+    identity = supervisor_identity(Path(db).resolve())
     if send_shutdown(identity):
-        typer.echo(f"stopped supervisor for {db_path}")
+        typer.echo(f"stopped supervisor for {identity.data_path}")
     else:
         typer.echo("not running")
 
@@ -799,12 +801,7 @@ def hooks_install(
         "--scope",
         help="'project' (.claude/settings.json, default) or 'user' (~/.claude/settings.json).",
     ),
-    db: str = typer.Option(
-        "belay-hooks.db",
-        "--db",
-        help="Approval queue database this installation's hook writes to. "
-        "`belay approvals list/approve/reject --db <same path>` reviews it.",
-    ),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would change, write nothing."
     ),
@@ -863,9 +860,14 @@ def hooks_install(
 
     _write_client_config("claude-code-hooks", target, "belay-hooks", new_text, before_text)
     typer.echo(f"installed PreToolUse hook in {target}")
+
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity(Path(db).resolve()).data_path
     typer.echo(
-        f"approvals queued by this hook land in {Path(db).resolve()} -- review with "
-        f"`belay approvals list --db {db}`"
+        f"approvals queued by this hook land in {data_path} (private -- outside this "
+        f"project, so the agent this gates can't reach it directly) -- review with "
+        f"`belay approvals list --db {data_path}`"
     )
     typer.echo("restart the agent for the hook to take effect")
 

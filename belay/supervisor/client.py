@@ -14,6 +14,7 @@ from belay.supervisor.addressing import SupervisorIdentity
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.lifecycle import ensure_running
 from belay.supervisor.protocol import SupervisorRequest, SupervisorResponse
+from belay.supervisor.wire import WireError, recv_json, send_json
 
 _RECV_TIMEOUT_S = 5.0
 
@@ -45,16 +46,19 @@ def send_hook_event(
         event_wire: dict[str, Any] = dict(raw_payload)
         event_wire["_host"] = host
         request = SupervisorRequest(kind="hook_event", event=event_wire)
-        conn.send(request.to_wire())
+        send_json(conn, request.to_wire())
         if not conn.poll(_RECV_TIMEOUT_S):
             return _fail_closed_response("hook timed out waiting for supervisor")
-        raw_response = conn.recv()
-    except (OSError, EOFError):
+        raw_response = recv_json(conn)
+    except (OSError, EOFError, WireError):
         return _fail_closed_response("lost connection to supervisor")
     finally:
         conn.close()
 
-    response = SupervisorResponse.from_wire(raw_response)
+    try:
+        response = SupervisorResponse.from_wire(raw_response)
+    except ValueError as exc:
+        return _fail_closed_response(f"supervisor sent a malformed response: {exc}")
     if not response.ok:
         return _fail_closed_response(f"supervisor error: {response.error}")
     return response.payload
@@ -70,9 +74,9 @@ def send_shutdown(identity: SupervisorIdentity) -> bool:
     except OSError:
         return False
     try:
-        conn.send(SupervisorRequest(kind="shutdown").to_wire())
+        send_json(conn, SupervisorRequest(kind="shutdown").to_wire())
         conn.poll(_RECV_TIMEOUT_S)
-    except OSError:
+    except (OSError, WireError):
         pass
     finally:
         conn.close()
