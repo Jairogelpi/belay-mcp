@@ -171,6 +171,25 @@ belay rewind s_abc123 --intent cache-refactor --keep auth-fix --by jairo
 # -> --intent 'cache-refactor' resolved to --to-step 1
 # -> only cache.py's write is compensated; auth.py is untouched
 ```
+- **`belay learn <approval_id>`** compiles a human's rejection into a
+  durable, enforced rule — not agent memory, a real addition to an
+  `IntentContract` (`forbidden_tools`/`forbidden_scope`) that every future
+  session loading it (`belay run --intent-contract`) actually can't
+  violate. Only two proposals are generated, both mechanical (no LLM
+  interpreting the free-text rejection reason): forbid the rejected tool,
+  or forbid its file scope. Printed by default; nothing is written until
+  `--apply <kind> --intent-contract <file>` says so explicitly.
+
+```bash
+belay approvals reject ap_91f9f9b9f2 --by jairo \
+  --reason "bulk_delete with unknown before_year is too risky"
+belay learn ap_91f9f9b9f2 --db belay.db
+# -> candidate rule(s): [forbidden_tools] crm.bulk_delete
+belay learn ap_91f9f9b9f2 --db belay.db \
+  --apply forbidden_tools --intent-contract learned.yaml
+# -> every session with --intent-contract learned.yaml now denies
+#    crm.bulk_delete outright, before the upstream ever sees it
+```
 - **`belay explore <session_id>...`** compares already-run session
   variants side by side — steps, distinct files touched, tools used, steps
   proven by a test vs not, unknown effects, and (with `--config`)

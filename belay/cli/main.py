@@ -357,6 +357,65 @@ def dashboard(
 
 
 @app.command()
+def learn(
+    approval_id: str = typer.Argument(..., help="A rejected approval (spec §7) to learn from."),
+    db: str = typer.Option("belay.db", "--db", help="Ledger/approvals SQLite file path."),
+    apply_kind: str = typer.Option(
+        "",
+        "--apply",
+        help="Actually write a rule to --intent-contract: 'forbidden_tools' or "
+        "'forbidden_scope'. Omit to only print the proposal (default: propose, never apply).",
+    ),
+    intent_contract: str = typer.Option(
+        "",
+        "--intent-contract",
+        help="Intent contract YAML to write the rule into (created fresh if missing). "
+        "Required with --apply.",
+    ),
+) -> None:
+    """Compile a human's rejection into a durable, enforced rule -- never applied silently.
+
+    Only two proposals are generated, both mechanical (no LLM interpreting
+    the rejection reason): forbid the rejected tool outright, or forbid its
+    file scope. Printed by default; `--apply <kind> --intent-contract
+    <file>` is what actually writes it, and from then on every session
+    loading that contract (`belay run --intent-contract`) enforces it --
+    this compiles a decision into a control future sessions can't violate,
+    not a note Belay merely remembers.
+    """
+    from belay.approvals.queue import ApprovalQueue
+    from belay.intent.learn import apply_rule, propose_rule
+
+    queue = ApprovalQueue(db_url=f"sqlite:///{Path(db).resolve().as_posix()}")
+    item = queue.get(approval_id)
+    if item is None:
+        typer.echo(f"error: no approval item {approval_id!r} in {db}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        rules = propose_rule(item)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo(f"rejection: {item.plan.get('tool')} -- reason: {item.reason or '(none recorded)'}")
+    typer.echo("candidate rule(s) (nothing applied yet unless --apply is given):")
+    for rule in rules:
+        typer.echo(f"  [{rule.kind}] {rule.value}")
+
+    if apply_kind:
+        if not intent_contract:
+            typer.echo("error: --apply requires --intent-contract <file>", err=True)
+            raise typer.Exit(code=1)
+        matching = [r for r in rules if r.kind == apply_kind]
+        if not matching:
+            typer.echo(f"error: no proposed rule of kind {apply_kind!r}", err=True)
+            raise typer.Exit(code=1)
+        apply_rule(intent_contract, matching[0])
+        typer.echo(f"applied [{apply_kind}] {matching[0].value} -> {intent_contract}")
+
+
+@app.command()
 def explore(
     session_ids: list[str] = typer.Argument(
         ..., help="Two or more already-run session variants to compare (same task, same "
