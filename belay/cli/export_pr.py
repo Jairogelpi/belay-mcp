@@ -103,20 +103,9 @@ def _confine_to_repo(repo: Path, change_path: str) -> Path:
 
 
 def apply_changes(repo: Path, changes: list[FileChange]) -> list[str]:
-    """Write `changes` onto the working tree (caller has already checked out the PR branch).
-
-    Requires a clean worktree first -- applying changes onto uncommitted
-    local edits would silently fold them into the same commit, misattributing
-    a human's in-progress work to the agent's session.
-    """
-    status = _run("git", "status", "--porcelain", cwd=repo)
-    if status.returncode != 0:
-        raise ExportPrError(f"git status failed: {status.stderr.strip()}")
-    if status.stdout.strip():
-        raise ExportPrError(
-            f"{repo} has uncommitted changes -- commit or stash them before export-pr"
-        )
-
+    """Write `changes` onto the working tree. Caller must have already called
+    `checkout_branch` -- this does not check out anything or check cleanliness
+    itself (that happens once, in `checkout_branch`, before any file is touched)."""
     touched = []
     for change in changes:
         target = _confine_to_repo(repo, change.path)
@@ -130,9 +119,26 @@ def apply_changes(repo: Path, changes: list[FileChange]) -> list[str]:
     return touched
 
 
-def create_branch_and_commit(
-    repo: Path, branch: str, base: str, message: str, paths: list[str]
-) -> None:
+def checkout_branch(repo: Path, branch: str, base: str) -> None:
+    """Check cleanliness, fetch, and check out a fresh branch off `base` --
+    BEFORE any file is touched.
+
+    Ordering matters twice over: (1) writing files before checking out
+    would land them on whatever branch happened to already be checked out
+    (main, most likely) instead of the new PR branch; (2) checking out onto
+    a dirty worktree can silently carry uncommitted local edits onto the
+    new branch, misattributing a human's in-progress work to the agent's
+    session -- both real bugs caught in review, both closed by doing this
+    check-then-checkout as one unconditional first step.
+    """
+    status = _run("git", "status", "--porcelain", cwd=repo)
+    if status.returncode != 0:
+        raise ExportPrError(f"git status failed: {status.stderr.strip()}")
+    if status.stdout.strip():
+        raise ExportPrError(
+            f"{repo} has uncommitted changes -- commit or stash them before export-pr"
+        )
+
     checkout_steps: list[tuple[str, ...]] = [
         ("git", "fetch", "origin", base),
         ("git", "checkout", "-B", branch, f"origin/{base}"),
@@ -141,6 +147,9 @@ def create_branch_and_commit(
         result = _run(*args, cwd=repo)
         if result.returncode != 0:
             raise ExportPrError(f"{' '.join(args)} failed: {result.stderr.strip()}")
+
+
+def commit_changes(repo: Path, message: str, paths: list[str]) -> None:
     if not paths:
         return
     commit_steps: list[tuple[str, ...]] = [

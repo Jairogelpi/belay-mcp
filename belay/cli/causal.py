@@ -79,19 +79,31 @@ def build_causal_graph(events: list[Event]) -> list[CausalNode]:
         args = plan.get("args") or {}
         policy = policies.get(step_seq, {})
         evidence = test_evidence.get(step_seq)
+        declared_test_ref = plan.get("test_ref")
+        # Only mode="test" (belay verify-test --runner, command built mechanically
+        # from the step's OWN test_ref) counts as verified -- mode="command" (a
+        # free-form --cmd) is a real command that ran, but proves nothing about
+        # any specific declared test, so it must never show as VERIFIED here.
+        # The test_ref match is a second guard: evidence recorded against a
+        # different ref than this step currently declares is stale, not proof.
+        is_real_test_verification = bool(
+            evidence
+            and evidence.get("mode") == "test"
+            and evidence.get("test_ref") == declared_test_ref
+        )
         node = CausalNode(
             step_seq=step_seq,
             tool=plan.get("tool", ""),
             args=args,
             intent_id=plan.get("intent_id"),
-            test_ref=plan.get("test_ref"),
+            test_ref=declared_test_ref,
             read_before=captures.get(step_seq),
             policy_verdict=policy.get("verdict"),
             policy_reasons=policy.get("reasons", []),
             status=statuses.get(step_seq),
             compensation_tool=compensations.get(step_seq),
-            test_verified=evidence.get("passed") if evidence else None,
-            test_evidence=evidence,
+            test_verified=(evidence or {}).get("passed") if is_real_test_verification else None,
+            test_evidence=evidence if is_real_test_verification else None,
         )
         path = args.get("path")
         if isinstance(path, str) and path in path_last_step:
@@ -123,8 +135,15 @@ def to_mermaid(nodes: list[CausalNode], session_id: str) -> str:
             lines.append(f"  R --> {step_label}")
         if node.test_ref:
             test_node = f"T{node.step_seq}"
-            lines.append(f'  {test_node}(["test: {node.test_ref}"])')
-            lines.append(f"  {test_node} -.proves.-> {step_label}")
+            if node.test_verified is True:
+                lines.append(f'  {test_node}(["VERIFIED: {node.test_ref}"])')
+                lines.append(f"  {test_node} ==proves==> {step_label}")
+            elif node.test_verified is False:
+                lines.append(f'  {test_node}(["FAILED: {node.test_ref}"])')
+                lines.append(f"  {test_node} -.disproves.-> {step_label}")
+            else:
+                lines.append(f'  {test_node}(["claimed, never run: {node.test_ref}"])')
+                lines.append(f"  {test_node} -.claims (unverified).-> {step_label}")
         for dep in node.depends_on:
             lines.append(f"  S{dep} --> {step_label}")
     return "\n".join(lines)

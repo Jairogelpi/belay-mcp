@@ -20,10 +20,17 @@ previewable, gated, and — when it goes wrong — reversible."
 > (§8), and rewind (§10), diagrammed in
 > [`docs/architecture.md`](docs/architecture.md). Seven further entregas
 > (E10-E16, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
-> "What's new since v0.1.0" below. 307 tests, ≥90% coverage on the full run,
+> "What's new since v0.1.0" below. 389 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
+> **Coverage: 79% repo-wide** (`fail_under = 79`, CI-enforced floor against
+> regressions — raised as more lands, never lowered silently). The
+> spec-normative core stays high where it matters — `contracts/` 92-100%,
+> `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
+> enforcement) 79-100% — it's the newer adoption/DX modules (dashboard,
+> explore, export-pr's git plumbing) pulling the global number down, not
+> the safety-critical path.
 
 ## Why
 
@@ -147,17 +154,25 @@ belay run --config belay.wrap.json --intent-contract intent.yaml
 - **`belay verify-test`** closes the gap in `_belay_test_ref` (a bare
   string the agent itself supplies, never independently checked —
   `tests/fake.py::test_ok` would show up as "proven" whether or not it
-  exists). `belay verify-test <session> --step N --cmd "<real command>"`
-  actually **runs** the command, hashes its combined stdout+stderr (not
-  stored raw), and records exit code + duration + hash as ledger event
-  `belay:test_verified`. `belay causal`/`belay export-pr` then distinguish
-  three tiers per step: **verified** (actually run, exit 0), **claimed**
-  (a `_belay_test_ref` label, never run), or **failed** (run, non-zero
-  exit) — not a single "proven: yes/no" that trusts the agent's word.
+  exists or passes). `--runner pytest|jest|go` reads the step's own
+  `_belay_test_ref` from the ledger and builds the command mechanically
+  from a fixed template — **not** typed in free-form, so an agent or
+  operator cannot substitute an easier-to-pass command under a false test
+  label (`_belay_test_ref="tests/fake.py::test_ok"` plus a `--cmd` that
+  merely happens to exit 0 is caught: it's recorded as `mode: "command"`
+  and never shown as a verified *test*). Real git context (HEAD, tree
+  hash, dirty flag) and who ran it are recorded too. `belay causal`/`belay
+  export-pr` distinguish three tiers per step: **VERIFIED** (`--runner`
+  ran the step's own declared test, exit 0), **claimed, never run** (a
+  `_belay_test_ref` label with no matching verification), or **test
+  FAILED** (ran, non-zero exit) — never a single "proven: yes/no" that
+  trusts the agent's word, and never confusing "some command passed" with
+  "this specific test passed."
 
 ```bash
-belay verify-test s_abc123 --step 1 --cmd "pytest tests/test_auth.py::test_login"
-# -> PASSED (exit_code=0, 340ms, output_hash=sha256:...) -- recorded against step 1
+belay verify-test s_abc123 --step 1 --runner pytest
+# -> running declared test: 'tests/test_auth.py::test_login' via pytest
+# -> TEST PASSED (exit_code=0, 340ms, output_hash=sha256:..., git_head=...)
 belay causal s_abc123
 #   step 1: fs.write_file (auth.py)
 #     VERIFIED by test: tests/test_auth.py::test_login (exit_code=0, output_hash=sha256:...)

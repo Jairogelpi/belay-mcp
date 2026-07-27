@@ -570,53 +570,116 @@ def causal(
 def verify_test(
     session_id: str = typer.Argument(..., help="Session whose step is being verified."),
     step: int = typer.Option(..., "--step", help="step_seq (spec §9.1) this test proves."),
+    runner: str = typer.Option(
+        "",
+        "--runner",
+        help="Test runner ('pytest', 'jest', 'go') -- builds the command mechanically "
+        "from the step's own `_belay_test_ref`, never a string typed at verify-test time. "
+        "This is the only path that can record mode='test' (VERIFIED in belay causal).",
+    ),
     cmd: str = typer.Option(
-        ..., "--cmd", help="Shell command to actually run (e.g. a pytest call)."
+        "",
+        "--cmd",
+        help="Free-form command, for steps with no _belay_test_ref. Recorded as "
+        "mode='command' -- never shown as a verified *test* (only that some command "
+        "passed), since nothing ties an arbitrary --cmd to a specific declared test.",
     ),
-    cwd: str = typer.Option(
-        "", "--cwd", help="Working directory to run --cmd in (default: cwd)."
-    ),
+    cwd: str = typer.Option("", "--cwd", help="Working directory to run in (default: cwd)."),
+    by: str = typer.Option("", "--by", help="Identity running this verification."),
     db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
-    timeout: float = typer.Option(
-        300.0, "--timeout", help="Seconds before the command is killed."
-    ),
+    timeout: float = typer.Option(300.0, "--timeout", help="Seconds before the command is killed."),
 ) -> None:
-    """Actually run a test and record its real outcome against one step -- not a claimed label.
+    """Run the step's own declared test (`--runner`) or a free-form command (`--cmd`).
 
-    Closes the gap in `_belay_test_ref` (a bare string the agent itself
-    supplies, never executed or checked): this runs `--cmd` for real,
-    hashes its combined stdout+stderr (not stored raw -- could be large or
-    carry secrets), and records exit code + duration + hash as ledger event
-    `belay:test_verified` tied to `--step`. `belay causal`/`belay
-    export-pr` then distinguish *verified* (this ran and passed) from
-    merely *claimed* (`_belay_test_ref` present, never actually run).
+    Exactly one of `--runner`/`--cmd` is required. `--runner` reads the
+    step's `_belay_test_ref` from the ledger and builds the command from a
+    fixed template (`belay/ledger/test_evidence.py`'s `RUNNERS`) -- an
+    agent or operator cannot substitute a different, easier-to-pass command
+    under a false test label, because the command isn't typed in by hand at
+    all. Real git context (HEAD, tree hash, dirty flag) and `--by` are
+    recorded alongside the result so it's reproducible evidence, not a bare
+    pass/fail. Records ledger event `belay:test_verified`
+    (deliberately outside `belay.ledger.model.EVENT_TYPES` -- adoption/DX,
+    not spec §9.1's closed set).
     """
+    import getpass
+
     from belay.ledger.store import LedgerStore
-    from belay.ledger.test_evidence import run_test
+    from belay.ledger.test_evidence import run_command, run_declared_test
+
+    if bool(runner) == bool(cmd):
+        typer.echo("error: give exactly one of --runner or --cmd", err=True)
+        raise typer.Exit(code=1)
 
     ledger = LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
-    if not ledger.read(session_id):
+    events = ledger.read(session_id)
+    if not events:
         typer.echo(f"error: no events found for session {session_id!r} in {db}", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo(f"running: {cmd}")
-    result = run_test(cmd, cwd=cwd or None, timeout=timeout)
+    step_status = next(
+        (
+            e.type
+            for e in events
+            if e.step_seq == step and e.type in ("step_committed", "step_failed")
+        ),
+        None,
+    )
+    if step_status is None:
+        typer.echo(
+            f"error: step {step} not found or not committed in session {session_id!r}", err=True
+        )
+        raise typer.Exit(code=1)
+    if step_status != "step_committed":
+        typer.echo(f"error: step {step} is {step_status!r}, not step_committed", err=True)
+        raise typer.Exit(code=1)
+
+    verified_by = by or getpass.getuser()
+
+    if runner:
+        test_ref = next(
+            (
+                e.payload.get("test_ref")
+                for e in events
+                if e.type == "plan_created" and e.step_seq == step
+            ),
+            None,
+        )
+        if not test_ref:
+            typer.echo(f"error: step {step} has no _belay_test_ref to verify", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"running declared test: {test_ref!r} via {runner}")
+        result = run_declared_test(
+            test_ref, runner, cwd=cwd or None, timeout=timeout, verified_by=verified_by
+        )
+    else:
+        typer.echo(f"running free-form command (mode=command, never 'VERIFIED test'): {cmd}")
+        result = run_command(cmd, cwd=cwd or None, timeout=timeout, verified_by=verified_by)
+
     ledger.append(
         session_id,
         "belay:test_verified",
         {
+            "mode": result.mode,
             "cmd": result.cmd,
+            "test_ref": result.test_ref,
             "exit_code": result.exit_code,
             "output_hash": result.output_hash,
             "duration_ms": result.duration_ms,
             "passed": result.passed,
+            "git_head": result.git.head,
+            "git_tree_hash": result.git.tree_hash,
+            "git_dirty": result.git.dirty,
+            "verified_by": result.verified_by,
         },
         step_seq=step,
     )
     status = "PASSED" if result.passed else "FAILED"
+    label = "TEST" if result.mode == "test" else "COMMAND"
     typer.echo(
-        f"{status} (exit_code={result.exit_code}, {result.duration_ms}ms, "
-        f"output_hash={result.output_hash}) -- recorded against step {step}"
+        f"{label} {status} (exit_code={result.exit_code}, {result.duration_ms}ms, "
+        f"output_hash={result.output_hash}, git_head={result.git.head}) -- "
+        f"recorded against step {step}"
     )
     if not result.passed:
         raise typer.Exit(code=1)
@@ -670,7 +733,8 @@ def export_pr(
         ExportPrError,
         apply_changes,
         build_proof_body,
-        create_branch_and_commit,
+        checkout_branch,
+        commit_changes,
         extract_file_changes,
         gh_pr_create_command,
     )
@@ -699,6 +763,7 @@ def export_pr(
     repo_path = Path(repo).resolve()
     branch = f"belay/{session_id}"
     try:
+        checkout_branch(repo_path, branch, base)
         paths = apply_changes(repo_path, changes)
     except ExportPrError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -723,7 +788,7 @@ def export_pr(
 
     message = f"belay: {len(changes)} file change(s) from session {session_id}"
     try:
-        create_branch_and_commit(repo_path, branch, base, message, paths)
+        commit_changes(repo_path, message, paths)
     except ExportPrError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from None

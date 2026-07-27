@@ -60,7 +60,7 @@ def test_to_mermaid_produces_valid_flowchart_with_intent_and_test_nodes() -> Non
     mermaid = to_mermaid(nodes, sid)
     assert mermaid.startswith("flowchart TD")
     assert "intent: auth-fix" in mermaid
-    assert "test: tests/test_auth.py::test_login" in mermaid
+    assert "claimed, never run: tests/test_auth.py::test_login" in mermaid
     assert "S1 --> S2" in mermaid
 
 

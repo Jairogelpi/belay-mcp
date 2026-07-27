@@ -98,19 +98,52 @@ def test_confine_to_repo_refuses_absolute_path_outside(tmp_path) -> None:
         _confine_to_repo(tmp_path, "/etc/passwd")
 
 
-def test_apply_changes_refuses_dirty_worktree(tmp_path) -> None:
+def test_checkout_branch_refuses_dirty_worktree(tmp_path) -> None:
+    from belay.cli.export_pr import checkout_branch
+
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
-    (tmp_path / "a.txt").write_text("dirty, never committed", encoding="utf-8")
+    (tmp_path / "committed.txt").write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=tmp_path, check=True)
+    (tmp_path / "committed.txt").write_text("dirty, never committed", encoding="utf-8")
 
-    from belay.cli.export_pr import FileChange
-
-    change = FileChange(
-        step_seq=1, tool="fs.write_file", path="a.txt", before=None, after="v2"
-    )
     with pytest.raises(ExportPrError, match="uncommitted changes"):
-        apply_changes(tmp_path, [change])
+        checkout_branch(tmp_path, "belay/test", "main")
+
+
+def test_apply_changes_writes_onto_checked_out_branch_not_prior_one(tmp_path) -> None:
+    """The real bug found in review: applying changes before checking out the PR
+    branch would land them on whatever branch was already checked out (main)
+    instead of the new one. checkout_branch must run first."""
+    from belay.cli.export_pr import FileChange, checkout_branch
+
+    remote = tmp_path / "remote"
+    work = tmp_path / "work"
+    remote.mkdir()
+    work.mkdir()
+    subprocess.run(["git", "init", "--bare", "-q"], cwd=remote, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=work, check=True)
+    (work / "a.txt").write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=work, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=work, check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=work, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=work, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main", "-q"], cwd=work, check=True)
+
+    checkout_branch(work, "belay/s_test", "main")
+    current_branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=work, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert current_branch == "belay/s_test"
+
+    change = FileChange(step_seq=1, tool="fs.write_file", path="a.txt", before=None, after="v2")
+    apply_changes(work, [change])
+    assert (work / "a.txt").read_text(encoding="utf-8") == "v2"
 
 
 def test_build_proof_body_marks_verified_intent() -> None:
