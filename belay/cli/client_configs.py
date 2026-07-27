@@ -242,6 +242,29 @@ def entry_present(client: str, existing: str, name: str) -> bool:
     return isinstance(servers, dict) and name in servers
 
 
+def list_server_names(client: str, existing: str) -> list[str]:
+    """Every MCP server name currently configured for `client`, regardless
+    of whether belay put it there (E18.4 bypass detection: `belay doctor`
+    uses this to report servers a native agent client can reach directly,
+    outside belay's own contract-enforcing proxy -- an ungated route to
+    real side effects that exists whether or not the Native Agent Gate hook
+    is even installed for this host). Same per-format parsing as
+    `entry_present`, just returning every key instead of checking one."""
+    if not existing.strip():
+        return []
+    if client == "codex":
+        doc = tomlkit.parse(existing)
+        servers = doc.get("mcp_servers")
+        return list(servers.keys()) if isinstance(servers, (tomlkit.items.Table, dict)) else []
+    if client == "opencode":
+        doc = json.loads(existing)
+        mcp = doc.get("mcp")
+        return list(mcp.keys()) if isinstance(mcp, dict) else []
+    doc = json.loads(existing)
+    servers = doc.get("mcpServers")
+    return list(servers.keys()) if isinstance(servers, dict) else []
+
+
 def remove_codex_entry(existing: str, name: str) -> str:
     """Surgically remove `[mcp_servers.<name>]` from a config.toml body, leaving
     everything else untouched -- used when the file changed after install (so

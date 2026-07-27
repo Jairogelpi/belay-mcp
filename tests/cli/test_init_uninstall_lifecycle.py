@@ -179,3 +179,43 @@ def test_doctor_reports_broken_when_manifest_present_but_entry_absent(tmp_path: 
     assert "BROKEN" in result.output
     assert "unchanged since install" not in result.output
     assert "MODIFIED since install" not in result.output
+
+
+def test_doctor_reports_other_mcp_servers_as_a_bypass_route(tmp_path: Path) -> None:
+    """E18.4: any MCP server configured alongside belay is reachable by the
+    agent's own client directly, outside belay's contract-enforcing proxy --
+    `doctor` must surface that, not just report belay's own registration."""
+    target = tmp_path / ".mcp.json"
+    result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    servers = _mcp_servers(target)
+    servers["github"] = {"command": "npx", "args": ["mcp-github"]}
+    target.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--client", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "github" in result.output
+    assert "not routed through belay" in result.output
+
+
+def test_doctor_reports_no_bypass_note_when_belay_is_the_only_server(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["doctor", "--client", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "not routed through belay" not in result.output
+
+
+def test_doctor_reports_bypass_servers_even_when_not_belay_managed(tmp_path: Path) -> None:
+    """No manifest at all (never ran `belay init` here) still gets a bypass
+    report -- there's real MCP server exposure to flag even when belay
+    itself was never registered for this client."""
+    target = tmp_path / ".mcp.json"
+    target.write_text(json.dumps({"mcpServers": {"github": {"command": "npx"}}}), encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--client", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "not belay-managed" in result.output
+    assert "github" in result.output

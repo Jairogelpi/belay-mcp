@@ -405,3 +405,85 @@ class TestFileEditRewind:
         out = json.loads(result.stdout)
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "capture size cap" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+class TestNativeMcpCallGate:
+    """E18.4: native `mcp__<server>__<tool>` calls, end-to-end through the
+    real CLI -- `belay hooks run` for the gate decision, `belay hooks
+    approvals` (not the top-level `belay approvals`, which opens --db as a
+    literal file rather than resolving the project-identity anchor) to
+    review/approve/reject."""
+
+    def _run_mcp_pre(self, tool_name: str, args: dict, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "tool_input": args,
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)["hookSpecificOutput"]
+
+    def test_native_mcp_call_pauses_and_is_reviewable_via_hooks_approvals(self) -> None:
+        out = self._run_mcp_pre(
+            "mcp__github__create_issue", {"title": "x"}, "toolu_mcp_1"
+        )
+        assert out["permissionDecision"] == "deny"
+
+        listed = runner.invoke(app, ["hooks", "approvals", "list", "--db", "test.db"])
+        assert listed.exit_code == 0, listed.output
+        assert "mcp__github__create_issue" in listed.output
+        assert "pending" in listed.output
+
+    def test_top_level_approvals_list_does_not_see_hook_queued_items(self) -> None:
+        """Regression: `belay approvals list --db test.db` opens `test.db`
+        literally -- hook-queued items live in the private belay-home data
+        file instead, so the top-level command must NOT see them (silently
+        finding them there would mean two commands both claim to be the
+        source of truth for the same queue, from two different files)."""
+        self._run_mcp_pre("mcp__github__create_issue", {"title": "x"}, "toolu_mcp_2")
+
+        result = runner.invoke(app, ["approvals", "list", "--db", "test.db"])
+        assert result.exit_code == 0, result.output
+        assert "no approval items" in result.output
+
+    def test_approving_via_hooks_approvals_allows_the_retry(self) -> None:
+        self._run_mcp_pre("mcp__github__create_issue", {"title": "x"}, "toolu_mcp_3")
+        listed = runner.invoke(app, ["hooks", "approvals", "list", "--db", "test.db"])
+        approval_id = listed.output.split()[0]
+
+        approve = runner.invoke(
+            app, ["hooks", "approvals", "approve", approval_id, "--db", "test.db"]
+        )
+        assert approve.exit_code == 0, approve.output
+        assert "approved" in approve.output
+
+        out = self._run_mcp_pre("mcp__github__create_issue", {"title": "x"}, "toolu_mcp_3b")
+        assert out["permissionDecision"] == "allow"
+
+    def test_rejecting_via_hooks_approvals_stays_denied(self) -> None:
+        self._run_mcp_pre("mcp__github__create_issue", {"title": "x"}, "toolu_mcp_4")
+        listed = runner.invoke(app, ["hooks", "approvals", "list", "--db", "test.db"])
+        approval_id = listed.output.split()[0]
+
+        reject = runner.invoke(
+            app, ["hooks", "approvals", "reject", approval_id, "--db", "test.db"]
+        )
+        assert reject.exit_code == 0, reject.output
+        assert "rejected" in reject.output
+
+        out = self._run_mcp_pre("mcp__github__create_issue", {"title": "x"}, "toolu_mcp_4b")
+        assert out["permissionDecision"] == "deny"
+        assert "rejected" in out["permissionDecisionReason"]
+
+    def test_a_server_named_belay_still_pauses(self) -> None:
+        """No exception for the name "belay" -- this layer can't confirm a
+        native call actually reached belay's own proxy, so it doesn't try."""
+        out = self._run_mcp_pre("mcp__belay__run_step", {"tool": "x"}, "toolu_mcp_5")
+        assert out["permissionDecision"] == "deny"

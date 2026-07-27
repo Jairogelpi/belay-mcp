@@ -402,10 +402,14 @@ too is `belay hooks install` (E18), below.
 
 ```bash
 belay hooks install --yes
-# -> installed PreToolUse hook in .claude/settings.json
-# -> approvals queued by this hook land in .../belay-hooks.db -- review with
-#    belay approvals list --db belay-hooks.db
-# -> restart the agent for the hook to take effect
+# -> installed PreToolUse/PostToolUse hooks in .claude/settings.json
+# -> approvals queued by this hook -- review with
+#    belay hooks approvals list/approve/reject --db belay-hooks.db
+#    (NOT `belay approvals ...` -- that group opens --db as a literal file;
+#    hook-queued approvals live in this install's private belay home, see
+#    "Local supervisor" below, so `belay hooks approvals` resolves --db the
+#    same project-identity-anchor way `belay hooks run/rewind` already do)
+# -> restart the agent for the hooks to take effect
 ```
 
 First slice, said plainly rather than oversold: **Claude Code only** —
@@ -542,6 +546,25 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   around calling a tool to compensate; a native file edit has no tool to
   call back into, only direct file I/O, so a smaller purpose-built snapshot
   store fits better than forcing the contract shape onto it.
+- **Native `mcp__<server>__<tool>` calls always pause, no exceptions**
+  (E18.4) — when Claude Code's own client talks to an MCP server directly
+  (its native MCP support, not `belay run`), that call never passes through
+  belay's contract-enforcing proxy at all, no matter what the server is
+  named. Rather than guess whether a given server is actually belay's own
+  wrapped one (fragile, and a wrong guess would mean silently allowing an
+  unaudited call), every native MCP call gets Bash's own default treatment:
+  queued in the identical `ApprovalQueue`, bound to the full context (host,
+  session, the specific `server__tool` identity, a canonical dump of its
+  arguments, cwd, repo HEAD) — a different argument set for the same tool
+  is a different approval, not an automatic pass. Review/approve/reject
+  with `belay hooks approvals list/approve/reject --db belay-hooks.db`
+  (distinct from `belay approvals`, see above).
+- **`belay doctor` now flags MCP bypass routes** — any MCP server
+  configured in a client's config alongside (or instead of) belay is
+  reachable directly by that client, regardless of whether the Native
+  Agent Gate hook is even installed for that host; `doctor` lists every
+  other server name found so that exposure isn't invisible, whether or not
+  belay itself is registered there.
 
 ### Wrapping a non-Python MCP server
 
@@ -703,7 +726,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only |
 
 ## Conformance
 

@@ -24,6 +24,7 @@ from belay.hooks.claude_code_adapter import normalize
 from belay.hooks.gate import (
     GateDecision,
     evaluate,
+    evaluate_mcp_call,
     ledger_session_id,
     post_event_evidence,
     pre_event_evidence,
@@ -300,6 +301,122 @@ class TestBelayHomeProtection:
         }
         result = evaluate(normalize(raw, installation_id="test-install"), queue)
         assert result.verdict == "allow"
+
+
+def _mcp_event(
+    tool_name: str,
+    args: dict[str, object],
+    session_id: str = "sess-1",
+    cwd: str = "/repo-a",
+    event_id: str = "toolu_mcp1",
+) -> HookEvent:
+    raw = {
+        "session_id": session_id,
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": args,
+        "tool_use_id": event_id,
+        "cwd": cwd,
+    }
+    return normalize(raw, installation_id="test-install")
+
+
+class TestMcpCall:
+    """Native `mcp__<server>__<tool>` calls (E18.4) -- always PAUSE, no
+    exception for a server that happens to be named "belay", since this
+    host-agnostic module has no reliable way to confirm a call actually
+    went through belay's own contract-enforcing proxy."""
+
+    def test_unrecognized_mcp_call_pauses_and_queues_approval(self, queue: ApprovalQueue) -> None:
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+        items = queue.list()
+        assert len(items) == 1
+        assert items[0].state == "pending"
+        assert items[0].plan["tool"] == "mcp__github__create_issue"
+        assert items[0].approval_id == result.approval_id
+
+    def test_a_server_named_belay_gets_no_free_pass(self, queue: ApprovalQueue) -> None:
+        event = _mcp_event("mcp__belay__run_step", {"tool": "whatever"})
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+        assert len(queue.list()) == 1
+
+    def test_retrying_the_same_pending_call_does_not_create_a_second_item(
+        self, queue: ApprovalQueue
+    ) -> None:
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        evaluate_mcp_call(event, queue)
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+        assert "still pending" in result.reason
+        assert len(queue.list()) == 1
+
+    def test_approving_then_retrying_the_same_call_allows_it(self, queue: ApprovalQueue) -> None:
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        evaluate_mcp_call(event, queue)
+        approval_id = queue.list()[0].approval_id
+        queue.approve(approval_id, approved_by="jairo")
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "allow"
+        assert result.approval_id == approval_id
+
+    def test_rejecting_then_retrying_stays_denied_without_a_new_item(
+        self, queue: ApprovalQueue
+    ) -> None:
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        evaluate_mcp_call(event, queue)
+        approval_id = queue.list()[0].approval_id
+        queue.reject(approval_id, rejected_by="jairo", reason="too risky")
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+        assert "rejected" in result.reason
+        assert len(queue.list()) == 1
+
+    def test_different_arguments_for_the_same_tool_are_a_different_approval(
+        self, queue: ApprovalQueue
+    ) -> None:
+        a = _mcp_event("mcp__github__create_issue", {"title": "x"}, event_id="e1")
+        b = _mcp_event("mcp__github__create_issue", {"title": "y"}, event_id="e2")
+        evaluate_mcp_call(a, queue)
+        approval_id = queue.list()[0].approval_id
+        queue.approve(approval_id, approved_by="jairo")
+
+        result_a = evaluate_mcp_call(a, queue)
+        result_b = evaluate_mcp_call(b, queue)
+        assert result_a.verdict == "allow"
+        assert result_b.verdict == "deny"  # different args -- a fresh, still-pending approval
+        assert len(queue.list()) == 2
+
+    def test_a_different_repo_never_inherits_an_approval_granted_elsewhere(
+        self, queue: ApprovalQueue
+    ) -> None:
+        a = _mcp_event("mcp__github__create_issue", {"title": "x"}, cwd="/repo-a", event_id="e1")
+        b = _mcp_event("mcp__github__create_issue", {"title": "x"}, cwd="/repo-b", event_id="e2")
+        evaluate_mcp_call(a, queue)
+        queue.approve(queue.list()[0].approval_id, approved_by="jairo")
+        result_b = evaluate_mcp_call(b, queue)
+        assert result_b.verdict == "deny"
+
+    def test_missing_event_id_denies_without_touching_the_queue(self, queue: ApprovalQueue) -> None:
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"}, event_id="")
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+        assert queue.list() == []
+
+    def test_post_phase_denies_without_touching_the_queue(self, queue: ApprovalQueue) -> None:
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__github__create_issue",
+            "tool_input": {"title": "x"},
+            "tool_use_id": "toolu_post",
+        }
+        event = normalize(raw, installation_id="i")
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+        assert queue.list() == []
 
 
 class TestLedgerEvidenceHelpers:

@@ -286,6 +286,30 @@ def test_entry_present_opencode() -> None:
     assert entry_present("opencode", existing, "other") is False
 
 
+def test_list_server_names_json_client() -> None:
+    from belay.cli.client_configs import list_server_names
+
+    existing = json.dumps({"mcpServers": {"belay": {"command": "python"}, "github": {}}})
+    assert set(list_server_names("claude-code", existing)) == {"belay", "github"}
+    assert list_server_names("claude-code", "") == []
+    assert list_server_names("cursor", json.dumps({"mcpServers": {}})) == []
+
+
+def test_list_server_names_codex_toml() -> None:
+    from belay.cli.client_configs import list_server_names
+
+    existing = '[mcp_servers.belay]\ncommand = "python"\n\n[mcp_servers.other]\ncommand = "x"\n'
+    assert set(list_server_names("codex", existing)) == {"belay", "other"}
+    assert list_server_names("codex", "") == []
+
+
+def test_list_server_names_opencode() -> None:
+    from belay.cli.client_configs import list_server_names
+
+    existing = json.dumps({"mcp": {"belay": {"type": "local"}, "other": {"type": "local"}}})
+    assert set(list_server_names("opencode", existing)) == {"belay", "other"}
+
+
 def test_manifest_round_trips(tmp_path) -> None:
     from belay.cli.client_configs import Manifest, load_manifest, sha256_of, write_manifest
 

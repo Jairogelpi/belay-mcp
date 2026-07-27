@@ -626,7 +626,7 @@ def doctor(
     reported as BROKEN rather than "registered", since `belay uninstall`
     would otherwise have nothing to actually remove.
     """
-    from belay.cli.client_configs import entry_present, load_manifest, sha256_of
+    from belay.cli.client_configs import entry_present, list_server_names, load_manifest, sha256_of
 
     clients = (
         list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
@@ -639,11 +639,22 @@ def doctor(
         if not target.is_file():
             typer.echo(f"{c}: not configured ({target} does not exist)")
             continue
+        current_text = target.read_text(encoding="utf-8")
+        try:
+            all_servers = list_server_names(c, current_text)
+        except (ValueError, LookupError):
+            all_servers = []  # config doesn't parse as this client's format; nothing to report
         manifest = load_manifest(target)
         if manifest is None:
             typer.echo(f"{c}: config exists at {target}, but no belay manifest (not belay-managed)")
+            if all_servers:
+                typer.echo(
+                    f"{c}:   {len(all_servers)} MCP server(s) configured here, reachable "
+                    f"outside belay's proxy (not belay-managed, so this can't tell which -- if "
+                    f"any -- of them is belay itself): {', '.join(sorted(all_servers))}"
+                )
             continue
-        current_text = target.read_text(encoding="utf-8")
+        other_servers = [n for n in all_servers if n != manifest.name]
         try:
             present = entry_present(c, current_text, manifest.name)
         except (ValueError, LookupError):
@@ -661,14 +672,20 @@ def doctor(
             status = "MODIFIED since install"
         backup_note = "backup available" if manifest.backup_path else "no backup (file was new)"
         typer.echo(f"{c}: registered at {target} -- {status}, {backup_note}")
+        if other_servers:
+            typer.echo(
+                f"{c}:   {len(other_servers)} other MCP server(s) configured here, reachable "
+                f"directly by the agent's own client -- not routed through belay's contract "
+                f"enforcement: {', '.join(sorted(other_servers))}"
+            )
 
 
 hooks_app = typer.Typer(
     name="hooks",
-    help="Native Agent Gate (plan-v2 E18): PreToolUse hooks gating native Bash tool "
-    "calls the same way the MCP proxy gates MCP tool calls. First slice -- Claude "
-    "Code / Bash only; PostToolUse, MCP tool calls, file edits, and Codex are not "
-    "yet handled (said plainly, not implied).",
+    help="Native Agent Gate (plan-v2 E18): PreToolUse/PostToolUse hooks gating native "
+    "Bash/file-edit/MCP tool calls the same way the MCP proxy gates calls made through "
+    "it. First slice -- Claude Code only; Codex/Cursor/OpenCode are not yet wired up "
+    "(said plainly, not implied).",
     no_args_is_help=True,
 )
 app.add_typer(hooks_app, name="hooks")
@@ -1065,6 +1082,128 @@ def hooks_rewind(
     typer.echo(outcome)
     if "conflict" in outcome or "no snapshot" in outcome or "missing" in outcome:
         raise typer.Exit(code=1)
+
+
+hooks_approvals_app = typer.Typer(
+    name="approvals",
+    help="Review/approve/reject items the Native Agent Gate queued (paused Bash "
+    "commands, E18.4 native MCP calls). Distinct from the top-level `belay "
+    "approvals` -- that group opens --db as a literal MCP-path ledger file; these "
+    "resolve --db the same way `belay hooks run`/`rewind`/`list-edits` do (a "
+    "project-identity anchor -> the private belay-home data file), since that's "
+    "where hook-queued approvals actually live (E18.1: never inside the project).",
+    no_args_is_help=True,
+)
+hooks_app.add_typer(hooks_approvals_app, name="approvals")
+
+
+def _hooks_approval_queue(db: str) -> ApprovalQueue:
+    from sqlalchemy import create_engine
+
+    from belay.approvals.queue import ApprovalQueue
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity(Path(db).resolve()).data_path
+    engine = create_engine(f"sqlite:///{data_path}", future=True)
+    return ApprovalQueue(engine=engine)
+
+
+def _hooks_ledger_for(db: str) -> LedgerStore:
+    from sqlalchemy import create_engine
+
+    from belay.ledger.store import LedgerStore
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity(Path(db).resolve()).data_path
+    engine = create_engine(f"sqlite:///{data_path}", future=True)
+    return LedgerStore(engine=engine)
+
+
+@hooks_approvals_app.command("list")
+def hooks_approvals_list(
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+) -> None:
+    """List every hook-queued approval item, oldest first."""
+    items = _hooks_approval_queue(db).list()
+    if not items:
+        typer.echo("no approval items")
+        return
+    for item in items:
+        typer.echo(
+            f"{item.approval_id}  {item.state:9s}  plan={item.plan_id}  "
+            f"tool={item.plan.get('tool')}  session={item.session_id}  "
+            f"expires_at={item.expires_at.isoformat()}"
+        )
+
+
+@hooks_approvals_app.command("approve")
+def hooks_approvals_approve(
+    approval_id: str = typer.Argument(..., help="Approval item id."),
+    reason: str = typer.Option("", "--reason", help="Optional human-readable reason."),
+    by: str = typer.Option("", "--by", help="Approver identity; defaults to the OS user."),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+) -> None:
+    """Approve a pending hook-queued item (pending -> approved)."""
+    import getpass
+
+    from belay.errors import BelayError
+
+    approver = by or getpass.getuser()
+    queue = _hooks_approval_queue(db)
+    try:
+        item = queue.approve(approval_id, approved_by=approver, reason=reason or None)
+    except BelayError as exc:
+        typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
+        raise typer.Exit(code=1) from exc
+
+    _hooks_ledger_for(db).append(
+        item.session_id,
+        "approval_resolved",
+        {
+            "approval_id": item.approval_id,
+            "plan_id": item.plan_id,
+            "state": "approved",
+            "approved_by": approver,
+            "reason": reason or None,
+        },
+        step_seq=item.step_seq,
+    )
+    typer.echo(f"{item.approval_id} approved by {approver}")
+
+
+@hooks_approvals_app.command("reject")
+def hooks_approvals_reject(
+    approval_id: str = typer.Argument(..., help="Approval item id."),
+    reason: str = typer.Option("", "--reason", help="Optional human-readable reason."),
+    by: str = typer.Option("", "--by", help="Approver identity; defaults to the OS user."),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+) -> None:
+    """Reject a pending hook-queued item (pending -> rejected)."""
+    import getpass
+
+    from belay.errors import BelayError
+
+    approver = by or getpass.getuser()
+    queue = _hooks_approval_queue(db)
+    try:
+        item = queue.reject(approval_id, rejected_by=approver, reason=reason or None)
+    except BelayError as exc:
+        typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
+        raise typer.Exit(code=1) from exc
+
+    _hooks_ledger_for(db).append(
+        item.session_id,
+        "approval_resolved",
+        {
+            "approval_id": item.approval_id,
+            "plan_id": item.plan_id,
+            "state": "rejected",
+            "rejected_by": approver,
+            "reason": reason or None,
+        },
+        step_seq=item.step_seq,
+    )
+    typer.echo(f"{item.approval_id} rejected by {approver}")
 
 
 @app.command()

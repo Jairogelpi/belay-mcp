@@ -105,34 +105,48 @@ def _touches_belay_home(command: str, cwd: str | None) -> bool:
     return False
 
 
-def _plan_id_for_event(event: HookEvent, command: str) -> str:
+def _plan_id(kind: str, event: HookEvent, detail: str) -> str:
     """Binds an approval to the full context it was granted in, not just the
-    command text: host, session, tool, the command itself, cwd, the
-    repository's real git HEAD (see `claude_code_adapter._repo_identity`),
-    and the decision-logic ruleset version (so a rule change never silently
-    reinterprets an approval granted under the old rules)."""
+    proposed action's own text: host, session, tool, `detail` (the command
+    string for Bash, a canonical JSON dump of the call's arguments for MCP),
+    cwd, the repository's real git HEAD (see
+    `claude_code_adapter._repo_identity`), and the decision-logic ruleset
+    version (so a rule change never silently reinterprets an approval
+    granted under the old rules). `kind` namespaces the hash so a Bash
+    command and an MCP call can never collide even if their `detail` text
+    happened to match by coincidence."""
     material = json.dumps(
         {
             "decision_logic_version": DECISION_LOGIC_VERSION,
             "host": event.host,
             "host_session_id": event.host_session_id,
             "tool_name": event.tool_name,
-            "command": command,
+            "detail": detail,
             "cwd": event.cwd,
             "repo_identity": event.repo_identity,
         },
         sort_keys=True,
         separators=(",", ":"),
     )
-    return "bash:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"{kind}:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def _plan_id_for_event(event: HookEvent, command: str) -> str:
+    return _plan_id("bash", event, command)
+
+
+def _plan_id_for_mcp(event: HookEvent) -> str:
+    args_json = json.dumps(event.args, sort_keys=True, separators=(",", ":"))
+    return _plan_id("mcp", event, args_json)
 
 
 def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
-    """Only pre-phase Bash calls are classified in this first slice --
-    everything else (post-phase, Edit/Write, MCP tool calls) is denied with
-    a clear "not yet handled" reason rather than silently allowed, since
-    allowing by default on an unrecognized surface would be exactly the
-    unexamined-write hole this gate exists to close. See
+    """Bash-specific classification -- `belay/supervisor/server.py`'s
+    `_decide_pre` dispatches here only for `surface == "shell"`. Edit/Write/
+    NotebookEdit go through `evaluate_file_edit`, native MCP calls through
+    `evaluate_mcp_call`; anything else still falls through to this
+    function's own guard below, which denies rather than silently allowing
+    an unexamined tool call on a surface nothing yet classifies. See
     `belay/hooks/decision.py` for why Bash itself defaults to PAUSE, not
     allow.
     """
@@ -150,8 +164,8 @@ def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
         return GateDecision(
             "deny",
             f"belay: {event.tool_name!r} ({event.surface}) is not yet handled by the "
-            "Native Agent Gate (only Bash is, so far) -- denying rather than silently "
-            "allowing an unexamined tool call",
+            "Native Agent Gate -- denying rather than silently allowing an unexamined "
+            "tool call",
         )
 
     command = event.args.get("command")
@@ -308,6 +322,78 @@ def evaluate_file_edit(
         "deny",
         f"belay: {path_str} exceeds the capture size cap ({MAX_SNAPSHOT_BYTES} bytes) -- "
         f"cannot be made reversible; queued for human approval (approval {item.approval_id})",
+        approval_id=item.approval_id,
+    )
+
+
+def evaluate_mcp_call(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
+    """Claude Code's native `mcp__<server>__<tool>` calls reach whatever MCP
+    server is configured directly through the agent's own client -- a
+    different code path from belay's own proxy (`belay wrap`/`belay run`),
+    which enforces contracts (spec §4/§6: reversibility, effects,
+    verification) on every call *it* receives, no matter who calls it. A
+    call made this way never passes through that enforcement at all, so it
+    gets no benefit-of-the-doubt exception even when the server name looks
+    like it could be belay's own -- there is no reliable way for this
+    host-agnostic module to confirm that without depending on
+    client-config-file parsing (`belay/cli/client_configs.py`, a CLI-layer
+    concern), and a wrong guess here would mean silently allowing an
+    unaudited call. So every native MCP call gets the same treatment as an
+    unrecognized Bash command: PAUSE, queued through the identical
+    `ApprovalQueue`, bound to the full context (host, session, the specific
+    `mcp__server__tool` identity, a canonical dump of its arguments, cwd,
+    repo HEAD, ruleset version) the same way Bash's PAUSE path is -- a
+    different argument set for the same tool is a different approval, not
+    an automatic pass just because the tool name matched a prior one.
+    """
+    if event.phase != "pre":
+        return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
+    if not event.event_id:
+        return GateDecision("deny", "belay: missing event id -- ambiguous identity, denying")
+
+    plan_id = _plan_id_for_mcp(event)
+    existing = queue.for_plan(plan_id)
+
+    if existing is not None and existing.state == "approved":
+        return GateDecision(
+            "allow",
+            f"belay: this exact MCP call ({event.tool_name}) was already approved "
+            f"(approval {existing.approval_id}, by {existing.approved_by})",
+            approval_id=existing.approval_id,
+        )
+    if existing is not None and existing.state == "pending":
+        return GateDecision(
+            "deny",
+            f"belay: still pending human approval (approval {existing.approval_id}) -- "
+            "run `belay approvals list` / `belay approvals approve`, then retry the "
+            "same call",
+            approval_id=existing.approval_id,
+        )
+    if existing is not None and existing.state == "rejected":
+        return GateDecision(
+            "deny",
+            f"belay: this exact MCP call was rejected (approval {existing.approval_id}"
+            f", by {existing.rejected_by}"
+            + (f": {existing.reason}" if existing.reason else "")
+            + ") -- a human must take a different action, this one won't be re-asked",
+            approval_id=existing.approval_id,
+        )
+
+    item = queue.request(
+        session_id=event.host_session_id,
+        plan_id=plan_id,
+        plan={
+            "tool": event.tool_name,
+            "args": event.args,
+            "reason": "native MCP tool call, not routed through belay's own proxy "
+            "-- not contract-checked",
+        },
+    )
+    return GateDecision(
+        "deny",
+        f"belay: {event.tool_name} is a native MCP call outside belay's own proxy -- "
+        f"queued for human approval (approval {item.approval_id}) -- run "
+        "`belay approvals list` / `belay approvals approve`, then retry the exact same call",
         approval_id=item.approval_id,
     )
 
