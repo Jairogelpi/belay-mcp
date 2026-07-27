@@ -342,6 +342,117 @@ def dashboard(
     typer.echo(f"wrote {out}")
 
 
+@app.command(name="export-pr")
+def export_pr(
+    session_id: str = typer.Argument(..., help="Committed session to package as a PR."),
+    repo: str = typer.Option(..., "--repo", help="Path to the git repo the files live in."),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    base: str = typer.Option("main", "--base", help="Base branch to open the PR against."),
+    key: str = typer.Option(
+        "", "--key", help="Ed25519 signing key (belay keygen) to attach signed evidence (E13)."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print what would change without touching git."
+    ),
+) -> None:
+    """Package a committed session's file changes as a real branch + PR.
+
+    Post-hoc, not a pre-execution gate (see `docs/adr` if one is later added
+    for the rejected gate design): the session already ran through the full
+    governed pipeline and is sitting in the ledger. Only recognizes the
+    read/write/delete-file shape `examples/contracts/fs.yaml` already uses
+    (a `path` arg, optional `content`) -- other tool shapes are skipped, not
+    guessed at. If the `gh` CLI is on PATH, opens the PR for real; otherwise
+    prints the exact command to run.
+    """
+    from belay.cli.export_pr import (
+        apply_changes,
+        create_branch_and_commit,
+        extract_file_changes,
+        gh_pr_create_command,
+    )
+    from belay.ledger.store import LedgerStore
+
+    ledger = LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
+    events = ledger.read(session_id)
+    if not events:
+        typer.echo(f"error: no events found for session {session_id!r} in {db}", err=True)
+        raise typer.Exit(code=1)
+
+    changes = extract_file_changes(events)
+    if not changes:
+        typer.echo("no recognizable file changes (path/content-shaped steps) in this session")
+        raise typer.Exit(code=1)
+
+    typer.echo(f"{len(changes)} file change(s) found:")
+    for c in changes:
+        kind = "delete" if c.after is None else "write"
+        typer.echo(f"  step {c.step_seq}: {kind} {c.path} ({c.tool})")
+
+    if dry_run:
+        typer.echo("--dry-run: stopping before touching git")
+        return
+
+    repo_path = Path(repo).resolve()
+    branch = f"belay/{session_id}"
+    paths = apply_changes(repo_path, changes)
+
+    evidence_note = ""
+    if key:
+        from belay.ledger.signing import SigningKey, sign_session
+
+        signing_key = SigningKey.load(key)
+        bundle = sign_session(events, signing_key)
+        evidence_dir = repo_path / ".belay-evidence"
+        evidence_dir.mkdir(exist_ok=True)
+        evidence_path = evidence_dir / f"{session_id}.json"
+        evidence_path.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+        paths.append(str(evidence_path.relative_to(repo_path)))
+        evidence_note = (
+            f"\n\nSigned evidence: `.belay-evidence/{session_id}.json` "
+            f"(public key `{bundle.public_key}`) -- verify offline with "
+            f"`belay verify-evidence .belay-evidence/{session_id}.json`."
+        )
+
+    message = f"belay: {len(changes)} file change(s) from session {session_id}"
+    create_branch_and_commit(repo_path, branch, base, message, paths)
+    typer.echo(f"branch {branch} created in {repo_path} ({len(paths)} file(s) committed)")
+
+    body_path = repo_path / f".belay-pr-body-{session_id}.md"
+    body = (
+        f"Automated PR from Belay session `{session_id}` (spec §3-§8: contract -> "
+        f"plan -> policy -> approval -> saga commit already ran; this is the "
+        f"paper trail, not a new gate).\n\n"
+        + "\n".join(
+            f"- {'delete' if c.after is None else 'write'} `{c.path}` (step {c.step_seq})"
+            for c in changes
+        )
+        + evidence_note
+    )
+    body_path.write_text(body, encoding="utf-8")
+
+    import shutil
+
+    if shutil.which("gh"):
+        cmd = gh_pr_create_command(branch, base, message, str(body_path))
+        result = subprocess_run(cmd, repo_path)
+        typer.echo(result)
+    else:
+        cmd = gh_pr_create_command(branch, base, message, str(body_path))
+        typer.echo(
+            "gh CLI not found on PATH -- push the branch and open the PR yourself:\n"
+            f"  git -C {repo_path} push -u origin {branch}\n"
+            f"  {' '.join(cmd)}"
+        )
+
+
+def subprocess_run(cmd: list[str], cwd: Path) -> str:
+    import subprocess
+
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    return result.stdout.strip() or result.stderr.strip()
+
+
 @app.command()
 def replay(
     session_id: str = typer.Argument(..., help="Real session to replay (spec §9)."),

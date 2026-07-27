@@ -118,6 +118,23 @@ conformance:
   decision authority. It never approves or rejects anything; that stays
   CLI-only and human-typed (spec §12 no-self-approval) — this just cuts
   through a long queue to what actually needs eyes first.
+- **`belay export-pr`** packages a committed session's file changes
+  (the `path`/`content` shape `examples/contracts/fs.yaml` already uses) as
+  a real git branch + commit, with Belay's own signed evidence (E13)
+  attached under `.belay-evidence/`, and opens a PR via `gh` if it's on
+  `PATH` (otherwise prints the exact `git push`/`gh pr create` to run).
+  Post-hoc, not a pre-execution gate: the session already ran the full
+  governed pipeline (contract → plan → policy → approval → saga commit);
+  this turns that into a paper trail reviewable the way a human's change
+  would be, backed by evidence rather than a trust-me summary.
+
+```bash
+belay export-pr s_ed182c2544f8 --repo ./infra-repo --db belay.db \
+  --base main --key signing.pem
+# -> 1 file change(s) found:  step 1: write configs/app.conf (fs.write_file)
+# -> branch belay/s_ed182c2544f8 created (2 file(s) committed)
+# -> gh CLI not found -- prints git push + gh pr create to run yourself
+```
 - **`belay replay`** re-executes a real session against the live upstream
   with one step's args overridden, producing a brand-new, fully real,
   ledgered session — not a simulation. Unlike `belay counterfactual` (E12,
