@@ -668,6 +668,14 @@ def _ledger_for(db: str) -> LedgerStore:
 @approvals_app.command("list")
 def approvals_list(
     db: str = typer.Option("belay.db", "--db", help="Ledger/approvals SQLite file path."),
+    triage: bool = typer.Option(
+        False,
+        "--triage",
+        help="Sort pending items highest-risk-first with a deterministic reason "
+        "(reversibility/confidence/unknown effects/dimensions fired). Labels the "
+        "queue only -- never approves or rejects anything; that stays CLI-only "
+        "and human-typed (spec §12).",
+    ),
 ) -> None:
     """List every approval item, oldest first (spec §7.1)."""
     queue = _approval_queue(db)
@@ -675,6 +683,18 @@ def approvals_list(
     if not items:
         typer.echo("no approval items")
         return
+
+    if triage:
+        from belay.approvals.triage import triage_queue
+
+        for item, result in triage_queue(items):
+            typer.echo(
+                f"[{result.risk:6s}] {item.approval_id}  {item.state:9s}  "
+                f"plan={item.plan_id}  tool={item.plan.get('tool')}  "
+                f"session={item.session_id}  -- {'; '.join(result.reasons)}"
+            )
+        return
+
     for item in items:
         typer.echo(
             f"{item.approval_id}  {item.state:9s}  plan={item.plan_id}  "

@@ -111,6 +111,13 @@ conformance:
   live server" below.
 - **`belay dashboard`** renders a static HTML snapshot of a ledger's
   sessions/steps/approvals — see "Dashboard" below.
+- **`belay approvals list --triage`** sorts the pending queue highest-risk
+  first with a deterministic reason (reversibility, plan confidence,
+  unknown effects, how many policy dimensions fired) — a pure label/sort
+  over data the plan/policy stages already computed, no LLM, no new
+  decision authority. It never approves or rejects anything; that stays
+  CLI-only and human-typed (spec §12 no-self-approval) — this just cuts
+  through a long queue to what actually needs eyes first.
 - **`belay replay`** re-executes a real session against the live upstream
   with one step's args overridden, producing a brand-new, fully real,
   ledgered session — not a simulation. Unlike `belay counterfactual` (E12,
