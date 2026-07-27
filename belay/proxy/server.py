@@ -26,6 +26,36 @@ from belay.policy.model import PolicyDoc, default_policy
 from belay.proxy.lifecycle import Lifecycle
 from belay.proxy.upstream import UpstreamClient
 
+_RESERVED_ARG_SCHEMAS: dict[str, dict[str, str]] = {
+    "_belay_intent": {
+        "type": "string",
+        "description": "Belay: subgoal label (belay rewind --intent).",
+    },
+    "_belay_test_ref": {
+        "type": "string",
+        "description": "Belay: test reference (belay causal).",
+    },
+}
+
+
+def _declare_reserved_args(tool: Tool) -> Tool:
+    """Add Belay's reserved arg keys to `tool`'s declared `inputSchema` (adoption/DX).
+
+    Without this, a strict MCP client validating a call's arguments against
+    the tool's own schema can reject `_belay_intent`/`_belay_test_ref`
+    outright (or an agent simply never discovers they exist) -- found in
+    review. Additive only: never touches `required`, never overwrites an
+    upstream property of the same name (an upstream that already defines
+    one of these names wins), and the underlying `Tool` model is otherwise
+    passed through unchanged.
+    """
+    schema = dict(tool.inputSchema or {"type": "object"})
+    properties = dict(schema.get("properties") or {})
+    for key, prop_schema in _RESERVED_ARG_SCHEMAS.items():
+        properties.setdefault(key, prop_schema)
+    schema["properties"] = properties
+    return tool.model_copy(update={"inputSchema": schema})
+
 
 class BelayProxyServer:
     """The Belay MCP server: agent-facing, backed by one upstream + one contract set."""
@@ -59,7 +89,8 @@ class BelayProxyServer:
     def _register_handlers(self) -> None:
         @self._server.list_tools()  # type: ignore[untyped-decorator, no-untyped-call]
         async def _list_tools() -> list[Tool]:
-            return await self._upstream.list_tools()
+            tools = await self._upstream.list_tools()
+            return [_declare_reserved_args(tool) for tool in tools]
 
         @self._server.call_tool()  # type: ignore[untyped-decorator]
         async def _call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:

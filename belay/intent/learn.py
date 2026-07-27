@@ -63,12 +63,10 @@ def apply_rule(contract_path: str, rule: LearnedRule) -> IntentContract:
     else:
         contract = IntentContract(intent="(no intent declared -- edit this by hand)")
 
-    if rule.kind == "forbidden_tools":
-        if rule.value not in contract.forbidden_tools:
-            contract.forbidden_tools = [*contract.forbidden_tools, rule.value]
-    elif rule.kind == "forbidden_scope":
-        if rule.value not in contract.forbidden_scope:
-            contract.forbidden_scope = [*contract.forbidden_scope, rule.value]
+    if rule.kind == "forbidden_tools" and rule.value not in contract.forbidden_tools:
+        contract.forbidden_tools = [*contract.forbidden_tools, rule.value]
+    elif rule.kind == "forbidden_scope" and rule.value not in contract.forbidden_scope:
+        contract.forbidden_scope = [*contract.forbidden_scope, rule.value]
 
     import yaml
 

@@ -29,7 +29,10 @@ def _session_summary(events: list[Event]) -> dict[str, Any]:
         by_session.setdefault(event.session_id, []).append(event)
     sessions = {}
     for session_id, session_events in by_session.items():
-        session_events.sort(key=lambda e: (e.step_seq is None, e.step_seq, e.at))
+        # Stable sort by step_seq only (None -- session-level events like
+        # session_started -- sorts first); ties (several events of the same
+        # step_seq) keep the ledger's own chronological append order.
+        session_events.sort(key=lambda e: -1 if e.step_seq is None else e.step_seq)
         sessions[session_id] = {
             "initiated_by": session_events[0].initiated_by if session_events else None,
             "event_count": len(session_events),
@@ -75,9 +78,11 @@ _TEMPLATE = """<!doctype html>
   .db-path { font-size: .8rem; opacity: .5; margin-bottom: 1.5rem; font-family: monospace; }
   .session { border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
              border-radius: 8px; margin-bottom: 1rem; overflow: hidden; }
-  .session-head { padding: .6rem 1rem; background: color-mix(in srgb, CanvasText 6%, transparent);
+  .session-head { padding: .6rem 1rem;
+                  background: color-mix(in srgb, CanvasText 6%, transparent);
                   display: flex; justify-content: space-between; font-family: monospace; }
-  .step { padding: .5rem 1rem; border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+  .step { padding: .5rem 1rem;
+          border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
           display: flex; gap: .75rem; align-items: baseline; font-size: .85rem; }
   .step-seq { opacity: .4; width: 2.5rem; flex-shrink: 0; }
   .step-type { font-family: monospace; font-weight: 600; }
@@ -88,7 +93,8 @@ _TEMPLATE = """<!doctype html>
   .tag.allow, .tag.approved, .tag.step_committed { background: #1f5c2e; color: #fff; }
   .tag.compensated { background: #1f4c7a; color: #fff; }
   .approvals { margin-top: 2rem; }
-  .approval { padding: .6rem 1rem; border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+  .approval { padding: .6rem 1rem;
+              border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
               border-radius: 8px; margin-bottom: .5rem; font-size: .85rem; }
   .cmd { font-family: monospace; background: color-mix(in srgb, CanvasText 8%, transparent);
          padding: .3rem .5rem; border-radius: 4px; display: inline-block; margin-top: .3rem; }
@@ -113,7 +119,8 @@ for (const [sessionId, session] of Object.entries(data.sessions)) {
   div.className = "session";
   const head = document.createElement("div");
   head.className = "session-head";
-  head.innerHTML = `<span>${sessionId}</span><span>${session.initiated_by || "unknown"} · ${session.event_count} events</span>`;
+  head.innerHTML = `<span>${sessionId}</span>` +
+    `<span>${session.initiated_by || "unknown"} · ${session.event_count} events</span>`;
   div.appendChild(head);
   for (const ev of session.events) {
     const step = document.createElement("div");
@@ -133,11 +140,12 @@ approvalsSection.innerHTML = "<h1>Approvals</h1>";
 for (const a of data.approvals) {
   const div = document.createElement("div");
   div.className = "approval";
-  div.innerHTML = `<div>${a.approval_id} <span class="tag ${tagClass(a.state)}">${a.state}</span> ` +
+  const approveCmd = `belay approvals approve ${a.approval_id} --by &lt;you&gt; ` +
+    `--db ${data.db_path}`;
+  div.innerHTML = `<div>${a.approval_id} ` +
+    `<span class="tag ${tagClass(a.state)}">${a.state}</span> ` +
     `tool=${a.plan.tool || ""} session=${a.session_id}</div>` +
-    (a.state === "pending"
-      ? `<div class="cmd">belay approvals approve ${a.approval_id} --by &lt;you&gt; --db ${data.db_path}</div>`
-      : "");
+    (a.state === "pending" ? `<div class="cmd">${approveCmd}</div>` : "");
   approvalsSection.appendChild(div);
 }
 root.appendChild(approvalsSection);

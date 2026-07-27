@@ -325,7 +325,9 @@ def init(
         try:
             target = _register_client(c, wrap_path, name)
         except ValueError:
-            typer.echo("error: client config has a non-object 'mcpServers' -- fix by hand", err=True)
+            typer.echo(
+                "error: client config has a non-object 'mcpServers' -- fix by hand", err=True
+            )
             raise typer.Exit(code=1) from None
         typer.echo(f"registered '{name}' in {target}")
     typer.echo("restart the client(s) for the change to take effect")
@@ -417,7 +419,7 @@ def learn(
 
 @app.command()
 def explore(
-    session_ids: list[str] = typer.Argument(
+    session_ids: list[str] = typer.Argument(  # noqa: B008
         ..., help="Two or more already-run session variants to compare (same task, same "
         "checkpoint -- Belay doesn't generate them, only governs and compares them)."
     ),
@@ -475,11 +477,10 @@ def explore(
             async def _no_upstream(tool: str, args: dict[str, object]) -> dict[str, object]:
                 raise AssertionError("explore dry-run must never call upstream")
 
-            report = anyio.run(
-                lambda sid=session_id: rewind_service.rewind(
-                    sid, _no_upstream, dry_run=True, by="explore"
-                )
-            )
+            async def _dry_run_plan(sid: str = session_id) -> Any:
+                return await rewind_service.rewind(sid, _no_upstream, dry_run=True, by="explore")
+
+            report = anyio.run(_dry_run_plan)
             irreversible_count = len(report.plan.irreversible) + len(report.plan.indeterminate)
 
         metrics.append(compute_metrics(session_id, events, irreversible_count))
@@ -491,7 +492,7 @@ def explore(
 def causal(
     session_id: str = typer.Argument(..., help="Session to build the causal graph for."),
     db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
-    format: str = typer.Option(  # noqa: A002
+    format: str = typer.Option(
         "text", "--format", help="Output format: text, mermaid, or json."
     ),
     out: str = typer.Option(
@@ -598,6 +599,7 @@ def export_pr(
     prints the exact command to run.
     """
     from belay.cli.export_pr import (
+        ExportPrError,
         apply_changes,
         build_proof_body,
         create_branch_and_commit,
@@ -628,7 +630,11 @@ def export_pr(
 
     repo_path = Path(repo).resolve()
     branch = f"belay/{session_id}"
-    paths = apply_changes(repo_path, changes)
+    try:
+        paths = apply_changes(repo_path, changes)
+    except ExportPrError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
 
     evidence_note = ""
     if key:
@@ -648,7 +654,11 @@ def export_pr(
         )
 
     message = f"belay: {len(changes)} file change(s) from session {session_id}"
-    create_branch_and_commit(repo_path, branch, base, message, paths)
+    try:
+        create_branch_and_commit(repo_path, branch, base, message, paths)
+    except ExportPrError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
     typer.echo(f"branch {branch} created in {repo_path} ({len(paths)} file(s) committed)")
 
     intent_text: str | None = None
@@ -681,7 +691,9 @@ def export_pr(
         report = anyio.run(
             lambda: rewind_service.rewind(session_id, _no_upstream, dry_run=True, by="export-pr")
         )
-        rewind_plan_lines = [f"step {s.step_seq}: {s.tool} -> {s.status}" for s in report.plan.steps]
+        rewind_plan_lines = [
+            f"step {s.step_seq}: {s.tool} -> {s.status}" for s in report.plan.steps
+        ]
 
     body_path = repo_path / f".belay-pr-body-{session_id}.md"
     body = build_proof_body(
@@ -808,7 +820,7 @@ def replay(
                 policy=policy_doc,
             )
             if resume:
-                lifecycle._step_seq = resumed_through  # noqa: SLF001
+                lifecycle._step_seq = resumed_through
                 typer.echo(f"resuming {new_session_id} after step {resumed_through}")
             else:
                 lifecycle.start_session(
@@ -947,7 +959,9 @@ def bootstrap(
     wrap_config.save(str(wrap_out))
     typer.echo(f"2. wrapped -> {wrap_out}")
 
-    clients = list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    clients = (
+        list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    )
     for c in clients:
         if c not in _CLIENT_CONFIG_PATHS:
             typer.echo(f"   skipping unknown client {c!r}", err=True)
@@ -1342,6 +1356,7 @@ def rewind_command(
     if intent:
         from belay.rewind.intent import IntentRewindError, resolve_intent_to_step
 
+        resolved_to_step: int | None
         try:
             resolved_to_step = resolve_intent_to_step(
                 ledger.read(session_id), intent, keep or None

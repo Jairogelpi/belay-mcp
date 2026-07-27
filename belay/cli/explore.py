@@ -72,18 +72,27 @@ def render_table(metrics: list[VariantMetrics]) -> str:
             str(m.steps_proven),
             str(m.steps_unproven),
             str(m.unknown_effects),
-            "not measured" if m.irreversible_or_indeterminate is None else str(m.irreversible_or_indeterminate),
+            (
+                "not measured"
+                if m.irreversible_or_indeterminate is None
+                else str(m.irreversible_or_indeterminate)
+            ),
         ]
         for m in metrics
     ]
-    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    widths = [
+        max(len(h), *(len(r[i]) for r in rows)) if rows else len(h)
+        for i, h in enumerate(headers)
+    ]
     lines = [
         "  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True)),
         "  ".join("-" * w for w in widths),
     ]
     for row in rows:
         lines.append("  ".join(c.ljust(w) for c, w in zip(row, widths, strict=True)))
-    tools_lines = [f"{m.session_id}: tools used = {', '.join(m.tools_used) or '(none)'}" for m in metrics]
+    tools_lines = [
+        f"{m.session_id}: tools used = {', '.join(m.tools_used) or '(none)'}" for m in metrics
+    ]
     return "\n".join(lines) + "\n\n" + "\n".join(tools_lines) + (
         "\n\nno verdict is computed -- pick from this evidence, or ask each session's "
         "`belay causal`/`belay export-pr` for detail before deciding."

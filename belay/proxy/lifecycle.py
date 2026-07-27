@@ -19,9 +19,6 @@ from belay.approvals.queue import ApprovalQueue
 from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
-
-if TYPE_CHECKING:
-    from belay.intent.model import IntentContract
 from belay.executor.saga import SagaExecutor
 from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
@@ -30,6 +27,9 @@ from belay.planner.planner import Planner
 from belay.policy.engine import PolicyEngine
 from belay.policy.explain import explain
 from belay.policy.model import PolicyDoc, PolicyResult, default_policy
+
+if TYPE_CHECKING:
+    from belay.intent.model import IntentContract
 
 
 @dataclass(frozen=True)
@@ -226,7 +226,7 @@ class Lifecycle:
     policy_stage: PolicyStage | None = None
     approval_stage: ApprovalStage | None = None
     execute_stage: ExecuteStage | None = None
-    intent_contract: "IntentContract | None" = None
+    intent_contract: IntentContract | None = None
     _step_seq: int = field(default=0, init=False, repr=False)
     _files_touched: frozenset[str] = field(default=frozenset(), init=False, repr=False)
     last_explanation: dict[str, Any] | None = field(default=None, init=False, repr=False)
@@ -307,7 +307,7 @@ class Lifecycle:
         unsafe = tool in self.unsafe_passthrough_tools
 
         if self.intent_contract is not None:
-            from belay.intent.enforce import check_intent_contract
+            from belay.intent.enforce import _normalize, check_intent_contract
 
             violation = check_intent_contract(
                 self.intent_contract, tool, args, self._files_touched
@@ -331,7 +331,7 @@ class Lifecycle:
                 )
             path = args.get("path")
             if isinstance(path, str):
-                self._files_touched = self._files_touched | {path}
+                self._files_touched = self._files_touched | {_normalize(path)}
 
         try:
             resolved = resolve(
