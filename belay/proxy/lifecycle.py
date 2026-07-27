@@ -293,6 +293,7 @@ class Lifecycle:
         read_only_hint: bool,
         executor: Executor,
         intent_id: str | None = None,
+        test_ref: str | None = None,
     ) -> Any:
         """Run one call through resolve -> plan -> policy -> (approval) -> execute (spec §3)."""
         from belay.rewind.service import is_fenced
@@ -383,6 +384,8 @@ class Lifecycle:
         plan_payload: dict[str, Any] = plan.model_dump(mode="json")
         if intent_id is not None:
             plan_payload["intent_id"] = intent_id
+        if test_ref is not None:
+            plan_payload["test_ref"] = test_ref
         self.ledger.append(
             self.session_id,
             "plan_created",

@@ -66,12 +66,15 @@ class BelayProxyServer:
             annotations = self._upstream.annotations_for(name)
             read_only_hint = bool(annotations and annotations.readOnlyHint)
 
-            # `_belay_intent`: an optional, reserved arg key an agent can set to
-            # label which subgoal a call belongs to (adoption/DX, not spec-numbered
-            # -- see `belay rewind --intent`). Stripped here so the upstream never
-            # sees it; recorded on the ledger's `plan_created` event instead.
+            # `_belay_intent`/`_belay_test_ref`: optional, reserved arg keys an agent
+            # can set to label which subgoal a call belongs to (see `belay rewind
+            # --intent`) and which test demonstrates it was necessary (see `belay
+            # causal`) -- adoption/DX, not spec-numbered. Stripped here so the
+            # upstream never sees them; recorded on the ledger's `plan_created`
+            # event instead.
             call_args = dict(arguments)
             intent_id = call_args.pop("_belay_intent", None)
+            test_ref = call_args.pop("_belay_test_ref", None)
 
             async def executor(tool: str, args: dict[str, Any]) -> CallToolResult:
                 return await self._upstream.call_tool(tool, args)
@@ -83,6 +86,7 @@ class BelayProxyServer:
                     read_only_hint=read_only_hint,
                     executor=executor,
                     intent_id=intent_id,
+                    test_ref=test_ref,
                 )
             except BelayError as exc:
                 return CallToolResult(

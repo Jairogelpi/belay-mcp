@@ -136,6 +136,21 @@ belay run --config belay.wrap.json --intent-contract intent.yaml
 # -> denied before the upstream ever sees it:
 # {"code": "policy_denied", "detail": {"reason": "intent_contract:forbidden_scope", ...}}
 ```
+- **`belay causal <session>`** answers "what requirement caused this, what
+  did it read before deciding, what test proves it was necessary, what
+  would undo it" straight from the ledger — not a new subsystem, just
+  everything already recorded (`state_captured`, `plan_created`'s
+  `intent_id`/new `test_ref` tag, `policy_evaluated`,
+  `compensation_registered`) assembled into one graph instead of left for
+  a human to grep by hand. `--format mermaid` renders a real flowchart;
+  `depends_on` is one inferred (same-`path`) edge, documented as a
+  heuristic, not real data/control-flow analysis.
+
+```bash
+# agent calls: fs.write_file(..., _belay_intent="auth-fix",
+#              _belay_test_ref="tests/test_auth.py::test_login_bug")
+belay causal s_abc123 --format mermaid
+```
 - **`belay rewind --intent/--keep`** undoes exactly one declared subgoal,
   keeping another, instead of a whole session or an arbitrary step cutoff.
   An agent tags a call by adding a reserved `_belay_intent` key to its

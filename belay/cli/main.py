@@ -356,6 +356,72 @@ def dashboard(
     typer.echo(f"wrote {out}")
 
 
+@app.command()
+def causal(
+    session_id: str = typer.Argument(..., help="Session to build the causal graph for."),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    format: str = typer.Option(  # noqa: A002
+        "text", "--format", help="Output format: text, mermaid, or json."
+    ),
+    out: str = typer.Option(
+        "", "--out", "-o", help="Write to this file instead of stdout."
+    ),
+) -> None:
+    """Show the causal graph of a session: what read/decided/produced/depends-on what.
+
+    Not a new subsystem -- assembled entirely from ledger events already
+    recorded (spec §9): `state_captured` for what a step read before acting,
+    `plan_created`'s `intent_id`/`test_ref` tags (adoption/DX, see `belay
+    rewind --intent`) for which subgoal/test motivated it, `policy_evaluated`
+    for the decision, and same-`path` ordering for a same-resource
+    `depends_on` heuristic -- not real data/control-flow analysis, just the
+    nearest earlier step that touched the same file.
+    """
+    import json as jsonlib
+
+    from belay.cli.causal import build_causal_graph, to_mermaid
+    from belay.ledger.store import LedgerStore
+
+    ledger = LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
+    events = ledger.read(session_id)
+    if not events:
+        typer.echo(f"error: no events found for session {session_id!r} in {db}", err=True)
+        raise typer.Exit(code=1)
+
+    nodes = build_causal_graph(events)
+
+    if format == "mermaid":
+        text = to_mermaid(nodes, session_id)
+    elif format == "json":
+        text = jsonlib.dumps([vars(n) for n in nodes], indent=2)
+    else:
+        lines = [f"causal graph for {session_id}:"]
+        for n in nodes:
+            path = n.args.get("path")
+            lines.append(f"  step {n.step_seq}: {n.tool}" + (f" ({path})" if path else ""))
+            if n.intent_id:
+                lines.append(f"    intent: {n.intent_id}")
+            if n.test_ref:
+                lines.append(f"    proven by test: {n.test_ref}")
+            if n.read_before is not None:
+                lines.append(f"    read before deciding: {n.read_before}")
+            if n.policy_verdict:
+                lines.append(f"    policy: {n.policy_verdict} ({', '.join(n.policy_reasons)})")
+            if n.depends_on:
+                lines.append(f"    depends on step(s): {n.depends_on}")
+            if n.status:
+                lines.append(f"    status: {n.status}")
+            if n.compensation_tool:
+                lines.append(f"    undo via: {n.compensation_tool}")
+        text = "\n".join(lines)
+
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+        typer.echo(f"wrote {out}")
+    else:
+        typer.echo(text)
+
+
 @app.command(name="export-pr")
 def export_pr(
     session_id: str = typer.Argument(..., help="Committed session to package as a PR."),
