@@ -20,12 +20,12 @@ previewable, gated, and — when it goes wrong — reversible."
 > (§8), and rewind (§10), diagrammed in
 > [`docs/architecture.md`](docs/architecture.md). Nine further entregas
 > (E10-E18, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
-> "What's new since v0.1.0" below (E18 is a first slice — Claude Code/Bash
-> only, said plainly in its own section below). 596 tests,
+> "What's new since v0.1.0" below (E18 is a first slice — Claude Code only,
+> said plainly in its own section below). 613 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~80-81% repo-wide** (`fail_under = 79`, CI-enforced floor against
+> **Coverage: ~81% repo-wide** (`fail_under = 79`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -408,12 +408,14 @@ belay hooks install --yes
 # -> restart the agent for the hook to take effect
 ```
 
-First slice, said plainly rather than oversold: **Claude Code's native Bash
-tool only** — `PreToolUse`, not yet `PostToolUse`/file edits/MCP tool calls;
-Codex is not wired up yet (its hook surface for non-Bash tools couldn't be
-verified against real behavior in time, only against docs that
-partially conflicted with each other — better to ship a narrower, verified
-slice than a broader, unverified one). Every Bash command Claude Code is
+First slice, said plainly rather than oversold: **Claude Code only** —
+Bash (gated `allow`/`pause`), native `Edit`/`Write`/`NotebookEdit` (captured
+for rewind, see below), and `PostToolUse` evidence recording; MCP tool
+calls made through Claude Code's own client are not yet normalized by this
+gate. Codex is not wired up yet (its hook surface couldn't be verified
+against real behavior in time, only against docs that partially conflicted
+with each other — better to ship a narrower, verified slice than a
+broader, unverified one). Every Bash command Claude Code is
 about to run goes through `belay/hooks/decision.py`, a deterministic (no
 LLM) classifier: an explicit, narrow allowlist of read-only commands (`ls`,
 `cat`, `git status`/`diff`/`log`/`show`, `grep`, `pytest`, `pwd`, `echo`) is
@@ -519,6 +521,27 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   pinned down with full confidence from available docs — extraction tries
   several plausible names defensively and never fabricates a value for a
   field it didn't actually find, said plainly rather than assumed correct.
+- **Native `Edit`/`Write`/`NotebookEdit` calls are captured for rewind**
+  (E18.3, spec FILE-001/002/004/005/006/008) — unlike Bash, these are
+  **allowed by default** (gating every routine file edit would make the
+  gate unusable for real coding); the supervisor instead snapshots the
+  file's pre-edit content as a side effect of the `allow`, then records its
+  post-edit hash once `PostToolUse` fires. `belay hooks list-edits --db
+  belay-hooks.db` shows captured events; `belay hooks rewind <event-id>
+  --db belay-hooks.db` restores the file to its pre-edit content (or
+  deletes it, if the edit created a brand-new file) — but refuses with a
+  plain `conflict` message rather than clobbering anything if the file's
+  current content doesn't match what was recorded right after the edit
+  (something else touched it since). Snapshots are content-addressed and
+  deduplicated on disk under the same private belay home as the approvals
+  database; a file over the 5&nbsp;MiB capture cap isn't silently allowed
+  uncaptured — it pauses for approval instead, same as Bash's fail-safe
+  posture. This is a deliberately separate, simpler mechanism from
+  `belay/rewind/service.py` (the MCP-contract-based rewind used by `belay
+  run`) — that service's capture/compensation/verification model is built
+  around calling a tool to compensate; a native file edit has no tool to
+  call back into, only direct file I/O, so a smaller purpose-built snapshot
+  store fits better than forcing the contract shape onto it.
 
 ### Wrapping a non-Python MCP server
 
@@ -680,7 +703,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format | §7 (extended), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code/Bash only |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only |
 
 ## Conformance
 

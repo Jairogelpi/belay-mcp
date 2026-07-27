@@ -34,15 +34,17 @@ from collections.abc import Callable
 # home module keeps mypy happy without a `type: ignore`.
 from multiprocessing.connection import Listener
 from multiprocessing.context import AuthenticationError
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine
 
 from belay.approvals.queue import ApprovalQueue
 from belay.hooks import claude_code_adapter, gate
+from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
 from belay.ledger.store import LedgerStore
-from belay.supervisor.addressing import SupervisorIdentity
+from belay.supervisor.addressing import SupervisorIdentity, belay_home
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.idempotency import IdempotencyStore, content_digest, event_key
 from belay.supervisor.protocol import HookEvent, SupervisorRequest, SupervisorResponse
@@ -116,6 +118,7 @@ class Supervisor:
         self._queue = ApprovalQueue(engine=engine)
         self._idempotency = IdempotencyStore(engine)
         self._ledger = LedgerStore(engine=engine)
+        self._snapshots = SnapshotStore(engine, belay_home() / "snapshots")
         #: PreToolUse's monotonic timestamp, keyed by event_id, so the
         #: matching PostToolUse call (a SEPARATE `belay hooks run`
         #: invocation -- there's no other shared state between them) can
@@ -127,9 +130,16 @@ class Supervisor:
         self._pre_times: dict[str, int] = {}
         self._pre_times_lock = threading.Lock()
 
+    def _decide_pre(self, event: HookEvent) -> GateDecision:
+        if event.surface == "shell" and event.tool_name == "Bash":
+            return gate.evaluate(event, self._queue)
+        if event.surface == "file":
+            return gate.evaluate_file_edit(event, self._queue, self._snapshots)
+        return gate.evaluate(event, self._queue)  # its own guard denies non-Bash/non-pre uniformly
+
     def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:
         if event.phase == "pre":
-            decision = gate.evaluate(event, self._queue)
+            decision = self._decide_pre(event)
             self._ledger.append(
                 gate.ledger_session_id(event),
                 "hook_pre_tool_use",
@@ -147,6 +157,10 @@ class Supervisor:
                     pre_ns = self._pre_times.pop(event.event_id, None)
                 if pre_ns is not None:
                     duration_ms = (event.monotonic_ns - pre_ns) / 1_000_000
+            if event.surface == "file" and event.event_id:
+                path_str = gate.file_path_from_args(event.args)
+                if path_str is not None:
+                    self._snapshots.record_after(event.event_id, Path(path_str))
             self._ledger.append(
                 gate.ledger_session_id(event),
                 "hook_post_tool_use",

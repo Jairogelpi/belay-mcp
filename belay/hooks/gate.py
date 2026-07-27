@@ -40,6 +40,7 @@ from typing import Any, Literal
 
 from belay.approvals.queue import ApprovalQueue
 from belay.hooks.decision import DECISION_LOGIC_VERSION, Verdict, classify_bash
+from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
 from belay.supervisor.addressing import belay_home
 from belay.supervisor.protocol import HookEvent
 
@@ -212,6 +213,101 @@ def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
         f"belay: {decision.reason} -- queued for human approval (approval {item.approval_id}) "
         "-- run `belay approvals list` / `belay approvals approve`, then retry the exact "
         "same command",
+        approval_id=item.approval_id,
+    )
+
+
+#: `file_path` is the field name Claude Code's Edit/Write/NotebookEdit tools
+#: are documented to use across multiple sources with reasonable
+#: consistency (more consistent than the PostToolUse result field --
+#: see claude_code_adapter.py's docstring on that ambiguity). `path` is
+#: tried as a fallback in case a future tool or another host names it
+#: differently -- never guessed beyond that, never fabricated.
+_FILE_PATH_ARG_KEYS = ("file_path", "path")
+
+
+def file_path_from_args(args: dict[str, Any]) -> str | None:
+    for key in _FILE_PATH_ARG_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def evaluate_file_edit(
+    event: HookEvent, queue: ApprovalQueue, snapshots: SnapshotStore
+) -> GateDecision:
+    """Edit/Write/NotebookEdit calls are ALLOWED by default -- unlike Bash,
+    where an unrecognized command pauses. Gating every routine file write
+    for human approval would make this unusable for a normal coding
+    session; the actual safety value here is being able to UNDO an edit
+    afterward via `belay hooks rewind <event_id>`, which this captures a
+    snapshot for as a side effect of allowing (spec §9.2 FILE-001).
+
+    The one case that still pauses: a file too large to capture (spec
+    FILE-006 -- "exceeding capture limits downgrades reversibility and
+    normally requires approval"). Allowing that silently would make an
+    edit that *can't* be undone look identical to one that can; ask a
+    human instead of hiding the gap. Reuses the same ApprovalQueue
+    plan_id-binding pattern as Bash's PAUSE path, scoped to this specific
+    oversized file rather than the file's content (which, by definition,
+    was never captured to bind to)."""
+    if event.phase != "pre":
+        return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
+    if not event.event_id:
+        return GateDecision("deny", "belay: missing event id -- ambiguous identity, denying")
+
+    path_str = file_path_from_args(event.args)
+    if path_str is None:
+        reason = f"belay: {event.tool_name} call had no recognizable path argument"
+        return GateDecision("deny", reason)
+
+    snapshot = snapshots.capture_before(event.event_id, event.host_session_id, Path(path_str))
+    if snapshot.state != "oversized":
+        return GateDecision(
+            "allow", f"belay: file edit captured for rewind (event {event.event_id})"
+        )
+
+    plan_id = "file-oversized:" + hashlib.sha256(
+        f"{event.host}|{event.host_session_id}|{path_str}".encode()
+    ).hexdigest()[:32]
+    existing = queue.for_plan(plan_id)
+    if existing is not None and existing.state == "approved":
+        return GateDecision(
+            "allow",
+            f"belay: oversized file edit approved by a human (approval {existing.approval_id}) "
+            "-- NOT reversible, no snapshot was captured",
+            approval_id=existing.approval_id,
+        )
+    if existing is not None and existing.state == "pending":
+        return GateDecision(
+            "deny",
+            f"belay: {path_str} exceeds the capture size cap ({MAX_SNAPSHOT_BYTES} bytes) -- "
+            f"still pending human approval (approval {existing.approval_id})",
+            approval_id=existing.approval_id,
+        )
+    if existing is not None and existing.state == "rejected":
+        return GateDecision(
+            "deny",
+            f"belay: oversized edit of {path_str} was rejected (approval {existing.approval_id})"
+            " -- this one won't be re-asked",
+            approval_id=existing.approval_id,
+        )
+
+    item = queue.request(
+        session_id=event.host_session_id,
+        plan_id=plan_id,
+        plan={
+            "tool": event.tool_name,
+            "path": path_str,
+            "reason": f"file exceeds the {MAX_SNAPSHOT_BYTES}-byte capture cap -- "
+            "editing it would not be reversible",
+        },
+    )
+    return GateDecision(
+        "deny",
+        f"belay: {path_str} exceeds the capture size cap ({MAX_SNAPSHOT_BYTES} bytes) -- "
+        f"cannot be made reversible; queued for human approval (approval {item.approval_id})",
         approval_id=item.approval_id,
     )
 

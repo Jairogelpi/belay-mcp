@@ -286,3 +286,122 @@ def test_install_reject_unsupported_client() -> None:
     result = runner.invoke(app, ["hooks", "install", "--client", "codex", "--yes"])
     assert result.exit_code != 0
     assert "unsupported" in result.output
+
+
+class TestFileEditRewind:
+    """E18.3: native Edit/Write calls are captured for rewind, end-to-end
+    through the real CLI, two separate `belay hooks run` invocations (pre
+    then post) exactly like a real host would call this."""
+
+    def _run_pre_edit(self, target: Path, event_id: str) -> None:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(target), "content": "new content"},
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.stdout)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def _run_post_edit(self, target: Path, event_id: str) -> None:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(target), "content": "new content"},
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PostToolUse", "--db", "test.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_edit_of_existing_file_can_be_rewound(self, tmp_path: Path) -> None:
+        target = tmp_path / "existing.txt"
+        target.write_text("original content", encoding="utf-8")
+
+        self._run_pre_edit(target, "toolu_edit_1")
+        target.write_text("new content", encoding="utf-8")  # simulates the tool actually running
+        self._run_post_edit(target, "toolu_edit_1")
+
+        result = runner.invoke(app, ["hooks", "rewind", "toolu_edit_1", "--db", "test.db", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert target.read_text(encoding="utf-8") == "original content"
+
+    def test_edit_of_new_file_rewind_deletes_it(self, tmp_path: Path) -> None:
+        target = tmp_path / "brand-new.txt"
+        assert not target.exists()
+
+        self._run_pre_edit(target, "toolu_edit_2")
+        target.write_text("new content", encoding="utf-8")
+        self._run_post_edit(target, "toolu_edit_2")
+
+        result = runner.invoke(app, ["hooks", "rewind", "toolu_edit_2", "--db", "test.db", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert not target.exists()
+
+    def test_rewind_refuses_when_file_changed_again_since(self, tmp_path: Path) -> None:
+        target = tmp_path / "existing.txt"
+        target.write_text("original", encoding="utf-8")
+
+        self._run_pre_edit(target, "toolu_edit_3")
+        target.write_text("new content", encoding="utf-8")
+        self._run_post_edit(target, "toolu_edit_3")
+
+        target.write_text("touched again by something else", encoding="utf-8")
+
+        result = runner.invoke(app, ["hooks", "rewind", "toolu_edit_3", "--db", "test.db", "--yes"])
+        assert result.exit_code == 1
+        assert "conflict" in result.output
+        assert target.read_text(encoding="utf-8") == "touched again by something else"
+
+    def test_list_edits_shows_captured_events(self, tmp_path: Path) -> None:
+        target = tmp_path / "f.txt"
+        target.write_text("v1", encoding="utf-8")
+        self._run_pre_edit(target, "toolu_edit_list")
+        target.write_text("v2", encoding="utf-8")
+        self._run_post_edit(target, "toolu_edit_list")
+
+        result = runner.invoke(app, ["hooks", "list-edits", "--db", "test.db"])
+        assert result.exit_code == 0, result.output
+        assert "toolu_edit_list" in result.output
+        assert "recorded" in result.output
+
+    def test_rewind_of_unknown_event_id_fails_cleanly(self) -> None:
+        result = runner.invoke(
+            app, ["hooks", "rewind", "no-such-event", "--db", "test.db", "--yes"]
+        )
+        assert result.exit_code == 1
+        assert "no captured edit" in result.output
+
+    def test_oversized_file_edit_is_paused_not_silently_allowed(self, tmp_path: Path) -> None:
+        from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES
+
+        target = tmp_path / "huge.bin"
+        target.write_bytes(b"x" * (MAX_SNAPSHOT_BYTES + 1))
+
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(target)},
+                "tool_use_id": "toolu_huge",
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.stdout)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "capture size cap" in out["hookSpecificOutput"]["permissionDecisionReason"]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, Integer, String
+from sqlalchemy import JSON, Boolean, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -101,3 +101,42 @@ class HookEventRow(Base):
     request_digest: Mapped[str] = mapped_column(String(64))
     response: Mapped[dict[str, Any]] = mapped_column(JSON)
     decided_at: Mapped[str] = mapped_column(String(64))
+
+
+class FileSnapshotRow(Base):
+    """One row per native file-edit hook event captured for rewind (E18.3,
+    spec §9.2 FILE-001/004/005/008). Keyed by `event_id` (the host's
+    `tool_use_id` for the Edit/Write call) rather than path+timestamp, so a
+    duplicate/retried event naturally maps to the same row instead of
+    creating a second snapshot of the same edit.
+
+    The actual pre-edit BYTES are not stored in this row -- large file
+    content in a SQLite TEXT/JSON column is wasteful and risks bloating the
+    approvals/ledger database. They live as a separate blob file under
+    `belay_home()/snapshots/<hash[:2]>/<hash>`, content-addressed by
+    `before_hash` so identical content is never stored twice; this row is
+    just the index pointing at it.
+
+    `existed_before=False` and `before_hash=None` together mean "this path
+    did not exist before the edit" -- FILE-005: restoring that case means
+    *deleting* the file, a distinct compensation from restoring prior bytes,
+    never conflated into one "hash is empty string" special case.
+    """
+
+    __tablename__ = "file_snapshots"
+
+    event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(255), index=True)
+    path: Mapped[str] = mapped_column(String(4096))
+    existed_before: Mapped[bool] = mapped_column(Boolean)
+    before_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    before_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: "captured" (pre-edit snapshot taken) -> "recorded" (post-edit state
+    #: confirmed, safe to offer rewind) -> "restored" (rewound) | "conflict"
+    #: (rewind attempted but the file had changed again since -- refused,
+    #: never silently overwritten) | "oversized" (exceeded the capture size
+    #: cap -- edit was still allowed, but nothing was captured to restore).
+    state: Mapped[str] = mapped_column(String(16))
+    after_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    captured_at: Mapped[str] = mapped_column(String(64))
+    restored_at: Mapped[str | None] = mapped_column(String(64), nullable=True)

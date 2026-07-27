@@ -997,6 +997,76 @@ def hooks_doctor(
         )
 
 
+@hooks_app.command("list-edits")
+def hooks_list_edits(
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+) -> None:
+    """List captured native file edits (E18.3), most recent first --
+    `belay hooks rewind <event_id>` undoes one."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session as DBSession
+
+    from belay.db.models import FileSnapshotRow
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity(Path(db).resolve()).data_path
+    if not data_path.is_file():
+        typer.echo("no captured edits (nothing installed/run yet)")
+        return
+    engine = create_engine(f"sqlite:///{data_path}", future=True)
+    with DBSession(engine) as session:
+        rows = session.scalars(
+            select(FileSnapshotRow).order_by(FileSnapshotRow.captured_at.desc())
+        ).all()
+    if not rows:
+        typer.echo("no captured edits")
+        return
+    for row in rows:
+        typer.echo(
+            f"{row.event_id}  {row.state:9s}  {row.path}  captured_at={row.captured_at}"
+            + (f"  restored_at={row.restored_at}" if row.restored_at else "")
+        )
+
+
+@hooks_app.command("rewind")
+def hooks_rewind(
+    event_id: str = typer.Argument(..., help="The tool_use_id of a captured Edit/Write call."),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Undo one captured native file edit (E18.3, spec §9.2).
+
+    Refuses (never silently overwrites) if the file has changed again since
+    the edit this is rewinding -- run `belay hooks list-edits` to find an
+    `event_id`, then this to restore that specific edit's pre-edit content
+    (or delete the file, if it didn't exist before that edit)."""
+    from sqlalchemy import create_engine
+
+    from belay.hooks.file_snapshot import SnapshotStore
+    from belay.supervisor.addressing import belay_home, supervisor_identity
+
+    identity = supervisor_identity(Path(db).resolve())
+    if not identity.data_path.is_file():
+        typer.echo("no captured edits (nothing installed/run yet)", err=True)
+        raise typer.Exit(code=1)
+
+    engine = create_engine(f"sqlite:///{identity.data_path}", future=True)
+    store = SnapshotStore(engine, belay_home() / "snapshots")
+    snapshot = store.get(event_id)
+    if snapshot is None:
+        typer.echo(f"no captured edit found for event_id {event_id!r}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"this will rewind {event_id}: {snapshot.path} ({snapshot.state})")
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    outcome = store.restore(event_id)
+    typer.echo(outcome)
+    if "conflict" in outcome or "no snapshot" in outcome or "missing" in outcome:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def dashboard(
     db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
