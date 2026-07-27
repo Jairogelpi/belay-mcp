@@ -5,8 +5,16 @@ Not a new subsystem -- every edge here already exists as a ledger event
 `plan_created`'s `intent_id`/`test_ref` (adoption/DX tags, see
 `belay/proxy/server.py`), `policy_evaluated` ("what decision fired"),
 `step_committed`/`compensation_registered` ("what happened, how to undo
-it"). This module only assembles what's already there into one graph and
-renders it, instead of leaving a human to grep the ledger by hand.
+it"), `belay:test_verified` (`belay/ledger/test_evidence.py` -- a test
+actually *run*, not just named). This module only assembles what's
+already there into one graph and renders it, instead of leaving a human
+to grep the ledger by hand.
+
+Test proof is three-tiered, not binary: `test_verified=True` means a
+`belay:test_verified` event with `exit_code == 0` exists for that step
+(`belay verify-test` actually ran it); `test_ref` alone (no matching
+`belay:test_verified`) is merely *claimed* -- an agent-supplied label,
+never independently checked.
 
 `depends_on` is the one inferred edge (not directly a ledger field): a
 step depends on the nearest earlier step that touched the same `path` --
@@ -34,6 +42,8 @@ class CausalNode:
     policy_reasons: list[str]
     status: str | None  # step_committed / step_failed / ...
     compensation_tool: str | None
+    test_verified: bool | None = None  # True/False: belay:test_verified ran; None: never run
+    test_evidence: dict[str, Any] | None = None
     depends_on: list[int] = field(default_factory=list)
 
 
@@ -43,6 +53,7 @@ def build_causal_graph(events: list[Event]) -> list[CausalNode]:
     policies: dict[int, dict[str, Any]] = {}
     statuses: dict[int, str] = {}
     compensations: dict[int, str] = {}
+    test_evidence: dict[int, dict[str, Any]] = {}
 
     for event in events:
         if event.step_seq is None:
@@ -58,6 +69,8 @@ def build_causal_graph(events: list[Event]) -> list[CausalNode]:
             statuses[s] = event.type
         elif event.type == "compensation_registered":
             compensations[s] = event.payload.get("tool", "")
+        elif event.type == "belay:test_verified":
+            test_evidence[s] = event.payload  # latest wins if re-run
 
     nodes: list[CausalNode] = []
     path_last_step: dict[str, int] = {}
@@ -65,6 +78,7 @@ def build_causal_graph(events: list[Event]) -> list[CausalNode]:
         plan = plans[step_seq]
         args = plan.get("args") or {}
         policy = policies.get(step_seq, {})
+        evidence = test_evidence.get(step_seq)
         node = CausalNode(
             step_seq=step_seq,
             tool=plan.get("tool", ""),
@@ -76,6 +90,8 @@ def build_causal_graph(events: list[Event]) -> list[CausalNode]:
             policy_reasons=policy.get("reasons", []),
             status=statuses.get(step_seq),
             compensation_tool=compensations.get(step_seq),
+            test_verified=evidence.get("passed") if evidence else None,
+            test_evidence=evidence,
         )
         path = args.get("path")
         if isinstance(path, str) and path in path_last_step:

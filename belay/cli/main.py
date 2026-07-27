@@ -533,8 +533,20 @@ def causal(
             lines.append(f"  step {n.step_seq}: {n.tool}" + (f" ({path})" if path else ""))
             if n.intent_id:
                 lines.append(f"    intent: {n.intent_id}")
-            if n.test_ref:
-                lines.append(f"    proven by test: {n.test_ref}")
+            if n.test_verified is True:
+                ev = n.test_evidence or {}
+                lines.append(
+                    f"    VERIFIED by test: {n.test_ref or ev.get('cmd')} "
+                    f"(exit_code=0, output_hash={ev.get('output_hash')})"
+                )
+            elif n.test_verified is False:
+                ev = n.test_evidence or {}
+                lines.append(
+                    f"    test FAILED: {n.test_ref or ev.get('cmd')} "
+                    f"(exit_code={ev.get('exit_code')})"
+                )
+            elif n.test_ref:
+                lines.append(f"    claimed (never run): {n.test_ref}")
             if n.read_before is not None:
                 lines.append(f"    read before deciding: {n.read_before}")
             if n.policy_verdict:
@@ -552,6 +564,62 @@ def causal(
         typer.echo(f"wrote {out}")
     else:
         typer.echo(text)
+
+
+@app.command(name="verify-test")
+def verify_test(
+    session_id: str = typer.Argument(..., help="Session whose step is being verified."),
+    step: int = typer.Option(..., "--step", help="step_seq (spec §9.1) this test proves."),
+    cmd: str = typer.Option(
+        ..., "--cmd", help="Shell command to actually run (e.g. a pytest call)."
+    ),
+    cwd: str = typer.Option(
+        "", "--cwd", help="Working directory to run --cmd in (default: cwd)."
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    timeout: float = typer.Option(
+        300.0, "--timeout", help="Seconds before the command is killed."
+    ),
+) -> None:
+    """Actually run a test and record its real outcome against one step -- not a claimed label.
+
+    Closes the gap in `_belay_test_ref` (a bare string the agent itself
+    supplies, never executed or checked): this runs `--cmd` for real,
+    hashes its combined stdout+stderr (not stored raw -- could be large or
+    carry secrets), and records exit code + duration + hash as ledger event
+    `belay:test_verified` tied to `--step`. `belay causal`/`belay
+    export-pr` then distinguish *verified* (this ran and passed) from
+    merely *claimed* (`_belay_test_ref` present, never actually run).
+    """
+    from belay.ledger.store import LedgerStore
+    from belay.ledger.test_evidence import run_test
+
+    ledger = LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
+    if not ledger.read(session_id):
+        typer.echo(f"error: no events found for session {session_id!r} in {db}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"running: {cmd}")
+    result = run_test(cmd, cwd=cwd or None, timeout=timeout)
+    ledger.append(
+        session_id,
+        "belay:test_verified",
+        {
+            "cmd": result.cmd,
+            "exit_code": result.exit_code,
+            "output_hash": result.output_hash,
+            "duration_ms": result.duration_ms,
+            "passed": result.passed,
+        },
+        step_seq=step,
+    )
+    status = "PASSED" if result.passed else "FAILED"
+    typer.echo(
+        f"{status} (exit_code={result.exit_code}, {result.duration_ms}ms, "
+        f"output_hash={result.output_hash}) -- recorded against step {step}"
+    )
+    if not result.passed:
+        raise typer.Exit(code=1)
 
 
 @app.command(name="export-pr")

@@ -144,6 +144,24 @@ belay run --config belay.wrap.json --intent-contract intent.yaml
 # -> denied before the upstream ever sees it:
 # {"code": "policy_denied", "detail": {"reason": "intent_contract:forbidden_scope", ...}}
 ```
+- **`belay verify-test`** closes the gap in `_belay_test_ref` (a bare
+  string the agent itself supplies, never independently checked —
+  `tests/fake.py::test_ok` would show up as "proven" whether or not it
+  exists). `belay verify-test <session> --step N --cmd "<real command>"`
+  actually **runs** the command, hashes its combined stdout+stderr (not
+  stored raw), and records exit code + duration + hash as ledger event
+  `belay:test_verified`. `belay causal`/`belay export-pr` then distinguish
+  three tiers per step: **verified** (actually run, exit 0), **claimed**
+  (a `_belay_test_ref` label, never run), or **failed** (run, non-zero
+  exit) — not a single "proven: yes/no" that trusts the agent's word.
+
+```bash
+belay verify-test s_abc123 --step 1 --cmd "pytest tests/test_auth.py::test_login"
+# -> PASSED (exit_code=0, 340ms, output_hash=sha256:...) -- recorded against step 1
+belay causal s_abc123
+#   step 1: fs.write_file (auth.py)
+#     VERIFIED by test: tests/test_auth.py::test_login (exit_code=0, output_hash=sha256:...)
+```
 - **`belay causal <session>`** answers "what requirement caused this, what
   did it read before deciding, what test proves it was necessary, what
   would undo it" straight from the ledger — not a new subsystem, just

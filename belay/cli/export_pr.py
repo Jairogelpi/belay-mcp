@@ -235,17 +235,32 @@ def build_proof_body(
         behavior_lines.append(f"- step {c.step_seq}: {kind} `{c.path}`{suffix}")
     sections.append("\n### What new behavior exists?\n" + "\n".join(behavior_lines))
 
-    proven = [n for n in nodes if n.test_ref]
-    unproven = [n for n in nodes if not n.test_ref]
-    verified_text = (
-        "\n".join(f"- step {n.step_seq} ({n.tool}): `{n.test_ref}`" for n in proven)
-        or "_none of this session's steps carry a `_belay_test_ref`_"
-    )
+    verified = [n for n in nodes if n.test_verified is True]
+    claimed_only = [n for n in nodes if n.test_verified is None and n.test_ref]
+    unproven = [n for n in nodes if n.test_verified is not True and not n.test_ref]
+    failed = [n for n in nodes if n.test_verified is False]
+
+    verified_lines = [
+        f"- step {n.step_seq} ({n.tool}): `{n.test_ref or (n.test_evidence or {}).get('cmd')}` "
+        f"-- **actually run**, exit_code=0, output_hash="
+        f"`{(n.test_evidence or {}).get('output_hash')}` (`belay verify-test`)"
+        for n in verified
+    ]
+    if failed:
+        verified_lines += [
+            f"- step {n.step_seq} ({n.tool}): `{n.test_ref}` -- **ran and FAILED**, "
+            f"exit_code={(n.test_evidence or {}).get('exit_code')}"
+            for n in failed
+        ]
+    verified_text = "\n".join(verified_lines) or "_no step has an actually-run, passing test_"
     sections.append("\n### What was verified?\n" + verified_text)
-    unproven_text = (
-        "\n".join(f"- step {n.step_seq} ({n.tool}): no test reference attached" for n in unproven)
-        or "_every step carries a test reference_"
-    )
+
+    unproven_lines = [
+        f"- step {n.step_seq} ({n.tool}): `{n.test_ref}` -- **claimed only, never run** "
+        f"(no `belay verify-test` recorded for this step)"
+        for n in claimed_only
+    ] + [f"- step {n.step_seq} ({n.tool}): no test reference attached" for n in unproven]
+    unproven_text = "\n".join(unproven_lines) or "_every step is backed by an actually-run test_"
     sections.append("\n### What couldn't be proven?\n" + unproven_text)
 
     effects = []
