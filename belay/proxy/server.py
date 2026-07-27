@@ -64,12 +64,23 @@ class BelayProxyServer:
             annotations = self._upstream.annotations_for(name)
             read_only_hint = bool(annotations and annotations.readOnlyHint)
 
+            # `_belay_intent`: an optional, reserved arg key an agent can set to
+            # label which subgoal a call belongs to (adoption/DX, not spec-numbered
+            # -- see `belay rewind --intent`). Stripped here so the upstream never
+            # sees it; recorded on the ledger's `plan_created` event instead.
+            call_args = dict(arguments)
+            intent_id = call_args.pop("_belay_intent", None)
+
             async def executor(tool: str, args: dict[str, Any]) -> CallToolResult:
                 return await self._upstream.call_tool(tool, args)
 
             try:
                 result = await self.lifecycle.govern_and_execute(
-                    name, arguments, read_only_hint=read_only_hint, executor=executor
+                    name,
+                    call_args,
+                    read_only_hint=read_only_hint,
+                    executor=executor,
+                    intent_id=intent_id,
                 )
             except BelayError as exc:
                 return CallToolResult(

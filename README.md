@@ -118,6 +118,26 @@ conformance:
   decision authority. It never approves or rejects anything; that stays
   CLI-only and human-typed (spec §12 no-self-approval) — this just cuts
   through a long queue to what actually needs eyes first.
+- **`belay rewind --intent/--keep`** undoes exactly one declared subgoal,
+  keeping another, instead of a whole session or an arbitrary step cutoff.
+  An agent tags a call by adding a reserved `_belay_intent` key to its
+  arguments (stripped before the upstream ever sees it, recorded on that
+  step's `plan_created` ledger event); `belay rewind --intent
+  cache-refactor --keep auth-fix` then resolves to the exact `--to-step`
+  cutoff that undoes only the `cache-refactor`-tagged steps. This only
+  works when those steps are a safe contiguous trailing run — anything
+  interleaved (an untagged step, a third subgoal after the one being kept)
+  is refused outright (`rewind_intent_not_suffix`) rather than guessed at
+  with a fabricated semantic merge; no LLM is involved in the decision,
+  only in whatever agent chose the tag in the first place.
+
+```bash
+# agent calls: fs.write_file(path=auth.py, ..., _belay_intent="auth-fix")
+#              fs.write_file(path=cache.py, ..., _belay_intent="cache-refactor")
+belay rewind s_abc123 --intent cache-refactor --keep auth-fix --by jairo
+# -> --intent 'cache-refactor' resolved to --to-step 1
+# -> only cache.py's write is compensated; auth.py is untouched
+```
 - **`belay export-pr`** packages a committed session's file changes
   (the `path`/`content` shape `examples/contracts/fs.yaml` already uses) as
   a real git branch + commit, with Belay's own signed evidence (E13)

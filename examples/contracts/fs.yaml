@@ -1,3 +1,8 @@
+# NOTE: `fs.read_file` returns a bare string, not `{"content": ...}` -- the
+# saga executor's generic wrap (`_as_dict`, belay/executor/saga.py) puts a
+# non-dict capture result under `value`, so `$state.before.value` is the
+# correct reference here, not `.content` (previously wrong: silently
+# produced a validation error only surfaced when a rewind actually ran).
 belay_contract: "0.1"
 tool: fs.write_file
 summary: Overwrites a file's contents
@@ -11,7 +16,7 @@ undo:
   tool: fs.write_file
   args:
     path: "$args.path"
-    content: "$state.before.content"
+    content: "$state.before.value"
 idempotent: false
 effects:
   - type: update
@@ -39,7 +44,7 @@ undo:
   tool: fs.write_file
   args:
     path: "$args.path"
-    content: "$state.before.content"
+    content: "$state.before.value"
 effects:
   - type: delete
     resource: fs.file

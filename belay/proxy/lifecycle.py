@@ -287,6 +287,7 @@ class Lifecycle:
         *,
         read_only_hint: bool,
         executor: Executor,
+        intent_id: str | None = None,
     ) -> Any:
         """Run one call through resolve -> plan -> policy -> (approval) -> execute (spec §3)."""
         from belay.rewind.service import is_fenced
@@ -343,10 +344,17 @@ class Lifecycle:
             native_dry_run=self.native_dry_run,
         )
         plan = await self.plan_stage.plan(resolved, planning_session)
+        # `intent_id` is not part of Plan's normative schema (spec §5.1) -- it rides
+        # along in the ledger event only (events are `extra="allow"`, spec §14),
+        # so `belay rewind --intent`/causal-graph tooling can group steps by the
+        # subgoal that produced them without changing the Plan model itself.
+        plan_payload: dict[str, Any] = plan.model_dump(mode="json")
+        if intent_id is not None:
+            plan_payload["intent_id"] = intent_id
         self.ledger.append(
             self.session_id,
             "plan_created",
-            plan.model_dump(mode="json"),
+            plan_payload,
             step_seq=step_seq,
             set_hash=self.contract_set.set_hash,
         )

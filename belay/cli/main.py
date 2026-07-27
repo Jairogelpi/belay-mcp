@@ -269,7 +269,7 @@ def _register_client(client: str, wrap_path: Path, name: str) -> Path:
 
     servers = doc.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        raise BelayError("client_config_invalid", {"path": str(target)})
+        raise ValueError(f"{target}: 'mcpServers' is not an object")
     servers[name] = {
         "command": sys.executable,
         "args": ["-m", "belay.cli.main", "run", "--config", str(wrap_path)],
@@ -324,7 +324,7 @@ def init(
     for c in clients:
         try:
             target = _register_client(c, wrap_path, name)
-        except BelayError:
+        except ValueError:
             typer.echo("error: client config has a non-object 'mcpServers' -- fix by hand", err=True)
             raise typer.Exit(code=1) from None
         typer.echo(f"registered '{name}' in {target}")
@@ -710,7 +710,7 @@ def bootstrap(
             continue
         try:
             target = _register_client(c, wrap_out, name)
-        except BelayError:
+        except ValueError:
             typer.echo(f"   {c}: config has a non-object 'mcpServers' -- fix by hand", err=True)
             continue
         typer.echo(f"3. registered with {c} -> {target}")
@@ -1045,6 +1045,16 @@ def rewind_command(
         "--to-step",
         help="Rewind only steps with step_seq > this value (default: -1, meaning all).",
     ),
+    intent: str = typer.Option(
+        "",
+        "--intent",
+        help="Undo only steps tagged with this `_belay_intent` label (adoption/DX, not "
+        "spec-numbered) -- requires the tagged steps to be a safe contiguous trailing "
+        "run; refuses otherwise rather than guessing. Combine with --keep.",
+    ),
+    keep: str = typer.Option(
+        "", "--keep", help="With --intent: the label of steps that must NOT be undone."
+    ),
     config: str = typer.Option("belay.wrap.json", "--config", "-c", help="Wrap config path."),
     policy: str = typer.Option(
         "", "--policy", help="Policy document path (spec §6.1); default is the built-in policy."
@@ -1069,7 +1079,20 @@ def rewind_command(
     ledger = LedgerStore(f"sqlite:///{Path(wrap_config.db).resolve().as_posix()}")
     approver = by or getpass.getuser()
     service = RewindService(ledger=ledger, policy=policy_doc, contract_set=contract_set)
-    resolved_to_step = None if to_step < 0 else to_step
+
+    if intent:
+        from belay.rewind.intent import IntentRewindError, resolve_intent_to_step
+
+        try:
+            resolved_to_step = resolve_intent_to_step(
+                ledger.read(session_id), intent, keep or None
+            )
+        except IntentRewindError as exc:
+            typer.echo(f"error: {exc.to_dict()}", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(f"--intent {intent!r} resolved to --to-step {resolved_to_step}")
+    else:
+        resolved_to_step = None if to_step < 0 else to_step
 
     async def _no_upstream(
         tool: str, args: dict[str, object]
