@@ -21,11 +21,11 @@ previewable, gated, and — when it goes wrong — reversible."
 > [`docs/architecture.md`](docs/architecture.md). Nine further entregas
 > (E10-E18, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code/Bash
-> only, said plainly in its own section below). 532 tests,
+> only, said plainly in its own section below). 585 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~79.7-80% repo-wide** (`fail_under = 79`, CI-enforced floor against
+> **Coverage: ~80-81% repo-wide** (`fail_under = 79`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -452,25 +452,60 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   Python's stdlib `multiprocessing.connection`, which does an HMAC
   challenge-response handshake with an installation-scoped capability token
   before any payload crosses the wire — no new dependency, no token ever
-  sent in plaintext). The token lives outside the project directory
-  (`~/.belay/keys/…`, `0600` on POSIX), so an agent restricted to
-  project-directory tool calls can't read or forge it.
+  sent in plaintext). The token lives under this user's private belay home
+  (`~/.belay/keys/…` or `%LOCALAPPDATA%\belay\keys\…`, `0600` on POSIX,
+  overridable via `BELAY_HOME`) — never inside the project, and a
+  wrong-length/corrupted token file is discarded and regenerated rather
+  than used as-is.
+- **JSON on the wire, not pickle** (`belay/supervisor/wire.py`) — Python's
+  `Connection.send()`/`.recv()` pickle their argument, and unpickling data
+  from a peer that's merely *authenticated* (not necessarily trustworthy
+  software) is a real code-execution risk; every message here is canonical
+  UTF-8 JSON with a hard size cap, fully schema-validated before any object
+  is built from it.
+- **The approvals/idempotency database is private too** — always under this
+  user's belay home, never inside the project a hook gates. An earlier
+  version defaulted it into the project directory, which meant an agent
+  with ordinary file-write access (or a Bash command the gate itself
+  allowed) could reach the SQLite file directly and edit its own approval
+  state by hand; `belay hooks install`'s own printed message shows the real
+  path.
+- **The classifier can't be pointed at its own secrets** — even an
+  otherwise-allowlisted "safe read" command (`cat`, etc.) is denied if any
+  of its path-looking arguments resolve into belay's private storage, since
+  "outside the project" doesn't mean "outside what the OS user running the
+  agent's Bash tool can read".
 - **Fails closed.** If the supervisor can't be reached or a request times
   out, the answer is `deny`, not `allow` and not a hang — never leaves a
-  `PreToolUse` call unanswered.
-- **Duplicate event IDs are idempotent** — the exact same tool-call retried
-  gets the exact same answer, even if the underlying approval state changed
-  in between (e.g. a human approved it between the two retries); a
-  genuinely new event for the same command sees the current state.
-- One supervisor per install (keyed by the resolved `--db` path), not a
-  single global daemon shared across unrelated projects.
+  `PreToolUse` call unanswered. A connected-but-silent peer (a local
+  Slowloris) is actively timed out, not merely deprioritized, and can't
+  block other clients — the supervisor accepts and handles connections
+  concurrently (bounded worker pool of daemon threads, so a stuck
+  connection can never keep the whole process from exiting on shutdown).
+- **Duplicate event IDs are idempotent, durably** — stored in SQLite, not
+  memory, so the exact same tool-call retried gets the exact same answer
+  even across a supervisor restart (crash, upgrade, hard kill), not just
+  within one process's lifetime; a key reused with genuinely different
+  content is treated as a collision and denied, never answered from either
+  version.
+- **Approvals are bound to the full context they were granted in** — host,
+  session, tool, the command itself, working directory, the repository's
+  real git HEAD, and the decision-logic ruleset version — not the command
+  text alone. Approving a command in one repository/branch/session never
+  silently approves the identical string somewhere else.
+- One supervisor per install (keyed by a resolved project-anchor path,
+  hashed — never opened as a file itself), not a single global daemon
+  shared across unrelated projects.
 - Host-agnostic by construction: the supervisor normalizes every event into
   one common shape (spec §7.1-style: installation id, host/adapter version,
   correlation id, phase, surface, normalized tool identity, structured
   args, cwd/repo identity, OS user obtained independently of the payload,
   monotonic + wall-clock timestamps) before the classifier ever sees it —
   adding Codex later is a new adapter module, not a rewrite of the decision
-  logic in `belay/hooks/gate.py`.
+  logic in `belay/hooks/gate.py`. `trust_tier` honestly reports `UNKNOWN`
+  until a real pinned-version conformance suite (spec §7.2) exists to back
+  a `T1` claim — this gate's own extensive local/hard-kill testing is real
+  evidence the *mechanism* works, but isn't that suite.
 
 ### Wrapping a non-Python MCP server
 
@@ -632,7 +667,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed), `belay hooks install`, deterministic Bash risk classifier, routed through the same `ApprovalQueue` as the MCP path | §7 (extended), ARCH-001–008 (adoption/DX) | **first slice** — Claude Code/Bash only |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery | §7 (extended), ARCH-001–008 (adoption/DX) | **first slice** — Claude Code/Bash only |
 
 ## Conformance
 
