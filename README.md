@@ -21,7 +21,7 @@ previewable, gated, and — when it goes wrong — reversible."
 > [`docs/architecture.md`](docs/architecture.md). Nine further entregas
 > (E10-E18, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code/Bash
-> only, said plainly in its own section below). 585 tests,
+> only, said plainly in its own section below). 596 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
@@ -506,6 +506,19 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   until a real pinned-version conformance suite (spec §7.2) exists to back
   a `T1` claim — this gate's own extensive local/hard-kill testing is real
   evidence the *mechanism* works, but isn't that suite.
+- **`PostToolUse` records real evidence, into the same evidence system as
+  the MCP path** (E18.2) — once the Bash tool actually runs, the supervisor
+  appends the result (exit code, a computed duration correlated against the
+  matching `PreToolUse` call, an output digest, truncation flag) to a
+  durable, hash-chained `LedgerStore` — the exact same store/format `belay
+  run`'s MCP path already uses, so `belay verify <the hook db>` works with
+  zero changes. There's no allow/deny decision to make at this point (the
+  action already happened), so the response is an empty ack. The precise
+  sub-field names Claude Code uses inside its result payload
+  (`tool_response`/`tool_result`, `exit_code`/`exitCode`, …) couldn't be
+  pinned down with full confidence from available docs — extraction tries
+  several plausible names defensively and never fabricates a value for a
+  field it didn't actually find, said plainly rather than assumed correct.
 
 ### Wrapping a non-Python MCP server
 
@@ -667,7 +680,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery | §7 (extended), ARCH-001–008 (adoption/DX) | **first slice** — Claude Code/Bash only |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format | §7 (extended), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code/Bash only |
 
 ## Conformance
 

@@ -103,6 +103,44 @@ def test_hook_event_for_known_host_round_trips(
     assert response.payload["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+def test_posttooluse_event_records_evidence_and_acks_empty(
+    running_supervisor: tuple[SupervisorIdentity, str],
+) -> None:
+    identity, db_path = running_supervisor
+
+    pre_event = {
+        "_host": "claude-code",
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_post_ipc",
+    }
+    pre_response = _send(identity, SupervisorRequest(kind="hook_event", event=pre_event))
+    assert pre_response.ok
+
+    post_event = {
+        "_host": "claude-code",
+        "session_id": "s1",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_post_ipc",
+        "tool_response": {"exit_code": 0, "stdout": "clean"},
+    }
+    post_response = _send(identity, SupervisorRequest(kind="hook_event", event=post_event))
+    assert post_response.ok
+    assert post_response.payload == {}  # no decision left to make -- empty ack
+
+    from belay.ledger.store import LedgerStore
+
+    ledger = LedgerStore(db_url=f"sqlite:///{db_path}")
+    events = ledger.read("hook-claude-code-s1")
+    assert [e.type for e in events] == ["hook_pre_tool_use", "hook_post_tool_use"]
+    assert events[1].payload["exit_code"] == 0
+    assert events[1].payload["duration_ms"] is not None
+
+
 def test_hook_event_for_unknown_host_is_denied(
     running_supervisor: tuple[SupervisorIdentity, str],
 ) -> None:

@@ -11,6 +11,7 @@ carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `permission_mode`,
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from typing import Any
 
@@ -97,6 +98,68 @@ def _repo_identity(cwd: str | None) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+#: Field name Claude Code actually uses for a PostToolUse result object.
+#: NOT independently verified against a real Claude Code invocation --
+#: two different fetches of the same docs (and third-party writeups) gave
+#: conflicting names, `tool_response` vs `tool_result`, for what should be
+#: the same field. Both are tried, in this order, rather than committing to
+#: one and silently recording nothing if the real payload uses the other.
+#: Flagged plainly rather than assumed correct: verify against a real
+#: PostToolUse invocation before trusting the *sub*-field names below
+#: (exit_code/stdout/stderr) for anything beyond "we recorded whatever
+#: shape actually arrived."
+_RESULT_FIELD_CANDIDATES = ("tool_response", "tool_result")
+_EXIT_CODE_KEYS = ("exit_code", "exitCode", "returncode")
+_STDOUT_KEYS = ("stdout",)
+_STDERR_KEYS = ("stderr",)
+
+
+def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in d:
+            return d[key]
+    return None
+
+
+def _extract_post_result(
+    raw: dict[str, Any],
+) -> tuple[str | None, int | None, str | None, bool | None]:
+    """(result_status, exit_code, output_digest, truncated) -- best-effort,
+    defensive extraction (see `_RESULT_FIELD_CANDIDATES`'s docstring for
+    why this isn't fully certain). Never raises and never fabricates a
+    value it didn't actually find: an absent/unrecognized field stays
+    `None`, not a guessed default."""
+    result_obj: Any = None
+    for field_name in _RESULT_FIELD_CANDIDATES:
+        candidate = raw.get(field_name)
+        if isinstance(candidate, dict):
+            result_obj = candidate
+            break
+    if result_obj is None:
+        return None, None, None, None
+
+    exit_code = _first_present(result_obj, _EXIT_CODE_KEYS)
+    if not isinstance(exit_code, int):
+        exit_code = None
+
+    stdout = _first_present(result_obj, _STDOUT_KEYS)
+    stderr = _first_present(result_obj, _STDERR_KEYS)
+    output_digest = None
+    if isinstance(stdout, str) or isinstance(stderr, str):
+        material = (stdout or "") + (stderr or "")
+        output_digest = "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    truncated = result_obj.get("truncated")
+    if not isinstance(truncated, bool):
+        truncated = None
+
+    result_status = None
+    if exit_code is not None:
+        result_status = "success" if exit_code == 0 else "failure"
+
+    return result_status, exit_code, output_digest, truncated
+
+
 def normalize(raw: dict[str, Any], *, installation_id: str) -> HookEvent:
     """Raises `ValueError` on an unrecognized `hook_event_name` -- an
     adapter that doesn't understand what it was just sent must never guess;
@@ -113,6 +176,10 @@ def normalize(raw: dict[str, Any], *, installation_id: str) -> HookEvent:
         tool_input = {}
     cwd = raw.get("cwd")
     monotonic_ns, wall_clock = now_fields()
+
+    result_status = exit_code = output_digest = truncated = None
+    if phase == "post":
+        result_status, exit_code, output_digest, truncated = _extract_post_result(raw)
 
     return HookEvent(
         schema_version=SCHEMA_VERSION,
@@ -133,10 +200,22 @@ def normalize(raw: dict[str, Any], *, installation_id: str) -> HookEvent:
         os_user=local_os_user(),
         monotonic_ns=monotonic_ns,
         wall_clock=wall_clock,
+        result_status=result_status,
+        exit_code=exit_code,
+        output_digest=output_digest,
+        truncated=truncated,
     )
 
 
-def render_response(decision: GateDecision) -> dict[str, Any]:
+def render_response(decision: GateDecision | None) -> dict[str, Any]:
+    """`decision is None` for PostToolUse: the tool already ran, so there is
+    no allow/deny decision to render -- an empty object (exit 0, no
+    specific fields) means "no opinion", which is exactly right: this call
+    only records evidence, it was never going to change what already
+    happened (spec/Claude Code docs: PostToolUse "cannot block the action
+    -- it already happened")."""
+    if decision is None:
+        return {}
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

@@ -36,7 +36,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from belay.approvals.queue import ApprovalQueue
 from belay.hooks.decision import DECISION_LOGIC_VERSION, Verdict, classify_bash
@@ -214,3 +214,51 @@ def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
         "same command",
         approval_id=item.approval_id,
     )
+
+
+def ledger_session_id(event: HookEvent) -> str:
+    """Groups every hook event for one host session into its own ledger
+    session -- distinct from any `belay run` MCP session_id namespace (the
+    `hook-<host>-` prefix), so the two can never collide even if a host
+    happened to mint a session_id shaped like an MCP one."""
+    return f"hook-{event.host}-{event.host_session_id}"
+
+
+def pre_event_evidence(event: HookEvent, decision: GateDecision) -> dict[str, Any]:
+    """Pure -- what belongs in the durable ledger for a PreToolUse decision
+    (spec §12.1: policy/contract/pack/adapter versions, repository state,
+    the actual verdict). The caller (the supervisor) owns writing this to
+    `LedgerStore`; this function only shapes the payload."""
+    return {
+        "event_id": event.event_id,
+        "host": event.host,
+        "adapter_version": event.adapter_version,
+        "decision_logic_version": DECISION_LOGIC_VERSION,
+        "tool_name": event.tool_name,
+        "surface": event.surface,
+        "args": event.args,
+        "cwd": event.cwd,
+        "repo_identity": event.repo_identity,
+        "verdict": decision.verdict,
+        "reason": decision.reason,
+        "approval_id": decision.approval_id,
+    }
+
+
+def post_event_evidence(event: HookEvent, *, duration_ms: float | None) -> dict[str, Any]:
+    """Pure -- what belongs in the durable ledger for a PostToolUse result
+    (spec §7.1: "result status, exit code, duration, output digest, and
+    truncation flag for post events"). `duration_ms` is passed in rather
+    than read from `event` because it can only be computed by whoever holds
+    both this event's and its PreToolUse counterpart's monotonic timestamps
+    -- a single stateless `normalize()` call never sees both."""
+    return {
+        "event_id": event.event_id,
+        "host": event.host,
+        "tool_name": event.tool_name,
+        "result_status": event.result_status,
+        "exit_code": event.exit_code,
+        "duration_ms": duration_ms,
+        "output_digest": event.output_digest,
+        "truncated": event.truncated,
+    }

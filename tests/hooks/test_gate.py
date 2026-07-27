@@ -21,7 +21,13 @@ import pytest
 from belay.approvals.queue import ApprovalQueue
 from belay.clock import FixedClock
 from belay.hooks.claude_code_adapter import normalize
-from belay.hooks.gate import evaluate
+from belay.hooks.gate import (
+    GateDecision,
+    evaluate,
+    ledger_session_id,
+    post_event_evidence,
+    pre_event_evidence,
+)
 from belay.supervisor.protocol import HookEvent
 
 
@@ -294,3 +300,71 @@ class TestBelayHomeProtection:
         }
         result = evaluate(normalize(raw, installation_id="test-install"), queue)
         assert result.verdict == "allow"
+
+
+class TestLedgerEvidenceHelpers:
+    """gate.py's pure evidence-shaping functions (belay/supervisor/server.py
+    owns the actual LedgerStore.append() calls; these are tested in
+    isolation from any real ledger/store)."""
+
+    def test_ledger_session_id_is_prefixed_and_namespaced_by_host(self) -> None:
+        event = _event("git status", session_id="abc123")
+        assert ledger_session_id(event) == "hook-claude-code-abc123"
+
+    def test_ledger_session_id_never_collides_across_hosts_for_the_same_session_string(
+        self,
+    ) -> None:
+        a = _event("git status", session_id="shared-id")
+        # Simulate a different host reusing the same session_id string via
+        # dataclasses.replace (normalize() always sets host="claude-code"
+        # today, but the function itself must still discriminate on host).
+        import dataclasses
+
+        b = dataclasses.replace(a, host="codex")
+        assert ledger_session_id(a) != ledger_session_id(b)
+
+    def test_pre_event_evidence_captures_the_decision_and_context(
+        self, queue: ApprovalQueue
+    ) -> None:
+        event = _event("git status")
+        decision = GateDecision("allow", "belay: matches safe-read allowlist entry: git status")
+        evidence = pre_event_evidence(event, decision)
+        assert evidence["verdict"] == "allow"
+        assert evidence["reason"] == decision.reason
+        assert evidence["tool_name"] == "Bash"
+        assert evidence["cwd"] == event.cwd
+        assert evidence["event_id"] == event.event_id
+
+    def test_pre_event_evidence_includes_approval_id_when_present(self) -> None:
+        event = _event("rm -rf /tmp/x")
+        decision = GateDecision("deny", "belay: paused", approval_id="ap_123")
+        evidence = pre_event_evidence(event, decision)
+        assert evidence["approval_id"] == "ap_123"
+
+    def test_post_event_evidence_captures_result_and_duration(self) -> None:
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_post",
+            "tool_response": {"exit_code": 0, "stdout": "clean"},
+        }
+        event = normalize(raw, installation_id="i")
+        evidence = post_event_evidence(event, duration_ms=42.5)
+        assert evidence["exit_code"] == 0
+        assert evidence["result_status"] == "success"
+        assert evidence["duration_ms"] == 42.5
+        assert evidence["output_digest"] == event.output_digest
+
+    def test_post_event_evidence_duration_none_when_no_matching_pre_seen(self) -> None:
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_post",
+        }
+        event = normalize(raw, installation_id="i")
+        evidence = post_event_evidence(event, duration_ms=None)
+        assert evidence["duration_ms"] is None

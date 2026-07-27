@@ -50,15 +50,18 @@ def _settings_path(tmp_path: Path) -> Path:
     return tmp_path / ".claude" / "settings.json"
 
 
-def test_install_creates_settings_with_pretooluse_hook(tmp_path: Path) -> None:
+def test_install_creates_settings_with_pretooluse_and_posttooluse_hooks(tmp_path: Path) -> None:
     result = runner.invoke(app, ["hooks", "install", "--yes"])
     assert result.exit_code == 0, result.output
     target = _settings_path(tmp_path)
     assert target.is_file()
     doc = json.loads(target.read_text(encoding="utf-8"))
-    entry = doc["hooks"]["PreToolUse"][0]
-    assert entry["matcher"] == "Bash"
-    assert "belay.cli.main hooks run" in entry["hooks"][0]["command"]
+    for hook_event in ("PreToolUse", "PostToolUse"):
+        entry = doc["hooks"][hook_event][0]
+        assert entry["matcher"] == "Bash"
+        command = entry["hooks"][0]["command"]
+        assert "belay.cli.main hooks run" in command
+        assert f"hooks run {hook_event}" in command
 
 
 def test_install_install_uninstall_restores_original_exact(tmp_path: Path) -> None:
@@ -162,6 +165,107 @@ def test_hooks_run_pretooluse_denies_and_queues_unsafe_command(tmp_path: Path) -
     list_result = runner.invoke(app, ["approvals", "list", "--db", str(data_path)])
     assert "pending" in list_result.output
     assert "rm -rf /tmp/x" not in list_result.output  # plan dict isn't dumped raw, just tool/id
+
+
+def test_hooks_run_posttooluse_records_evidence_and_acks_empty(tmp_path: Path) -> None:
+    pre_payload = json.dumps(
+        {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_post_e2e",
+        }
+    )
+    pre_result = runner.invoke(
+        app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=pre_payload
+    )
+    assert pre_result.exit_code == 0, pre_result.output
+
+    post_payload = json.dumps(
+        {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_post_e2e",
+            "tool_response": {"exit_code": 0, "stdout": "clean", "stderr": ""},
+        }
+    )
+    post_result = runner.invoke(
+        app, ["hooks", "run", "PostToolUse", "--db", "test.db"], input=post_payload
+    )
+    assert post_result.exit_code == 0, post_result.output
+    # PostToolUse never has a permission decision to make -- an empty ack.
+    assert json.loads(post_result.stdout) == {}
+
+    from belay.ledger.store import LedgerStore
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity((tmp_path / "test.db").resolve()).data_path
+    ledger = LedgerStore(db_url=f"sqlite:///{data_path}")
+    events = ledger.read("hook-claude-code-s1")
+    types = [e.type for e in events]
+    assert types == ["hook_pre_tool_use", "hook_post_tool_use"]
+
+    pre_event, post_event = events
+    assert pre_event.payload["verdict"] == "allow"
+    assert post_event.payload["exit_code"] == 0
+    assert post_event.payload["result_status"] == "success"
+    assert post_event.payload["duration_ms"] is not None  # correlated with the pre event
+    assert post_event.payload["duration_ms"] >= 0
+
+
+def test_hooks_run_posttooluse_without_matching_pretooluse_records_null_duration(
+    tmp_path: Path,
+) -> None:
+    post_payload = json.dumps(
+        {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_orphan_post",
+            "tool_response": {"exit_code": 0},
+        }
+    )
+    result = runner.invoke(
+        app, ["hooks", "run", "PostToolUse", "--db", "test.db"], input=post_payload
+    )
+    assert result.exit_code == 0, result.output
+
+    from belay.ledger.store import LedgerStore
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity((tmp_path / "test.db").resolve()).data_path
+    ledger = LedgerStore(db_url=f"sqlite:///{data_path}")
+    events = ledger.read("hook-claude-code-s1")
+    assert len(events) == 1
+    assert events[0].payload["duration_ms"] is None
+
+
+def test_hooks_run_posttooluse_retry_does_not_duplicate_ledger_entry(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_retry_post",
+            "tool_response": {"exit_code": 0},
+        }
+    )
+    first = runner.invoke(app, ["hooks", "run", "PostToolUse", "--db", "test.db"], input=payload)
+    second = runner.invoke(app, ["hooks", "run", "PostToolUse", "--db", "test.db"], input=payload)
+    assert first.exit_code == 0 and second.exit_code == 0
+
+    from belay.ledger.store import LedgerStore
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity((tmp_path / "test.db").resolve()).data_path
+    ledger = LedgerStore(db_url=f"sqlite:///{data_path}")
+    events = ledger.read("hook-claude-code-s1")
+    assert len(events) == 1  # idempotency (ARCH-006) applies to post events too, not just pre
 
 
 def test_hooks_run_unhandled_event_exits_zero_with_no_output() -> None:

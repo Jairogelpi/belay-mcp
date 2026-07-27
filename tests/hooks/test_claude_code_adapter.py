@@ -110,3 +110,79 @@ def test_trust_tier_is_honestly_unknown_not_a_hardcoded_t1() -> None:
     }
     event = normalize(raw, installation_id="install1")
     assert event.trust_tier == "UNKNOWN"
+
+
+class TestPostToolUseResultExtraction:
+    """The field name Claude Code actually uses for a PostToolUse result
+    (`tool_response` vs `tool_result`) could not be pinned down with full
+    confidence from available docs (two fetches gave different answers) --
+    these tests lock in the DEFENSIVE behavior actually implemented (try
+    both, never fabricate a value for a field that isn't there), not a
+    single assumed-correct schema."""
+
+    def _post_raw(self, **result_field: object) -> dict[str, object]:
+        return {
+            "session_id": "s1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_post_1",
+            **result_field,
+        }
+
+    def test_tool_response_field_name_is_recognized(self) -> None:
+        raw = self._post_raw(tool_response={"exit_code": 0, "stdout": "ok", "stderr": ""})
+        event = normalize(raw, installation_id="i")
+        assert event.exit_code == 0
+        assert event.result_status == "success"
+        assert event.output_digest is not None
+
+    def test_tool_result_field_name_is_also_recognized(self) -> None:
+        raw = self._post_raw(tool_result={"exit_code": 1, "stdout": "", "stderr": "boom"})
+        event = normalize(raw, installation_id="i")
+        assert event.exit_code == 1
+        assert event.result_status == "failure"
+
+    def test_camelcase_exit_code_key_is_recognized(self) -> None:
+        raw = self._post_raw(tool_response={"exitCode": 0})
+        event = normalize(raw, installation_id="i")
+        assert event.exit_code == 0
+
+    def test_missing_result_field_entirely_leaves_everything_none_not_guessed(self) -> None:
+        raw = self._post_raw()
+        event = normalize(raw, installation_id="i")
+        assert event.exit_code is None
+        assert event.result_status is None
+        assert event.output_digest is None
+        assert event.truncated is None
+
+    def test_non_dict_result_field_is_ignored_not_crashed_on(self) -> None:
+        raw = self._post_raw(tool_response="not-a-dict")
+        event = normalize(raw, installation_id="i")
+        assert event.exit_code is None
+
+    def test_truncated_flag_is_extracted_when_present(self) -> None:
+        raw = self._post_raw(tool_response={"exit_code": 0, "truncated": True})
+        event = normalize(raw, installation_id="i")
+        assert event.truncated is True
+
+    def test_output_digest_differs_for_different_output(self) -> None:
+        a = normalize(self._post_raw(tool_response={"stdout": "aaa"}), installation_id="i")
+        b = normalize(self._post_raw(tool_response={"stdout": "bbb"}), installation_id="i")
+        assert a.output_digest != b.output_digest
+
+    def test_pre_phase_never_populates_result_fields_even_if_present(self) -> None:
+        """A PreToolUse payload has no result to extract from -- and even if
+        some future/odd payload happened to carry a `tool_response`-shaped
+        key on a PreToolUse event, it must not be misread as a result."""
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_1",
+            "tool_response": {"exit_code": 0},
+        }
+        event = normalize(raw, installation_id="i")
+        assert event.exit_code is None
+        assert event.result_status is None

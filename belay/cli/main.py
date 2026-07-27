@@ -691,9 +691,12 @@ def _claude_settings_path(scope: str = "project") -> Path:
     return Path(".claude/settings.json").resolve()
 
 
-def _hooks_command_for(db: str) -> str:
+_HOOKS_EVENTS = ("PreToolUse", "PostToolUse")
+
+
+def _hooks_command_for(db: str, event: str) -> str:
     db_path = Path(db).resolve()
-    return f'"{sys.executable}" -m belay.cli.main hooks run PreToolUse --db "{db_path}"'
+    return f'"{sys.executable}" -m belay.cli.main hooks run {event} --db "{db_path}"'
 
 
 @hooks_app.command("run")
@@ -706,13 +709,17 @@ def hooks_run(
 ) -> None:
     """Hook entrypoint: reads the calling agent's JSON payload from stdin, sends it to
     this install's local supervisor (spawning it on demand if it isn't already running --
-    spec ARCH-001/008), prints the decision JSON to stdout, exits 0. Not for direct human
+    spec ARCH-001/008), prints the response JSON to stdout, exits 0. Not for direct human
     use -- this is what `belay hooks install` points the agent's own hook config at.
 
-    Malformed stdin, or an event this first slice doesn't handle yet (anything but
-    PreToolUse), exits 0 with no output -- normal flow applies, same as a hook that
-    declined to make a decision. If the supervisor can't be reached at all, the
-    connection itself fails closed (deny) rather than this command crashing or hanging.
+    PreToolUse gets a real decision (allow/deny). PostToolUse only records
+    evidence (result, duration, output digest) to the durable ledger -- the
+    tool already ran by then, there's no decision left to make, so the
+    response is an empty ack. Malformed stdin, or an event this slice
+    doesn't handle yet (anything but those two), exits 0 with no output --
+    normal flow applies. If the supervisor can't be reached at all, the
+    connection itself fails closed (deny) rather than this command crashing
+    or hanging.
     """
     import json
 
@@ -721,7 +728,7 @@ def hooks_run(
     except json.JSONDecodeError:
         return
 
-    if event != "PreToolUse":
+    if event not in _HOOKS_EVENTS:
         return
 
     from belay.supervisor.addressing import supervisor_identity
@@ -809,7 +816,7 @@ def hooks_install(
         False, "--yes", "-y", help="Skip the confirmation prompt (for CI/scripts)."
     ),
 ) -> None:
-    """Register belay's PreToolUse hook in an agent's own hook config.
+    """Register belay's PreToolUse and PostToolUse hooks in an agent's own hook config.
 
     Same safety guarantees as `belay init`: atomic write with backup, a
     `.belay-manifest.json` recording before/after hashes for `belay hooks
@@ -836,14 +843,17 @@ def hooks_install(
 
     target = _claude_settings_path(scope)
     before_text = target.read_text(encoding="utf-8") if target.is_file() else None
-    command = _hooks_command_for(db)
     try:
-        new_text = render_claude_hooks_settings(before_text or "", command)
+        new_text = before_text or ""
+        for hook_event in _HOOKS_EVENTS:
+            new_text = render_claude_hooks_settings(
+                new_text, _hooks_command_for(db, hook_event), event=hook_event
+            )
     except ValueError as exc:
         typer.echo(f"error rendering {target}: {exc} -- nothing was written", err=True)
         raise typer.Exit(code=1) from None
 
-    typer.echo(f"this will register belay's PreToolUse hook in {target}")
+    typer.echo(f"this will register belay's {'/'.join(_HOOKS_EVENTS)} hooks in {target}")
     if dry_run:
         typer.echo("--dry-run: nothing written")
         return
@@ -859,7 +869,7 @@ def hooks_install(
         raise typer.Exit(code=1)
 
     _write_client_config("claude-code-hooks", target, "belay-hooks", new_text, before_text)
-    typer.echo(f"installed PreToolUse hook in {target}")
+    typer.echo(f"installed {'/'.join(_HOOKS_EVENTS)} hooks in {target}")
 
     from belay.supervisor.addressing import supervisor_identity
 
@@ -928,11 +938,12 @@ def hooks_uninstall(
         assert manifest.backup_path is not None
         atomic_restore(target, Path(manifest.backup_path))
     else:
-        existing = target.read_text(encoding="utf-8")
-        new_text = remove_claude_hooks_entry(existing)
+        new_text = target.read_text(encoding="utf-8")
+        for hook_event in _HOOKS_EVENTS:
+            new_text = remove_claude_hooks_entry(new_text, event=hook_event)
         atomic_write_with_backup(target, new_text)
     manifest_path(target).unlink(missing_ok=True)
-    typer.echo(f"removed belay's hook from {target}")
+    typer.echo(f"removed belay's hooks from {target}")
 
 
 @hooks_app.command("doctor")
@@ -961,13 +972,17 @@ def hooks_doctor(
             continue
         current_text = target.read_text(encoding="utf-8")
         try:
-            present = claude_hooks_entry_present(current_text)
+            present = {
+                hook_event: claude_hooks_entry_present(current_text, event=hook_event)
+                for hook_event in _HOOKS_EVENTS
+            }
         except (ValueError, LookupError):
-            present = False
-        if not present:
+            present = dict.fromkeys(_HOOKS_EVENTS, False)
+        missing = [hook_event for hook_event, ok in present.items() if not ok]
+        if missing:
             typer.echo(
-                f"{c}: BROKEN -- manifest says a hook should be registered at {target}, "
-                "but it's not there"
+                f"{c}: BROKEN -- manifest says {'/'.join(missing)} should be registered at "
+                f"{target}, but {'it isn' if len(missing) == 1 else 'they aren'}'t there"
             )
             continue
         current_hash = sha256_of(current_text)
@@ -976,7 +991,10 @@ def hooks_doctor(
         else:
             status = "MODIFIED since install"
         backup_note = "backup available" if manifest.backup_path else "no backup (file was new)"
-        typer.echo(f"{c}: hook registered at {target} -- {status}, {backup_note}")
+        typer.echo(
+            f"{c}: {'/'.join(_HOOKS_EVENTS)} hooks registered at {target} -- {status}, "
+            f"{backup_note}"
+        )
 
 
 @app.command()

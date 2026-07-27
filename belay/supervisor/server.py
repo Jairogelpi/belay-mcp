@@ -41,6 +41,7 @@ from sqlalchemy import create_engine
 from belay.approvals.queue import ApprovalQueue
 from belay.hooks import claude_code_adapter, gate
 from belay.hooks.gate import GateDecision
+from belay.ledger.store import LedgerStore
 from belay.supervisor.addressing import SupervisorIdentity
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.idempotency import IdempotencyStore, content_digest, event_key
@@ -50,11 +51,14 @@ from belay.supervisor.wire import WireError, recv_json, send_json
 logger = logging.getLogger("belay.supervisor")
 
 NormalizeFn = Callable[..., HookEvent]
-RenderFn = Callable[[GateDecision], dict[str, Any]]
+#: `None` for PostToolUse -- there's no allow/deny decision to render, only
+#: an acknowledgement that the result was recorded.
+RenderFn = Callable[[GateDecision | None], dict[str, Any]]
 
 #: One entry per supported host: (normalize raw payload -> HookEvent, render
-#: GateDecision -> that host's expected response JSON). Adding a host means
-#: adding one entry here -- the gate's own decision logic never changes.
+#: GateDecision (or None, for a post-result ack) -> that host's expected
+#: response JSON). Adding a host means adding one entry here -- the gate's
+#: own decision logic never changes.
 _ADAPTERS: dict[str, tuple[NormalizeFn, RenderFn]] = {
     "claude-code": (claude_code_adapter.normalize, claude_code_adapter.render_response),
 }
@@ -111,6 +115,51 @@ class Supervisor:
         engine = create_engine(f"sqlite:///{identity.data_path}", future=True)
         self._queue = ApprovalQueue(engine=engine)
         self._idempotency = IdempotencyStore(engine)
+        self._ledger = LedgerStore(engine=engine)
+        #: PreToolUse's monotonic timestamp, keyed by event_id, so the
+        #: matching PostToolUse call (a SEPARATE `belay hooks run`
+        #: invocation -- there's no other shared state between them) can
+        #: compute a real duration. In-memory only, deliberately: losing an
+        #: entry across a supervisor restart just means that one event's
+        #: `duration_ms` comes back `None` -- an honest gap, not a
+        #: correctness problem the way losing idempotency state would be
+        #: (see `belay/supervisor/idempotency.py`).
+        self._pre_times: dict[str, int] = {}
+        self._pre_times_lock = threading.Lock()
+
+    def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:
+        if event.phase == "pre":
+            decision = gate.evaluate(event, self._queue)
+            self._ledger.append(
+                gate.ledger_session_id(event),
+                "hook_pre_tool_use",
+                gate.pre_event_evidence(event, decision),
+            )
+            if event.event_id:
+                with self._pre_times_lock:
+                    self._pre_times[event.event_id] = event.monotonic_ns
+            return render(decision)
+
+        if event.phase == "post":
+            duration_ms = None
+            if event.event_id:
+                with self._pre_times_lock:
+                    pre_ns = self._pre_times.pop(event.event_id, None)
+                if pre_ns is not None:
+                    duration_ms = (event.monotonic_ns - pre_ns) / 1_000_000
+            self._ledger.append(
+                gate.ledger_session_id(event),
+                "hook_post_tool_use",
+                gate.post_event_evidence(event, duration_ms=duration_ms),
+            )
+            return render(None)
+
+        # Not reachable while Phase is exactly "pre" | "post" (protocol.py),
+        # but never guess/crash on a phase this supervisor doesn't know
+        # about yet -- deny explicitly, matching gate.evaluate()'s own
+        # default for anything other than "pre".
+        reason = f"belay: {event.phase}-phase events are not yet handled"
+        return render(GateDecision("deny", reason))
 
     def handle_hook_event(self, host: str, raw_payload: dict[str, Any]) -> dict[str, Any]:
         adapter = _ADAPTERS.get(host)
@@ -133,7 +182,7 @@ class Supervisor:
             # No durable key can be formed without one -- gate.evaluate()
             # denies this itself (ambiguous identity, spec §7.1), every
             # time, so there's nothing useful to cache anyway.
-            return render(gate.evaluate(event, self._queue))
+            return self._decide(event, render)
 
         key = event_key(event.installation_id, event.host, event.host_session_id,
                          event.event_id, event.phase)
@@ -145,8 +194,7 @@ class Supervisor:
                 return _collision_response(event.phase)
             return cached.response
 
-        decision = gate.evaluate(event, self._queue)
-        response = render(decision)
+        response = self._decide(event, render)
         winner = self._idempotency.record_if_absent(key, digest, response)
         if winner.request_digest != digest:
             # Lost a race against a DIFFERENT-content event with the same
