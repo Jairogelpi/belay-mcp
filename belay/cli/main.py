@@ -254,45 +254,9 @@ def _client_config_path(client: str) -> Path:
     return Path(_CLIENT_CONFIG_PATHS[client]).resolve()
 
 
-@app.command()
-def init(
-    client: str = typer.Option(
-        ...,
-        "--client",
-        help="MCP client to register Belay with: claude-desktop, claude-code, or cursor.",
-    ),
-    config: str = typer.Option(
-        "belay.wrap.json",
-        "--config",
-        "-c",
-        help="Wrap config path written by `belay wrap` (must already exist).",
-    ),
-    name: str = typer.Option(
-        "belay", "--name", help="MCP server name the client will list Belay under."
-    ),
-) -> None:
-    """Register Belay as an MCP server in a client's config (one command, no manual JSON).
-
-    Merges into the client's existing `mcpServers` block -- other servers the
-    agent already talks to are left untouched, so the agent sees Belay
-    alongside its other tools rather than in place of them.
-    """
+def _register_client(client: str, wrap_path: Path, name: str) -> Path:
+    """Merge a `belay` entry into one client's MCP config. Returns the config path touched."""
     import json
-
-    if client not in _CLIENT_CONFIG_PATHS:
-        typer.echo(
-            f"error: unknown --client {client!r} (expected one of: "
-            f"{', '.join(_CLIENT_CONFIG_PATHS)})",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    wrap_path = Path(config).resolve()
-    if not wrap_path.is_file():
-        typer.echo(
-            f"error: {wrap_path} not found -- run `belay wrap` first to create it", err=True
-        )
-        raise typer.Exit(code=1)
 
     target = _client_config_path(client)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -305,16 +269,66 @@ def init(
 
     servers = doc.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        typer.echo(f"error: {target} has a non-object 'mcpServers' -- fix it by hand", err=True)
-        raise typer.Exit(code=1)
+        raise BelayError("client_config_invalid", {"path": str(target)})
     servers[name] = {
         "command": sys.executable,
         "args": ["-m", "belay.cli.main", "run", "--config", str(wrap_path)],
     }
-
     target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    typer.echo(f"registered '{name}' in {target}")
-    typer.echo("restart the client for the change to take effect")
+    return target
+
+
+@app.command()
+def init(
+    client: str = typer.Option(
+        ...,
+        "--client",
+        help="MCP client(s) to register Belay with, comma-separated: claude-desktop, "
+        "claude-code, cursor, or 'all'.",
+    ),
+    config: str = typer.Option(
+        "belay.wrap.json",
+        "--config",
+        "-c",
+        help="Wrap config path written by `belay wrap` (must already exist).",
+    ),
+    name: str = typer.Option(
+        "belay", "--name", help="MCP server name the client will list Belay under."
+    ),
+) -> None:
+    """Register Belay as an MCP server in one or more clients' configs (no manual JSON).
+
+    Merges into each client's existing `mcpServers` block -- other servers
+    the agent already talks to are left untouched, so the agent sees Belay
+    alongside its other tools rather than in place of them.
+    """
+    clients = (
+        list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    )
+    for c in clients:
+        if c not in _CLIENT_CONFIG_PATHS:
+            typer.echo(
+                f"error: unknown --client {c!r} (expected one of: "
+                f"{', '.join(_CLIENT_CONFIG_PATHS)}, or 'all')",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+    wrap_path = Path(config).resolve()
+    if not wrap_path.is_file():
+        typer.echo(
+            f"error: {wrap_path} not found -- run `belay wrap` first to create it", err=True
+        )
+        raise typer.Exit(code=1)
+
+    for c in clients:
+        try:
+            target = _register_client(c, wrap_path, name)
+        except BelayError:
+            typer.echo("error: client config has a non-object 'mcpServers' -- fix by hand", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(f"registered '{name}' in {target}")
+    typer.echo("restart the client(s) for the change to take effect")
 
 
 @app.command()
@@ -589,6 +603,126 @@ def replay(
                 typer.echo("    -> committed")
 
     anyio.run(_main)
+
+
+@app.command()
+def bootstrap(
+    server_dir: str = typer.Argument(
+        ..., help="Directory of the upstream MCP server, unless --command overrides it."
+    ),
+    command: str = typer.Option(
+        "", "--command", help="Executable to launch the upstream server (e.g. 'npx')."
+    ),
+    arg: list[str] = typer.Option(  # noqa: B008
+        [], "--arg", help="Argument to pass to --command (repeatable, in order)."
+    ),
+    contracts: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--contracts",
+        help="Existing contract document(s) (repeatable). Omit to auto-draft one with "
+        "`belay draft-contracts` (provenance.verified: false -- review it after).",
+    ),
+    client: str = typer.Option(
+        "all",
+        "--client",
+        help="MCP client(s) to register with, comma-separated, or 'all' (default).",
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    name: str = typer.Option("belay", "--name", help="MCP server name clients will list it under."),
+    skip_agent_instructions: bool = typer.Option(
+        False,
+        "--skip-agent-instructions",
+        help="Don't touch AGENTS.md/CLAUDE.md in the current directory.",
+    ),
+) -> None:
+    """One-command setup: wrap, (optionally draft contracts,) register clients, brief the agent.
+
+    Runs `belay draft-contracts` (if `--contracts` wasn't given), `belay
+    wrap`, `belay init --client <...>`, and upserts a standing-instruction
+    block into `./AGENTS.md` and `./CLAUDE.md` (created if missing) telling
+    any agent reading them to use Belay's MCP tools by default -- so a human
+    doesn't have to say "use belay" every session for it to happen.
+    """
+    import anyio
+
+    from belay.cli.agent_instructions import upsert
+    from belay.contracts.loader import load_contract_set
+    from belay.proxy.config import UpstreamCommand, WrapConfig
+    from belay.proxy.upstream import connect_stdio
+
+    if command:
+        upstream = UpstreamCommand(command=command, args=list(arg))
+    else:
+        server_path = Path(server_dir).resolve()
+        entry = server_path / "server.py"
+        if not entry.is_file():
+            typer.echo(
+                f"error: {entry} not found (expected an MCP server entry point, "
+                "or pass --command for a non-Python server)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        upstream = UpstreamCommand(command=sys.executable, args=[str(entry)])
+
+    contract_paths = list(contracts)
+    if not contract_paths:
+        from belay.contracts.draft import draft_contracts as draft_fn
+
+        draft_out = Path("contracts_draft.yaml").resolve()
+
+        async def _draft() -> None:
+            import os as os_mod
+
+            import yaml
+
+            async with connect_stdio(
+                upstream.command, upstream.args, env=dict(os_mod.environ)
+            ) as upstream_client:
+                tools = await upstream_client.list_tools()
+                results = draft_fn(tools)
+                text = yaml.safe_dump_all(
+                    [r.document for r in results], sort_keys=False, default_flow_style=False
+                )
+                draft_out.write_text(text, encoding="utf-8")
+
+        anyio.run(_draft)
+        typer.echo(f"1. drafted contracts -> {draft_out} (provenance.verified: false, review it)")
+        contract_paths = [str(draft_out)]
+    else:
+        typer.echo(f"1. using existing contracts: {', '.join(contract_paths)}")
+
+    load_contract_set(contract_paths)  # fail fast on bad contracts
+
+    wrap_out = Path("belay.wrap.json").resolve()
+    wrap_config = WrapConfig(
+        upstream=upstream,
+        contracts=[str(Path(c).resolve()) for c in contract_paths],
+        db=db,
+        initiated_by="unknown",
+    )
+    wrap_config.save(str(wrap_out))
+    typer.echo(f"2. wrapped -> {wrap_out}")
+
+    clients = list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    for c in clients:
+        if c not in _CLIENT_CONFIG_PATHS:
+            typer.echo(f"   skipping unknown client {c!r}", err=True)
+            continue
+        try:
+            target = _register_client(c, wrap_out, name)
+        except BelayError:
+            typer.echo(f"   {c}: config has a non-object 'mcpServers' -- fix by hand", err=True)
+            continue
+        typer.echo(f"3. registered with {c} -> {target}")
+
+    if not skip_agent_instructions:
+        for doc_name in ("AGENTS.md", "CLAUDE.md"):
+            doc_path = Path(doc_name)
+            existing = doc_path.read_text(encoding="utf-8") if doc_path.is_file() else ""
+            doc_path.write_text(upsert(existing, name), encoding="utf-8")
+            typer.echo(f"4. briefed agent via {doc_path.resolve()}")
+
+    typer.echo("done -- restart your MCP client(s) for the config change to take effect")
 
 
 @app.command(name="draft-contracts")

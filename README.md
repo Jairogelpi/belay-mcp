@@ -190,6 +190,25 @@ pip install -e ".[dev]"
 pytest
 ```
 
+### One-command setup: `belay bootstrap`
+
+```bash
+belay bootstrap ./sandbox --command npx --arg -y \
+  --arg @modelcontextprotocol/server-filesystem --arg ./sandbox \
+  --client all
+```
+
+Runs `draft-contracts` (skip with `--contracts <file>` if you already have
+one), `wrap`, `init` against every known client (`--client
+claude-desktop,claude-code,cursor`, or `all`), and upserts a
+standing-instruction block into `./AGENTS.md` and `./CLAUDE.md` telling
+whatever agent reads them (Claude Code, Codex, opencode, ...) to use
+Belay's MCP tools **by default, without being told each session** — those
+files are the one thing every agent actually re-reads automatically, so
+that's where a durable instruction has to live, not a one-off chat message.
+Safe to re-run: the block is idempotent (marked, replaced in place, never
+duplicated), and other content in those files is left untouched.
+
 ### Wrapping a non-Python MCP server
 
 `belay wrap` defaults to launching `python <server_dir>/server.py`, but any
