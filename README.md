@@ -20,11 +20,11 @@ previewable, gated, and — when it goes wrong — reversible."
 > (§8), and rewind (§10), diagrammed in
 > [`docs/architecture.md`](docs/architecture.md). Seven further entregas
 > (E10-E16, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
-> "What's new since v0.1.0" below. 411 tests,
+> "What's new since v0.1.0" below. 416 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~79% repo-wide** (`fail_under = 78`, CI-enforced floor against
+> **Coverage: ~77% repo-wide** (`fail_under = 77`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -395,7 +395,27 @@ it). Every write in this section goes through an atomic temp-file +
 rename with a `.belay-backup` of anything overwritten — a crash mid-write
 never leaves a half-written config.
 
-Restart the client afterward.
+Restart the client afterward. `belay init` previews every file it would
+touch and asks one confirmation before writing anything (`--dry-run` to
+only preview, `--yes`/`-y` to skip the prompt for CI/scripts); a
+`.belay-manifest.json` alongside each config records the before/after
+content hash so `belay uninstall`/`belay doctor` never have to guess
+whether the file changed since.
+
+```bash
+belay init --client claude-code --config belay.wrap.json --dry-run
+# -> this will register 'belay' in 1 config file(s):
+#      update: .mcp.json  (claude-code)
+# -> --dry-run: nothing written
+
+belay doctor --client claude-code
+# -> claude-code: registered at .mcp.json -- unchanged since install, backup available
+
+belay uninstall --client claude-code --yes
+# -> unchanged since install -> restores the full pre-install backup
+# -> modified since install (you added another MCP server, etc.) ->
+#    surgically removes only the belay entry, leaving your other edits intact
+```
 
 ### Drafting contracts from a live server
 

@@ -26,10 +26,13 @@ read/write (atomically, with a backup -- see `atomic_write_with_backup`).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import tomlkit
@@ -66,6 +69,95 @@ def render_opencode_json(existing: str, name: str, command: list[str]) -> str:
     if not isinstance(mcp, dict):
         raise ValueError("opencode.json has a non-object 'mcp' key -- fix by hand")
     mcp[name] = {"type": "local", "command": command}
+    return json.dumps(doc, indent=2) + "\n"
+
+
+def sha256_of(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def manifest_path(target: Path) -> Path:
+    return target.with_name(target.name + ".belay-manifest.json")
+
+
+@dataclass(frozen=True)
+class Manifest:
+    client: str
+    target: str
+    name: str
+    before_hash: str | None  # None: target didn't exist before this install
+    after_hash: str
+    backup_path: str | None
+    installed_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "client": self.client,
+            "target": self.target,
+            "name": self.name,
+            "before_hash": self.before_hash,
+            "after_hash": self.after_hash,
+            "backup_path": self.backup_path,
+            "installed_at": self.installed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> Manifest:
+        return cls(
+            client=str(data["client"]),
+            target=str(data["target"]),
+            name=str(data["name"]),
+            before_hash=data.get("before_hash"),  # type: ignore[arg-type]
+            after_hash=str(data["after_hash"]),
+            backup_path=data.get("backup_path"),  # type: ignore[arg-type]
+            installed_at=str(data["installed_at"]),
+        )
+
+
+def write_manifest(client: str, target: Path, name: str, before_text: str | None, after_text: str,
+                    backup_path: Path | None) -> Path:
+    """Record what `atomic_write_with_backup` just did -- the one source `belay
+    uninstall`/`belay doctor` trust to know whether the file has changed since,
+    without guessing from content alone."""
+    manifest = Manifest(
+        client=client,
+        target=str(target),
+        name=name,
+        before_hash=sha256_of(before_text) if before_text is not None else None,
+        after_hash=sha256_of(after_text),
+        backup_path=str(backup_path) if backup_path else None,
+        installed_at=datetime.now(UTC).isoformat(),
+    )
+    path = manifest_path(target)
+    path.write_text(json.dumps(manifest.to_dict(), indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def load_manifest(target: Path) -> Manifest | None:
+    path = manifest_path(target)
+    if not path.is_file():
+        return None
+    return Manifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def remove_codex_entry(existing: str, name: str) -> str:
+    """Surgically remove `[mcp_servers.<name>]` from a config.toml body, leaving
+    everything else untouched -- used when the file changed after install (so
+    restoring the pre-install backup would discard the user's other edits)."""
+    doc = tomlkit.parse(existing)
+    servers = doc.get("mcp_servers")
+    if isinstance(servers, (tomlkit.items.Table, dict)) and name in servers:
+        del servers[name]
+    return tomlkit.dumps(doc)
+
+
+def remove_json_mcp_entry(existing: str, name: str, key: str = "mcpServers") -> str:
+    """Surgically remove one entry from a JSON `mcpServers`/`mcp` object, leaving
+    everything else (other servers, unrelated top-level keys) untouched."""
+    doc: dict[str, object] = json.loads(existing) if existing.strip() else {}
+    servers = doc.get(key)
+    if isinstance(servers, dict) and name in servers:
+        del servers[name]
     return json.dumps(doc, indent=2) + "\n"
 
 

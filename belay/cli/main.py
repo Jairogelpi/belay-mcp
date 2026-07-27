@@ -262,48 +262,55 @@ def _client_config_path(client: str, scope: str = "project") -> Path:
     return Path(_CLIENT_CONFIG_PATHS[client]).resolve()
 
 
-def _register_client(client: str, wrap_path: Path, name: str, scope: str = "project") -> Path:
-    """Merge a `belay` entry into one client's MCP config. Returns the config path touched.
-
-    Writes go through `atomic_write_with_backup` (temp file + `os.replace`,
-    plus a `.belay-backup` of anything overwritten) -- a crash mid-write
-    leaves the original file intact, never half-written.
-    """
+def _render_client_config(client: str, target: Path, wrap_path: Path, name: str) -> str:
+    """Pure: compute the new config text for `client`, without touching disk.
+    Raises `ValueError` on invalid existing content -- never partially applies."""
     import json
 
-    from belay.cli.client_configs import atomic_write_with_backup
-
-    target = _client_config_path(client, scope)
     command = sys.executable
     args = ["-m", "belay.cli.main", "run", "--config", str(wrap_path)]
 
     if client == "codex":
         from belay.cli.client_configs import render_codex_toml
 
-        existing_toml = target.read_text(encoding="utf-8") if target.is_file() else ""
-        new_text = render_codex_toml(existing_toml, name, command, args)
-        atomic_write_with_backup(target, new_text)
-        return target
+        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+        return render_codex_toml(existing, name, command, args)
 
     if client == "opencode":
         from belay.cli.client_configs import render_opencode_json
 
-        existing_json = target.read_text(encoding="utf-8") if target.is_file() else ""
-        new_text = render_opencode_json(existing_json, name, [command, *args])
-        atomic_write_with_backup(target, new_text)
-        return target
+        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+        return render_opencode_json(existing, name, [command, *args])
 
     doc: dict[str, object] = {}
     if target.is_file():
         text = target.read_text(encoding="utf-8").strip()
         if text:
             doc = json.loads(text)
-
     servers = doc.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise ValueError(f"{target}: 'mcpServers' is not an object")
     servers[name] = {"command": command, "args": args}
-    atomic_write_with_backup(target, json.dumps(doc, indent=2) + "\n")
+    return json.dumps(doc, indent=2) + "\n"
+
+
+def _register_client(client: str, wrap_path: Path, name: str, scope: str = "project") -> Path:
+    """Merge a `belay` entry into one client's MCP config. Returns the config path touched.
+
+    Writes go through `atomic_write_with_backup` (temp file + `os.replace`,
+    plus a `.belay-backup` of anything overwritten) -- a crash mid-write
+    leaves the original file intact, never half-written. Also writes a
+    `.belay-manifest.json` (before/after content hash, backup path, timestamp)
+    that `belay uninstall`/`belay doctor` use to know whether the file has
+    changed since, without guessing from content alone.
+    """
+    from belay.cli.client_configs import atomic_write_with_backup, write_manifest
+
+    target = _client_config_path(client, scope)
+    before_text = target.read_text(encoding="utf-8") if target.is_file() else None
+    new_text = _render_client_config(client, target, wrap_path, name)
+    backup_path = atomic_write_with_backup(target, new_text)
+    write_manifest(client, target, name, before_text, new_text, backup_path)
     return target
 
 
@@ -331,16 +338,34 @@ def init(
         "the project's own wrap.json) or 'user' (~/.codex/config.toml). Ignored by "
         "other clients (their scope is fixed by their own convention).",
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show which files would change and how, write nothing."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt (for CI/scripts)."
+    ),
 ) -> None:
     """Register Belay as an MCP server in one or more clients' configs (no manual JSON).
 
     Merges into each client's existing config -- other servers the agent
     already talks to are left untouched, so the agent sees Belay alongside
     its other tools rather than in place of them. Writes are atomic (temp
-    file + rename) with a `.belay-backup` of anything overwritten.
+    file + rename) with a `.belay-backup` and a `.belay-manifest.json`
+    (content hashes, for `belay uninstall`/`belay doctor`) alongside anything
+    overwritten. Shows every file that would change and asks for one
+    confirmation before touching any of them, unless `--yes`.
     """
+    import re
+
     if scope not in ("project", "user"):
         typer.echo(f"error: --scope must be 'project' or 'user', got {scope!r}", err=True)
+        raise typer.Exit(code=1)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+        typer.echo(
+            f"error: --name {name!r} must be 1-64 characters of letters, digits, "
+            "'-', or '_' (it becomes a config key/table name)",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
     clients = (
@@ -362,7 +387,32 @@ def init(
         )
         raise typer.Exit(code=1)
 
+    # Preview pass: render every client's new config text without writing anything,
+    # so the confirmation below (and --dry-run) reflect exactly what will happen --
+    # never a promise that doesn't match the real write pass right after it.
+    previews: list[tuple[str, Path, str]] = []
     for c in clients:
+        target = _client_config_path(c, scope)
+        try:
+            new_text = _render_client_config(c, target, wrap_path, name)
+        except ValueError as exc:
+            typer.echo(f"error rendering {c}: {exc} -- nothing was written", err=True)
+            raise typer.Exit(code=1) from None
+        previews.append((c, target, new_text))
+
+    typer.echo(f"this will register '{name}' in {len(previews)} config file(s):")
+    for c, target, _ in previews:
+        exists = "update" if target.is_file() else "create"
+        typer.echo(f"  {exists}: {target}  ({c})")
+
+    if dry_run:
+        typer.echo("--dry-run: nothing written")
+        return
+
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    for c, _, _ in previews:
         try:
             target = _register_client(c, wrap_path, name, scope)
         except ValueError as exc:
@@ -370,6 +420,127 @@ def init(
             raise typer.Exit(code=1) from None
         typer.echo(f"registered '{name}' in {target}")
     typer.echo("restart the client(s) for the change to take effect")
+
+
+@app.command()
+def uninstall(
+    client: str = typer.Option(
+        ...,
+        "--client",
+        help="MCP client(s) to remove Belay from, comma-separated, or 'all'.",
+    ),
+    name: str = typer.Option("belay", "--name", help="MCP server name to remove."),
+    scope: str = typer.Option("project", "--scope", help="Same meaning as `belay init --scope`."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Remove Belay's entry from one or more clients' MCP configs.
+
+    Uses the `.belay-manifest.json` written by `belay init` to decide how:
+    if the config's current content hash matches what `belay init` produced
+    (nothing else touched the file since), the original pre-install backup
+    is restored in full. If the file changed since (the user added another
+    MCP server, edited something else), restoring the backup would discard
+    that -- instead, only the `belay` entry itself is surgically removed,
+    leaving everything else exactly as it is now. Either way, nothing is
+    guessed: the manifest's hash comparison is the one source of truth.
+    """
+    from belay.cli.client_configs import (
+        atomic_write_with_backup,
+        load_manifest,
+        manifest_path,
+        remove_codex_entry,
+        remove_json_mcp_entry,
+        sha256_of,
+    )
+
+    clients = (
+        list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    )
+    plan: list[tuple[str, Path, str]] = []  # (client, target, action)
+    for c in clients:
+        if c not in _CLIENT_CONFIG_PATHS:
+            typer.echo(f"error: unknown --client {c!r}", err=True)
+            raise typer.Exit(code=1)
+        target = _client_config_path(c, scope)
+        if not target.is_file():
+            plan.append((c, target, "skip (no config file)"))
+            continue
+        manifest = load_manifest(target)
+        if manifest is None:
+            plan.append((c, target, "skip (no belay manifest -- was this installed by belay?)"))
+            continue
+        current_hash = sha256_of(target.read_text(encoding="utf-8"))
+        if current_hash == manifest.after_hash and manifest.backup_path:
+            plan.append((c, target, "restore full pre-install backup"))
+        else:
+            plan.append((c, target, "surgically remove only the belay entry"))
+
+    typer.echo(f"this will modify {len([p for p in plan if 'skip' not in p[2]])} config file(s):")
+    for c, target, action in plan:
+        typer.echo(f"  {target} ({c}): {action}")
+
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    for c, target, action in plan:
+        if action.startswith("skip"):
+            continue
+        if action.startswith("restore"):
+            manifest = load_manifest(target)
+            assert manifest is not None and manifest.backup_path is not None
+            backup = Path(manifest.backup_path)
+            target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            existing = target.read_text(encoding="utf-8")
+            if c == "codex":
+                new_text = remove_codex_entry(existing, name)
+            elif c == "opencode":
+                new_text = remove_json_mcp_entry(existing, name, key="mcp")
+            else:
+                new_text = remove_json_mcp_entry(existing, name)
+            atomic_write_with_backup(target, new_text)
+        manifest_path(target).unlink(missing_ok=True)
+        typer.echo(f"removed belay from {target}")
+
+
+@app.command()
+def doctor(
+    client: str = typer.Option(
+        "all", "--client", help="MCP client(s) to check, comma-separated, or 'all' (default)."
+    ),
+    scope: str = typer.Option("project", "--scope", help="Same meaning as `belay init --scope`."),
+) -> None:
+    """Report whether each client's config is registered, modified since, or missing.
+
+    Read-only -- never writes anything. For each client: whether Belay is
+    registered there, whether the file has changed since `belay init` ran
+    (per the recorded manifest hash), and whether a pre-install backup
+    exists to restore from.
+    """
+    from belay.cli.client_configs import load_manifest, sha256_of
+
+    clients = (
+        list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    )
+    for c in clients:
+        if c not in _CLIENT_CONFIG_PATHS:
+            typer.echo(f"{c}: unknown client", err=True)
+            continue
+        target = _client_config_path(c, scope)
+        if not target.is_file():
+            typer.echo(f"{c}: not configured ({target} does not exist)")
+            continue
+        manifest = load_manifest(target)
+        if manifest is None:
+            typer.echo(f"{c}: config exists at {target}, but no belay manifest (not belay-managed)")
+            continue
+        current_hash = sha256_of(target.read_text(encoding="utf-8"))
+        if current_hash == manifest.after_hash:
+            status = "unchanged since install"
+        else:
+            status = "MODIFIED since install"
+        backup_note = "backup available" if manifest.backup_path else "no backup (file was new)"
+        typer.echo(f"{c}: registered at {target} -- {status}, {backup_note}")
 
 
 @app.command()

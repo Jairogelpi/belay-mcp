@@ -150,3 +150,58 @@ def test_atomic_write_leaves_original_intact_on_write_failure(tmp_path, monkeypa
     assert target.read_text(encoding="utf-8") == "original\n"
     leftover_temps = list(tmp_path.glob(".config.toml.*"))
     assert leftover_temps == []
+
+
+def test_manifest_round_trips(tmp_path) -> None:
+    from belay.cli.client_configs import Manifest, load_manifest, write_manifest
+
+    target = tmp_path / "config.json"
+    target.write_text("after content", encoding="utf-8")
+    path = write_manifest("claude-code", target, "belay", "before content", "after content", None)
+    assert path.is_file()
+    loaded = load_manifest(target)
+    assert isinstance(loaded, Manifest)
+    assert loaded.client == "claude-code"
+    assert loaded.name == "belay"
+    assert loaded.backup_path is None
+
+
+def test_load_manifest_returns_none_when_absent(tmp_path) -> None:
+    from belay.cli.client_configs import load_manifest
+
+    assert load_manifest(tmp_path / "nonexistent.json") is None
+
+
+def test_remove_codex_entry_removes_only_named_table() -> None:
+    from belay.cli.client_configs import remove_codex_entry
+
+    existing = (
+        '[mcp_servers.belay]\ncommand = "python"\nargs = ["x"]\n\n'
+        '[mcp_servers.other]\ncommand = "foo"\n'
+    )
+    result = remove_codex_entry(existing, "belay")
+    parsed = tomllib.loads(result)
+    assert "belay" not in parsed.get("mcp_servers", {})
+    assert parsed["mcp_servers"]["other"]["command"] == "foo"
+
+
+def test_remove_json_mcp_entry_removes_only_named_key() -> None:
+    from belay.cli.client_configs import remove_json_mcp_entry
+
+    existing = json.dumps(
+        {"mcpServers": {"belay": {"command": "python"}, "other": {"command": "foo"}}}
+    )
+    result = remove_json_mcp_entry(existing, "belay")
+    doc = json.loads(result)
+    assert "belay" not in doc["mcpServers"]
+    assert doc["mcpServers"]["other"]["command"] == "foo"
+
+
+def test_remove_json_mcp_entry_supports_opencode_key() -> None:
+    from belay.cli.client_configs import remove_json_mcp_entry
+
+    existing = json.dumps({"mcp": {"belay": {"type": "local"}, "other": {"type": "local"}}})
+    result = remove_json_mcp_entry(existing, "belay", key="mcp")
+    doc = json.loads(result)
+    assert "belay" not in doc["mcp"]
+    assert "other" in doc["mcp"]
