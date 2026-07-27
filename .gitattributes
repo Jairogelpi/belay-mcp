@@ -1,0 +1,5 @@
+# scripts/install.sh is fetched raw (curl | sh) and run directly by /bin/sh
+# -- a CRLF line ending anywhere in it (e.g. from a Windows editor with
+# core.autocrlf misconfigured) breaks the shebang and script execution.
+# Force LF regardless of any given clone's autocrlf setting.
+*.sh text eol=lf

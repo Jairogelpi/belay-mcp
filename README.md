@@ -330,12 +330,36 @@ See [`docs/architecture.md`](docs/architecture.md) for the full diagram and
 
 ## Install
 
+`belay-mcp` isn't published to PyPI/npm yet (see "Release status" below), so
+`pip install belay-mcp` / `npx belay-mcp` don't work for anyone but the
+maintainer. The one-line installers below install the exact same package
+straight from GitHub instead — same `belay` command, no registry needed —
+the same pattern `rustup`/`deno`/`uv` use before (or alongside) a package
+manager release:
+
 ```bash
-pip install belay-mcp   # not yet published to PyPI — see "Release status" below
+# macOS / Linux / WSL
+curl -fsSL https://raw.githubusercontent.com/Jairogelpi/belay-mcp/main/scripts/install.sh | sh
 ```
 
-An npm wrapper (`npm/`) also exists for `npx belay-mcp ...` — see
-"Release status" below; it `pip install`s the matching version under the
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/Jairogelpi/belay-mcp/main/scripts/install.ps1 | iex
+```
+
+Both scripts: find a Python 3.12+ interpreter, install with `pipx` if it's
+present (an isolated venv, `belay` on `PATH` — the standard way to install a
+Python CLI tool without touching any project's own environment) or fall back
+to `pip install --user`, then print the next command to run
+(`belay bootstrap ...`, see below). Piping a downloaded script into a shell
+requires trusting the source — read
+[`scripts/install.sh`](scripts/install.sh)/[`scripts/install.ps1`](scripts/install.ps1)
+first if you'd rather not; they're short and do nothing besides `pip`/`pipx`
+install from this repo.
+
+Once published, `pip install belay-mcp` / `npx belay-mcp ...` will work
+directly — an npm wrapper (`npm/`) already exists for the latter; see
+"Release status" below. It `pip install`s the matching version under the
 hood and needs a Python 3.12+ interpreter on `PATH`.
 
 For development:
