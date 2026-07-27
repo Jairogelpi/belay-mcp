@@ -24,6 +24,8 @@ edit its own approval state by hand.
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from collections.abc import Callable
 
 # `AuthenticationError` is defined in `multiprocessing.context` and re-exported
@@ -81,7 +83,28 @@ def _collision_response(hook_event_name: str) -> dict[str, Any]:
     }
 
 
+#: Sentinel telling a worker thread to stop pulling from the connection
+#: queue and return -- distinct from `None`, which is a legitimate (if never
+#: actually produced) queue item type otherwise.
+_STOP = object()
+
+
 class Supervisor:
+    #: How many *accepting* threads and how many *handling* threads run at
+    #: once (2x this many daemon threads total). Bounds how many stalled
+    #: peers can occupy the supervisor at a time, so a handful can never
+    #: block it entirely. Confirmed empirically (see commit history) that
+    #: `multiprocessing.connection.Listener.accept()` can safely be called
+    #: concurrently from multiple threads on both a POSIX Unix socket and a
+    #: Windows named pipe -- a stuck handshake in one thread does not block
+    #: `accept()` calls running in the others.
+    MAX_WORKERS = 8
+    #: How long a connected-and-authenticated peer has to actually send a
+    #: request before this connection is given up on. Protects against a
+    #: peer that completes the (automatic, sub-second) authkey handshake
+    #: and then simply never sends anything -- a local Slowloris.
+    RECV_TIMEOUT_S = 10.0
+
     def __init__(self, identity: SupervisorIdentity) -> None:
         self._identity = identity
         identity.data_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,10 +156,28 @@ class Supervisor:
         return winner.response
 
     def serve_forever(self) -> None:
+        """Runs `MAX_WORKERS` accept threads and `MAX_WORKERS` handler
+        threads, all `daemon=True`. Deliberately hand-rolled rather than
+        `concurrent.futures.ThreadPoolExecutor`: that pool's worker threads
+        are NOT daemon threads (confirmed empirically -- there's no
+        constructor option to make them so), and closing the `Listener`
+        does not unblock a thread already parked inside `accept()`
+        (confirmed empirically too). Together those mean a stuck accept
+        call would keep a non-daemon thread alive forever, which keeps the
+        whole process alive forever, which is exactly the hang a shutdown
+        path must never have. Daemon threads sidestep that: once
+        `shutdown_event` is set, this method returns immediately and the
+        process can exit even with an accept thread still parked -- the OS
+        reclaims it along with everything else when the process actually
+        terminates.
+        """
         authkey = load_or_create_authkey(self._identity.authkey_path)
-        with Listener(self._identity.address, authkey=authkey) as listener:
-            logger.info("belay supervisor listening on %s", self._identity.address)
-            while True:
+        listener = Listener(self._identity.address, authkey=authkey, backlog=self.MAX_WORKERS * 2)
+        shutdown_event = threading.Event()
+        connections: queue.Queue[Any] = queue.Queue()
+
+        def accept_loop() -> None:
+            while not shutdown_event.is_set():
                 try:
                     conn = listener.accept()
                 except AuthenticationError:
@@ -149,34 +190,60 @@ class Supervisor:
                     logger.warning("rejected a connection with an invalid authkey")
                     continue
                 except OSError:
+                    if shutdown_event.is_set():
+                        return  # the listener was closed as part of shutdown -- expected
                     logger.exception("error accepting a connection")
                     continue
+                connections.put(conn)
 
-                try:
-                    if self._handle_connection(conn) == "shutdown":
-                        logger.info("belay supervisor shutting down on request")
-                        return
-                finally:
-                    conn.close()
+        def worker_loop() -> None:
+            while True:
+                conn = connections.get()
+                if conn is _STOP:
+                    return
+                self._handle_connection(conn, shutdown_event)
+
+        threads = [
+            threading.Thread(target=accept_loop, daemon=True, name=f"belay-accept-{i}")
+            for i in range(self.MAX_WORKERS)
+        ] + [
+            threading.Thread(target=worker_loop, daemon=True, name=f"belay-worker-{i}")
+            for i in range(self.MAX_WORKERS)
+        ]
+        for t in threads:
+            t.start()
+
+        logger.info("belay supervisor listening on %s", self._identity.address)
+        shutdown_event.wait()
+        logger.info("belay supervisor shutting down on request")
+        for _ in range(self.MAX_WORKERS):
+            connections.put(_STOP)  # let idle workers exit their loop promptly
+        listener.close()
 
     # `listener.accept()` returns `Connection | PipeConnection` (the latter
     # Windows-only, for named pipes) -- typeshed doesn't expose a common
     # base type for both that's convenient to annotate with, hence `Any`
     # rather than fighting the stdlib's own cross-platform typing gap.
-    def _handle_connection(self, conn: Any) -> str | None:
-        """Returns `"shutdown"` if this connection asked the supervisor to
-        stop (after replying, so the client isn't left waiting on a
-        connection that was simply dropped). Any I/O error on `conn` --
-        the peer disconnecting, a broken pipe mid-response, anything --
-        is swallowed here: a misbehaving or vanished client must never
-        take the supervisor down for every *other* connection."""
+    def _handle_connection(self, conn: Any, shutdown_event: threading.Event) -> None:
+        """Runs in a worker thread. Sets `shutdown_event` if this connection
+        asked the supervisor to stop (after replying, so the client isn't
+        left waiting on a connection that was simply dropped). Any I/O
+        error on `conn` -- the peer disconnecting, a broken pipe
+        mid-response, anything -- is swallowed here: a misbehaving or
+        vanished client must never take the supervisor down, or even take
+        down this one worker thread in a way that leaks it."""
         try:
-            return self._handle_request(conn)
+            if self._handle_request(conn) == "shutdown":
+                shutdown_event.set()
         except (OSError, EOFError):
             logger.warning("connection error while handling a request", exc_info=True)
-            return None
+        finally:
+            conn.close()
 
     def _handle_request(self, conn: Any) -> str | None:
+        if not conn.poll(self.RECV_TIMEOUT_S):
+            logger.info("closing a connection that sent nothing within %.0fs", self.RECV_TIMEOUT_S)
+            return None
         try:
             raw = recv_json(conn)
         except EOFError:

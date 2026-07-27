@@ -243,3 +243,84 @@ def test_shutdown_stops_serve_forever(tmp_path: Path) -> None:
     assert response.ok
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_a_connected_but_silent_client_does_not_block_other_clients(
+    running_supervisor: tuple[SupervisorIdentity, str],
+) -> None:
+    """The Slowloris fix itself: a peer that completes the (automatic)
+    authkey handshake and then never sends a request must not prevent a
+    well-behaved second client from being served promptly."""
+    identity, _ = running_supervisor
+    authkey = load_or_create_authkey(identity.authkey_path)
+
+    silent_conn = Client(identity.address, authkey=authkey)
+    # deliberately never sends anything on `silent_conn`
+
+    start = time.monotonic()
+    response = _send(identity, SupervisorRequest(kind="ping"))
+    elapsed = time.monotonic() - start
+
+    assert response.ok
+    assert elapsed < 2.0, f"a legitimate request took {elapsed:.2f}s -- blocked by the silent peer"
+    silent_conn.close()
+
+
+def test_many_concurrent_silent_clients_still_leave_the_supervisor_responsive(
+    running_supervisor: tuple[SupervisorIdentity, str],
+) -> None:
+    identity, _ = running_supervisor
+    authkey = load_or_create_authkey(identity.authkey_path)
+
+    silent_conns = [Client(identity.address, authkey=authkey) for _ in range(5)]
+    try:
+        start = time.monotonic()
+        response = _send(identity, SupervisorRequest(kind="ping"))
+        elapsed = time.monotonic() - start
+        assert response.ok
+        assert elapsed < 2.0, f"took {elapsed:.2f}s with 5 silent peers connected"
+    finally:
+        for conn in silent_conns:
+            conn.close()
+
+
+def test_idle_connection_is_closed_after_recv_timeout(tmp_path: Path) -> None:
+    """A silent connection isn't just deprioritized -- it's actually given
+    up on eventually, freeing whatever thread was handling it."""
+    project_anchor = (tmp_path / "belay-hooks.db").resolve()
+    identity = supervisor_identity(project_anchor, belay_home=tmp_path / "home")
+    supervisor = Supervisor(identity)
+    supervisor.RECV_TIMEOUT_S = 0.3  # short, just for this test
+    thread = threading.Thread(target=supervisor.serve_forever, daemon=True)
+    thread.start()
+
+    authkey = load_or_create_authkey(identity.authkey_path)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            probe = Client(identity.address, authkey=authkey)
+            probe.close()
+            break
+        except OSError:
+            time.sleep(0.02)
+
+    silent_conn = Client(identity.address, authkey=authkey)
+    time.sleep(0.6)  # past RECV_TIMEOUT_S -- the server side should have closed it by now
+
+    # The connection should now be closed server-side; sending on a
+    # closed pipe/socket eventually raises rather than succeeding forever.
+    with pytest.raises((EOFError, OSError)):
+        for _ in range(20):
+            silent_conn.send_bytes(b"x" * 10)
+    silent_conn.close()
+
+    # Supervisor itself must still be alive and serving other clients.
+    assert _send(identity, SupervisorRequest(kind="ping")).ok
+
+    try:
+        conn = Client(identity.address, authkey=authkey)
+        send_json(conn, SupervisorRequest(kind="shutdown").to_wire())
+        conn.close()
+    except OSError:
+        pass
+    thread.join(timeout=2)
