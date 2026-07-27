@@ -250,20 +250,30 @@ def _claude_desktop_config_path() -> Path:
     return Path.home() / ".config/Claude/claude_desktop_config.json"
 
 
-def _client_config_path(client: str) -> Path:
+def _client_config_path(client: str, scope: str = "project") -> Path:
     if client == "claude-desktop":
         return _claude_desktop_config_path()
     if client == "codex":
-        return Path.home() / ".codex" / "config.toml"
+        # Codex supports project-scoped config; default there (matches the
+        # project wrap.json being registered), --scope user for ~/.codex/.
+        if scope == "user":
+            return Path.home() / ".codex" / "config.toml"
+        return Path(".codex/config.toml").resolve()
     return Path(_CLIENT_CONFIG_PATHS[client]).resolve()
 
 
-def _register_client(client: str, wrap_path: Path, name: str) -> Path:
-    """Merge a `belay` entry into one client's MCP config. Returns the config path touched."""
+def _register_client(client: str, wrap_path: Path, name: str, scope: str = "project") -> Path:
+    """Merge a `belay` entry into one client's MCP config. Returns the config path touched.
+
+    Writes go through `atomic_write_with_backup` (temp file + `os.replace`,
+    plus a `.belay-backup` of anything overwritten) -- a crash mid-write
+    leaves the original file intact, never half-written.
+    """
     import json
 
-    target = _client_config_path(client)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    from belay.cli.client_configs import atomic_write_with_backup
+
+    target = _client_config_path(client, scope)
     command = sys.executable
     args = ["-m", "belay.cli.main", "run", "--config", str(wrap_path)]
 
@@ -271,16 +281,16 @@ def _register_client(client: str, wrap_path: Path, name: str) -> Path:
         from belay.cli.client_configs import render_codex_toml
 
         existing_toml = target.read_text(encoding="utf-8") if target.is_file() else ""
-        target.write_text(render_codex_toml(existing_toml, name, command, args), encoding="utf-8")
+        new_text = render_codex_toml(existing_toml, name, command, args)
+        atomic_write_with_backup(target, new_text)
         return target
 
     if client == "opencode":
         from belay.cli.client_configs import render_opencode_json
 
         existing_json = target.read_text(encoding="utf-8") if target.is_file() else ""
-        target.write_text(
-            render_opencode_json(existing_json, name, [command, *args]), encoding="utf-8"
-        )
+        new_text = render_opencode_json(existing_json, name, [command, *args])
+        atomic_write_with_backup(target, new_text)
         return target
 
     doc: dict[str, object] = {}
@@ -293,7 +303,7 @@ def _register_client(client: str, wrap_path: Path, name: str) -> Path:
     if not isinstance(servers, dict):
         raise ValueError(f"{target}: 'mcpServers' is not an object")
     servers[name] = {"command": command, "args": args}
-    target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    atomic_write_with_backup(target, json.dumps(doc, indent=2) + "\n")
     return target
 
 
@@ -314,13 +324,25 @@ def init(
     name: str = typer.Option(
         "belay", "--name", help="MCP server name the client will list Belay under."
     ),
+    scope: str = typer.Option(
+        "project",
+        "--scope",
+        help="For --client codex: 'project' (.codex/config.toml, default -- matches "
+        "the project's own wrap.json) or 'user' (~/.codex/config.toml). Ignored by "
+        "other clients (their scope is fixed by their own convention).",
+    ),
 ) -> None:
     """Register Belay as an MCP server in one or more clients' configs (no manual JSON).
 
-    Merges into each client's existing `mcpServers` block -- other servers
-    the agent already talks to are left untouched, so the agent sees Belay
-    alongside its other tools rather than in place of them.
+    Merges into each client's existing config -- other servers the agent
+    already talks to are left untouched, so the agent sees Belay alongside
+    its other tools rather than in place of them. Writes are atomic (temp
+    file + rename) with a `.belay-backup` of anything overwritten.
     """
+    if scope not in ("project", "user"):
+        typer.echo(f"error: --scope must be 'project' or 'user', got {scope!r}", err=True)
+        raise typer.Exit(code=1)
+
     clients = (
         list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
     )
@@ -342,11 +364,9 @@ def init(
 
     for c in clients:
         try:
-            target = _register_client(c, wrap_path, name)
-        except ValueError:
-            typer.echo(
-                "error: client config has a non-object 'mcpServers' -- fix by hand", err=True
-            )
+            target = _register_client(c, wrap_path, name, scope)
+        except ValueError as exc:
+            typer.echo(f"error registering {c}: {exc} -- nothing was written", err=True)
             raise typer.Exit(code=1) from None
         typer.echo(f"registered '{name}' in {target}")
     typer.echo("restart the client(s) for the change to take effect")
@@ -1147,8 +1167,8 @@ def bootstrap(
             continue
         try:
             target = _register_client(c, wrap_out, name)
-        except ValueError:
-            typer.echo(f"   {c}: config has a non-object 'mcpServers' -- fix by hand", err=True)
+        except ValueError as exc:
+            typer.echo(f"   {c}: {exc} -- nothing was written", err=True)
             continue
         typer.echo(f"3. registered with {c} -> {target}")
 

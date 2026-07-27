@@ -20,7 +20,7 @@ previewable, gated, and — when it goes wrong — reversible."
 > (§8), and rewind (§10), diagrammed in
 > [`docs/architecture.md`](docs/architecture.md). Seven further entregas
 > (E10-E16, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
-> "What's new since v0.1.0" below. 389 tests,
+> "What's new since v0.1.0" below. 411 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
@@ -384,8 +384,16 @@ re-running is idempotent (replaces in place, never duplicates):
 | Claude Desktop | OS-specific (autodetected) | JSON `mcpServers` |
 | Claude Code | `.mcp.json` (project root) | JSON `mcpServers` |
 | Cursor | `.cursor/mcp.json` (project root) | JSON `mcpServers` |
-| Codex CLI | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]` |
+| Codex CLI | `.codex/config.toml` (project root, default) or `~/.codex/config.toml` (`--scope user`) | TOML `[mcp_servers.<name>]` |
 | OpenCode | `opencode.json` (project root) | JSON `mcp.<name>` (`command` as one array, not split `command`/`args`) |
+
+Codex's TOML is edited with `tomlkit` (format-preserving — comments,
+other tables, and formatting choices survive byte-for-byte; an earlier
+regex-based merge was reproducibly broken by valid TOML like a comment on
+the `[mcp_servers.belay]` heading line or an indented table right after
+it). Every write in this section goes through an atomic temp-file +
+rename with a `.belay-backup` of anything overwritten — a crash mid-write
+never leaves a half-written config.
 
 Restart the client afterward.
 
