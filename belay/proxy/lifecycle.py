@@ -13,12 +13,15 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from belay.approvals.queue import ApprovalQueue
 from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
+
+if TYPE_CHECKING:
+    from belay.intent.model import IntentContract
 from belay.executor.saga import SagaExecutor
 from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
@@ -223,7 +226,9 @@ class Lifecycle:
     policy_stage: PolicyStage | None = None
     approval_stage: ApprovalStage | None = None
     execute_stage: ExecuteStage | None = None
+    intent_contract: "IntentContract | None" = None
     _step_seq: int = field(default=0, init=False, repr=False)
+    _files_touched: frozenset[str] = field(default=frozenset(), init=False, repr=False)
     last_explanation: dict[str, Any] | None = field(default=None, init=False, repr=False)
     """The most recent call's E16 `Explanation`, as a plain dict (or `None`
     before any policy evaluation has happened, e.g. a `contract_missing`
@@ -299,6 +304,33 @@ class Lifecycle:
         self._step_seq += 1
         step_seq = self._step_seq
         unsafe = tool in self.unsafe_passthrough_tools
+
+        if self.intent_contract is not None:
+            from belay.intent.enforce import check_intent_contract
+
+            violation = check_intent_contract(
+                self.intent_contract, tool, args, self._files_touched
+            )
+            if violation is not None:
+                self.ledger.append(
+                    self.session_id,
+                    "step_failed",
+                    {
+                        "tool": tool,
+                        "args": args,
+                        "error": {"code": "policy_denied", "detail": violation.detail},
+                        "intent_contract_violation": violation.reason,
+                    },
+                    step_seq=step_seq,
+                    set_hash=self.contract_set.set_hash,
+                )
+                raise BelayError(
+                    "policy_denied",
+                    {"reason": f"intent_contract:{violation.reason}", **violation.detail},
+                )
+            path = args.get("path")
+            if isinstance(path, str):
+                self._files_touched = self._files_touched | {path}
 
         try:
             resolved = resolve(

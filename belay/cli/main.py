@@ -813,6 +813,14 @@ def run(
         "--on-behalf-of",
         help="Optional: the accountable identity this initiator acts for (E14).",
     ),
+    intent_contract: str = typer.Option(
+        "",
+        "--intent-contract",
+        help="Intent contract YAML (adoption/DX, not spec-numbered): 'intent: ...', "
+        "'allowed_scope'/'forbidden_scope' path globs, 'forbidden_tools', "
+        "'budgets.files_changed'. A call violating it is denied before the upstream "
+        "ever sees it.",
+    ),
 ) -> None:
     """Start the Belay MCP proxy over stdio (spec §3, Appendix C)."""
     import os
@@ -834,6 +842,12 @@ def run(
     effective_initiated_by = initiated_by or wrap_config.initiated_by or "unknown"
     effective_on_behalf_of = on_behalf_of or wrap_config.on_behalf_of or None
 
+    intent_contract_obj = None
+    if intent_contract:
+        from belay.intent.loader import load_intent_contract
+
+        intent_contract_obj = load_intent_contract(intent_contract)
+
     async def _main() -> None:
         async with connect_stdio(
             wrap_config.upstream.command, wrap_config.upstream.args, env=dict(os.environ)
@@ -845,6 +859,7 @@ def run(
                 session_id,
                 unsafe_passthrough_tools=frozenset(wrap_config.unsafe_passthrough),
                 policy=policy_doc,
+                intent_contract=intent_contract_obj,
             )
             proxy.lifecycle.start_session(effective_initiated_by, effective_on_behalf_of)
             await proxy.run_stdio()

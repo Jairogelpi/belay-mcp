@@ -38,6 +38,7 @@ class BelayProxyServer:
         session_id: str,
         unsafe_passthrough_tools: frozenset[str] = frozenset(),
         policy: PolicyDoc | None = None,
+        intent_contract: Any = None,
     ) -> None:
         self._upstream = upstream
         self.lifecycle = Lifecycle(
@@ -46,6 +47,7 @@ class BelayProxyServer:
             ledger=ledger,
             session_id=session_id,
             policy=policy if policy is not None else default_policy(),
+            intent_contract=intent_contract,
         )
         self._server: Server[Any, Any] = Server("belay")
         self._register_handlers()

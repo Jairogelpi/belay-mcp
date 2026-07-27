@@ -118,6 +118,24 @@ conformance:
   decision authority. It never approves or rejects anything; that stays
   CLI-only and human-typed (spec §12 no-self-approval) — this just cuts
   through a long queue to what actually needs eyes first.
+- **Intent contract** (`belay run --intent-contract <file>`) turns a task's
+  brief into an execution boundary, not just documentation. Deliberately
+  narrower than "no refactoring auth" as free English -- only what's
+  mechanically checkable is enforced: `allowed_scope`/`forbidden_scope`
+  (glob patterns against a call's `path`), `forbidden_tools` (exact
+  denylist), and `budgets.files_changed` (a cap on distinct paths touched).
+  A violating call is denied (`policy_denied`) before it ever reaches the
+  upstream. `acceptance` criteria stay plain informational text for a human
+  (or `belay export-pr`'s PR body) to judge — claiming to machine-verify
+  "the public API wasn't touched" without real static analysis would be
+  worse than not checking it. See `examples/contracts/intent-timezone.yaml`.
+
+```bash
+belay run --config belay.wrap.json --intent-contract intent.yaml
+# agent tries: fs.write_file(path="src/auth/login.py", ...)
+# -> denied before the upstream ever sees it:
+# {"code": "policy_denied", "detail": {"reason": "intent_contract:forbidden_scope", ...}}
+```
 - **`belay rewind --intent/--keep`** undoes exactly one declared subgoal,
   keeping another, instead of a whole session or an arbitrary step cutoff.
   An agent tags a call by adding a reserved `_belay_intent` key to its
