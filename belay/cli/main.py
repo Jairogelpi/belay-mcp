@@ -357,6 +357,78 @@ def dashboard(
 
 
 @app.command()
+def explore(
+    session_ids: list[str] = typer.Argument(
+        ..., help="Two or more already-run session variants to compare (same task, same "
+        "checkpoint -- Belay doesn't generate them, only governs and compares them)."
+    ),
+    db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),
+    config: str = typer.Option(
+        "",
+        "--config",
+        "-c",
+        help="Wrap config path -- include to also count each variant's irreversible/"
+        "indeterminate steps via a real `belay rewind --dry-run` plan.",
+    ),
+) -> None:
+    """Compare N already-run session variants side by side. Never picks a winner.
+
+    Belay has no agent of its own to generate variants -- this assembles a
+    deterministic comparison table from data each session already produced
+    (the causal graph, plan effects, optionally a real rewind dry-run plan
+    per variant): steps, distinct files touched, tools used, steps proven
+    by a test vs not, unknown effects, and irreversible/indeterminate step
+    count. No LLM ranks these; a human picks from the evidence.
+    """
+    from belay.cli.explore import compute_metrics, render_table
+    from belay.ledger.store import LedgerStore
+
+    if len(session_ids) < 2:
+        typer.echo("error: give at least two session_ids to compare", err=True)
+        raise typer.Exit(code=1)
+
+    ledger = LedgerStore(f"sqlite:///{Path(db).resolve().as_posix()}")
+
+    rewind_service = None
+    if config:
+        from belay.contracts.loader import load_contract_set
+        from belay.policy.model import default_policy
+        from belay.proxy.config import WrapConfig
+        from belay.rewind.service import RewindService
+
+        wrap_config = WrapConfig.load(config)
+        contract_set = load_contract_set(wrap_config.contracts)
+        rewind_service = RewindService(
+            ledger=ledger, policy=default_policy(), contract_set=contract_set
+        )
+
+    metrics = []
+    for session_id in session_ids:
+        events = ledger.read(session_id)
+        if not events:
+            typer.echo(f"error: no events found for session {session_id!r} in {db}", err=True)
+            raise typer.Exit(code=1)
+
+        irreversible_count = None
+        if rewind_service is not None:
+            import anyio
+
+            async def _no_upstream(tool: str, args: dict[str, object]) -> dict[str, object]:
+                raise AssertionError("explore dry-run must never call upstream")
+
+            report = anyio.run(
+                lambda sid=session_id: rewind_service.rewind(
+                    sid, _no_upstream, dry_run=True, by="explore"
+                )
+            )
+            irreversible_count = len(report.plan.irreversible) + len(report.plan.indeterminate)
+
+        metrics.append(compute_metrics(session_id, events, irreversible_count))
+
+    typer.echo(render_table(metrics))
+
+
+@app.command()
 def causal(
     session_id: str = typer.Argument(..., help="Session to build the causal graph for."),
     db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),

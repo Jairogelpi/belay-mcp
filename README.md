@@ -171,6 +171,15 @@ belay rewind s_abc123 --intent cache-refactor --keep auth-fix --by jairo
 # -> --intent 'cache-refactor' resolved to --to-step 1
 # -> only cache.py's write is compensated; auth.py is untouched
 ```
+- **`belay explore <session_id>...`** compares already-run session
+  variants side by side — steps, distinct files touched, tools used, steps
+  proven by a test vs not, unknown effects, and (with `--config`)
+  irreversible/indeterminate step count via a real rewind dry-run per
+  variant. Belay has no agent of its own to generate variants, so this
+  doesn't run anything new — it assembles a comparison table from what
+  each variant's session already produced (reusing `belay causal`'s graph
+  and `belay rewind`'s dry-run). No LLM ranks the results; it's a table,
+  not a verdict — a human picks.
 - **`belay export-pr`** packages a committed session's file changes
   (the `path`/`content` shape `examples/contracts/fs.yaml` already uses) as
   a real git branch + commit, with Belay's own signed evidence (E13)
