@@ -663,6 +663,254 @@ def doctor(
         typer.echo(f"{c}: registered at {target} -- {status}, {backup_note}")
 
 
+hooks_app = typer.Typer(
+    name="hooks",
+    help="Native Agent Gate (plan-v2 E18): PreToolUse hooks gating native Bash tool "
+    "calls the same way the MCP proxy gates MCP tool calls. First slice -- Claude "
+    "Code / Bash only; PostToolUse, MCP tool calls, file edits, and Codex are not "
+    "yet handled (said plainly, not implied).",
+    no_args_is_help=True,
+)
+app.add_typer(hooks_app, name="hooks")
+
+_HOOKS_SUPPORTED_CLIENTS = ("claude-code",)
+
+
+def _claude_settings_path(scope: str = "project") -> Path:
+    if scope == "user":
+        return Path.home() / ".claude" / "settings.json"
+    return Path(".claude/settings.json").resolve()
+
+
+def _hooks_command_for(db: str) -> str:
+    db_path = Path(db).resolve()
+    return f'"{sys.executable}" -m belay.cli.main hooks run PreToolUse --db "{db_path}"'
+
+
+@hooks_app.command("run")
+def hooks_run(
+    event: str = typer.Argument(..., help="Hook event name from the agent, e.g. PreToolUse."),
+    db: str = typer.Option(
+        "belay-hooks.db",
+        "--db",
+        help="Approval queue database -- the same file `belay approvals` reads.",
+    ),
+) -> None:
+    """Hook entrypoint: reads the calling agent's JSON payload from stdin, decides,
+    prints the response JSON to stdout, exits 0. Not for direct human use -- this is
+    what `belay hooks install` points the agent's own hook config at.
+
+    Malformed stdin, or an event this first slice doesn't handle yet
+    (anything but PreToolUse), exits 0 with no output -- normal flow applies,
+    same as a hook that declined to make a decision. A safety gate that
+    crashes or blocks on its own confusion would be worse than one that
+    defers.
+    """
+    import json
+
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return
+
+    if event != "PreToolUse":
+        return
+
+    from belay.hooks.gate import handle_pre_tool_use
+
+    queue = _approval_queue(db)
+    result = handle_pre_tool_use(payload, queue)
+    typer.echo(json.dumps(result))
+
+
+@hooks_app.command("install")
+def hooks_install(
+    client: str = typer.Option(
+        "claude-code", "--client", help="Agent(s) to install the gate for, comma-separated."
+    ),
+    scope: str = typer.Option(
+        "project",
+        "--scope",
+        help="'project' (.claude/settings.json, default) or 'user' (~/.claude/settings.json).",
+    ),
+    db: str = typer.Option(
+        "belay-hooks.db",
+        "--db",
+        help="Approval queue database this installation's hook writes to. "
+        "`belay approvals list/approve/reject --db <same path>` reviews it.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would change, write nothing."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt (for CI/scripts)."
+    ),
+) -> None:
+    """Register belay's PreToolUse hook in an agent's own hook config.
+
+    Same safety guarantees as `belay init`: atomic write with backup, a
+    `.belay-manifest.json` recording before/after hashes for `belay hooks
+    uninstall`/`belay hooks doctor`, a preview + one confirmation before
+    anything is written, and a TOCTOU re-check immediately before writing so
+    an external edit in that window aborts the write instead of being
+    clobbered.
+    """
+    from belay.cli.client_configs import render_claude_hooks_settings
+
+    if scope not in ("project", "user"):
+        typer.echo(f"error: --scope must be 'project' or 'user', got {scope!r}", err=True)
+        raise typer.Exit(code=1)
+
+    clients = [c.strip() for c in client.split(",")]
+    for c in clients:
+        if c not in _HOOKS_SUPPORTED_CLIENTS:
+            typer.echo(
+                f"error: unknown/unsupported --client {c!r} (only "
+                f"{', '.join(_HOOKS_SUPPORTED_CLIENTS)} so far)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+    target = _claude_settings_path(scope)
+    before_text = target.read_text(encoding="utf-8") if target.is_file() else None
+    command = _hooks_command_for(db)
+    try:
+        new_text = render_claude_hooks_settings(before_text or "", command)
+    except ValueError as exc:
+        typer.echo(f"error rendering {target}: {exc} -- nothing was written", err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo(f"this will register belay's PreToolUse hook in {target}")
+    if dry_run:
+        typer.echo("--dry-run: nothing written")
+        return
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    current_text = target.read_text(encoding="utf-8") if target.is_file() else None
+    if current_text != before_text:
+        typer.echo(
+            f"error: {target} changed after preview -- aborting without writing anything",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    _write_client_config("claude-code-hooks", target, "belay-hooks", new_text, before_text)
+    typer.echo(f"installed PreToolUse hook in {target}")
+    typer.echo(
+        f"approvals queued by this hook land in {Path(db).resolve()} -- review with "
+        f"`belay approvals list --db {db}`"
+    )
+    typer.echo("restart the agent for the hook to take effect")
+
+
+@hooks_app.command("uninstall")
+def hooks_uninstall(
+    client: str = typer.Option(
+        "claude-code", "--client", help="Agent(s) to remove the gate from, comma-separated."
+    ),
+    scope: str = typer.Option("project", "--scope", help="Same meaning as `belay hooks install`."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Remove belay's hook entry, same restore-vs-surgical logic as `belay uninstall`
+    (spec-adjacent, plan-v2 E17/E18): unchanged since install -> restore the full
+    pre-install backup; changed since (the user added their own hooks) ->
+    surgically remove only belay's entry."""
+    from belay.cli.client_configs import (
+        atomic_restore,
+        atomic_write_with_backup,
+        load_manifest,
+        manifest_path,
+        remove_claude_hooks_entry,
+        sha256_of,
+    )
+
+    clients = [c.strip() for c in client.split(",")]
+    for c in clients:
+        if c not in _HOOKS_SUPPORTED_CLIENTS:
+            typer.echo(f"error: unknown/unsupported --client {c!r}", err=True)
+            raise typer.Exit(code=1)
+
+    target = _claude_settings_path(scope)
+    if not target.is_file():
+        typer.echo(f"{target} does not exist -- nothing to uninstall")
+        return
+    manifest = load_manifest(target)
+    if manifest is None:
+        typer.echo(f"{target}: no belay manifest -- was this installed by `belay hooks install`?")
+        return
+
+    current_hash = sha256_of(target.read_text(encoding="utf-8"))
+    if current_hash != manifest.after_hash:
+        action = "surgically remove only belay's hook entry"
+    elif manifest.before_hash is None:
+        action = "delete file"
+    elif manifest.backup_path:
+        action = "restore full pre-install backup"
+    else:
+        action = "surgically remove only belay's hook entry"
+
+    typer.echo(f"{target}: {action}")
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    if action == "delete file":
+        target.unlink()
+    elif action.startswith("restore"):
+        assert manifest.backup_path is not None
+        atomic_restore(target, Path(manifest.backup_path))
+    else:
+        existing = target.read_text(encoding="utf-8")
+        new_text = remove_claude_hooks_entry(existing)
+        atomic_write_with_backup(target, new_text)
+    manifest_path(target).unlink(missing_ok=True)
+    typer.echo(f"removed belay's hook from {target}")
+
+
+@hooks_app.command("doctor")
+def hooks_doctor(
+    client: str = typer.Option(
+        "claude-code", "--client", help="Agent(s) to check, comma-separated."
+    ),
+    scope: str = typer.Option("project", "--scope", help="Same meaning as `belay hooks install`."),
+) -> None:
+    """Report whether belay's hook is registered, modified since, missing, or BROKEN.
+    Read-only, same semantics as `belay doctor`."""
+    from belay.cli.client_configs import claude_hooks_entry_present, load_manifest, sha256_of
+
+    clients = [c.strip() for c in client.split(",")]
+    for c in clients:
+        if c not in _HOOKS_SUPPORTED_CLIENTS:
+            typer.echo(f"{c}: unknown client", err=True)
+            continue
+        target = _claude_settings_path(scope)
+        if not target.is_file():
+            typer.echo(f"{c}: not configured ({target} does not exist)")
+            continue
+        manifest = load_manifest(target)
+        if manifest is None:
+            typer.echo(f"{c}: config exists at {target}, but no belay manifest (not belay-managed)")
+            continue
+        current_text = target.read_text(encoding="utf-8")
+        try:
+            present = claude_hooks_entry_present(current_text)
+        except (ValueError, LookupError):
+            present = False
+        if not present:
+            typer.echo(
+                f"{c}: BROKEN -- manifest says a hook should be registered at {target}, "
+                "but it's not there"
+            )
+            continue
+        current_hash = sha256_of(current_text)
+        if current_hash == manifest.after_hash:
+            status = "unchanged since install"
+        else:
+            status = "MODIFIED since install"
+        backup_note = "backup available" if manifest.backup_path else "no backup (file was new)"
+        typer.echo(f"{c}: hook registered at {target} -- {status}, {backup_note}")
+
+
 @app.command()
 def dashboard(
     db: str = typer.Option("belay.db", "--db", help="Ledger SQLite file path."),

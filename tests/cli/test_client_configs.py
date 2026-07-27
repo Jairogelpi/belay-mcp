@@ -152,6 +152,80 @@ def test_atomic_write_leaves_original_intact_on_write_failure(tmp_path, monkeypa
     assert leftover_temps == []
 
 
+def test_render_claude_hooks_settings_empty_file() -> None:
+    from belay.cli.client_configs import render_claude_hooks_settings
+
+    text = render_claude_hooks_settings("", "belay hooks run PreToolUse")
+    doc = json.loads(text)
+    entry = doc["hooks"]["PreToolUse"][0]
+    assert entry["matcher"] == "Bash"
+    assert entry["hooks"][0]["command"] == "belay hooks run PreToolUse"
+
+
+def test_render_claude_hooks_settings_preserves_other_hooks_and_keys() -> None:
+    from belay.cli.client_configs import render_claude_hooks_settings
+
+    existing = json.dumps(
+        {
+            "someOtherSetting": True,
+            "hooks": {
+                "PreToolUse": [{"matcher": "Write", "hooks": [{"command": "my-own-hook.sh"}]}],
+                "PostToolUse": [{"matcher": "*", "hooks": [{"command": "other.sh"}]}],
+            },
+        }
+    )
+    text = render_claude_hooks_settings(existing, "belay hooks run PreToolUse")
+    doc = json.loads(text)
+    assert doc["someOtherSetting"] is True
+    assert doc["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "other.sh"
+    pre = doc["hooks"]["PreToolUse"]
+    assert any(e["hooks"][0]["command"] == "my-own-hook.sh" for e in pre)
+    assert any(e["hooks"][0]["command"] == "belay hooks run PreToolUse" for e in pre)
+    assert len(pre) == 2
+
+
+def test_render_claude_hooks_settings_reinstall_replaces_not_duplicates() -> None:
+    from belay.cli.client_configs import render_claude_hooks_settings
+
+    once = render_claude_hooks_settings("", "belay hooks run PreToolUse --db old.db")
+    twice = render_claude_hooks_settings(once, "belay hooks run PreToolUse --db new.db")
+    doc = json.loads(twice)
+    pre = doc["hooks"]["PreToolUse"]
+    assert len(pre) == 1
+    assert pre[0]["hooks"][0]["command"] == "belay hooks run PreToolUse --db new.db"
+
+
+def test_remove_claude_hooks_entry_removes_only_belays() -> None:
+    from belay.cli.client_configs import remove_claude_hooks_entry, render_claude_hooks_settings
+
+    existing = json.dumps(
+        {"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [{"command": "mine.sh"}]}]}}
+    )
+    with_belay = render_claude_hooks_settings(existing, "belay hooks run PreToolUse")
+    removed = remove_claude_hooks_entry(with_belay)
+    doc = json.loads(removed)
+    pre = doc["hooks"]["PreToolUse"]
+    assert len(pre) == 1
+    assert pre[0]["hooks"][0]["command"] == "mine.sh"
+
+
+def test_remove_claude_hooks_entry_on_file_with_no_hooks_key_is_a_noop() -> None:
+    from belay.cli.client_configs import remove_claude_hooks_entry
+
+    existing = json.dumps({"foo": "bar"})
+    result = remove_claude_hooks_entry(existing)
+    assert json.loads(result) == {"foo": "bar"}
+
+
+def test_claude_hooks_entry_present() -> None:
+    from belay.cli.client_configs import claude_hooks_entry_present, render_claude_hooks_settings
+
+    assert claude_hooks_entry_present("") is False
+    assert claude_hooks_entry_present(json.dumps({"hooks": {}})) is False
+    with_belay = render_claude_hooks_settings("", "belay hooks run PreToolUse")
+    assert claude_hooks_entry_present(with_belay) is True
+
+
 def test_atomic_restore_is_byte_exact(tmp_path) -> None:
     from belay.cli.client_configs import atomic_restore
 

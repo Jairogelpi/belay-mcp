@@ -145,6 +145,82 @@ def load_manifest(target: Path) -> Manifest | None:
     return Manifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
+#: Marker substring used to recognize a belay-managed hook entry inside
+#: settings.json's `hooks.<event>` array, so a reinstall replaces it in place
+#: (idempotent, no duplicate entries) and an uninstall removes exactly the
+#: entries belay added -- without needing a table/key to scope the edit to,
+#: the way the MCP-registration renderers above do (`hooks.<event>` is an
+#: array of arbitrary shape, not a name-keyed object).
+#:
+#: NOT "belay hooks run" -- the actual command belay installs is
+#: `"<python>" -m belay.cli.main hooks run <event> --db ...` (see
+#: `_hooks_command_for` in belay/cli/main.py), which contains "hooks run"
+#: but never the contiguous substring "belay hooks run" ("belay.cli.main
+#: hooks run", not "belay hooks run"). That mismatch was caught by
+#: `tests/cli/test_hooks_lifecycle.py::test_doctor_reports_unchanged_since_install`
+#: failing immediately after a fresh install -- belay couldn't recognize its
+#: own just-installed entry as its own.
+_BELAY_HOOK_MARKER = "hooks run"
+
+
+def _is_belay_hook_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    for h in entry.get("hooks", []):
+        if isinstance(h, dict) and _BELAY_HOOK_MARKER in str(h.get("command", "")):
+            return True
+    return False
+
+
+def render_claude_hooks_settings(
+    existing: str, command: str, event: str = "PreToolUse", matcher: str = "Bash"
+) -> str:
+    """Merge a belay-managed hook entry into settings.json's `hooks.<event>`
+    array. Idempotent: an existing belay entry (recognized by
+    `_BELAY_HOOK_MARKER` in its command) is replaced in place, never
+    duplicated on reinstall; any other entries already there (the user's own
+    hooks, or belay entries for a different event) are left untouched."""
+    doc: dict[str, object] = json.loads(existing) if existing.strip() else {}
+    hooks = doc.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("settings.json has a non-object 'hooks' key -- fix by hand")
+    event_list = hooks.get(event, [])
+    if not isinstance(event_list, list):
+        raise ValueError(f"settings.json's hooks.{event} is not an array -- fix by hand")
+
+    new_list = [entry for entry in event_list if not _is_belay_hook_entry(entry)]
+    new_list.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+    hooks[event] = new_list
+    return json.dumps(doc, indent=2) + "\n"
+
+
+def remove_claude_hooks_entry(existing: str, event: str = "PreToolUse") -> str:
+    """Surgically remove belay's entry (only) from settings.json's
+    `hooks.<event>` array, leaving any other hooks in that array -- and every
+    other event/key in the file -- untouched."""
+    doc: dict[str, object] = json.loads(existing) if existing.strip() else {}
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        return json.dumps(doc, indent=2) + "\n"
+    event_list = hooks.get(event)
+    if isinstance(event_list, list):
+        hooks[event] = [entry for entry in event_list if not _is_belay_hook_entry(entry)]
+    return json.dumps(doc, indent=2) + "\n"
+
+
+def claude_hooks_entry_present(existing: str, event: str = "PreToolUse") -> bool:
+    if not existing.strip():
+        return False
+    doc = json.loads(existing)
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    event_list = hooks.get(event)
+    if not isinstance(event_list, list):
+        return False
+    return any(_is_belay_hook_entry(entry) for entry in event_list)
+
+
 def entry_present(client: str, existing: str, name: str) -> bool:
     """Whether `name`'s entry is actually present in `existing`, parsed per
     `client`'s config format. `belay doctor` uses this to catch a manifest

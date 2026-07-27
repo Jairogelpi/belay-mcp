@@ -18,13 +18,14 @@ previewable, gated, and — when it goes wrong — reversible."
 > the full lifecycle — contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
 > Appendix C), planner + policy (§5, §6), approvals (§7), the saga executor
 > (§8), and rewind (§10), diagrammed in
-> [`docs/architecture.md`](docs/architecture.md). Eight further entregas
-> (E10-E17, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
-> "What's new since v0.1.0" below. 427 tests,
+> [`docs/architecture.md`](docs/architecture.md). Nine further entregas
+> (E10-E18, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
+> "What's new since v0.1.0" below (E18 is a first slice — Claude Code/Bash
+> only, said plainly in its own section below). 510 tests,
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~79.6% repo-wide** (`fail_under = 79`, CI-enforced floor against
+> **Coverage: ~79.7-80% repo-wide** (`fail_under = 79`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -392,11 +393,47 @@ content in those files is left untouched.
 
 Registering Belay as an MCP server does not, by itself, mean an agent's
 *every* tool call goes through it — Claude Code/Cursor/Codex/OpenCode can
-still reach for their own native Bash/file-edit tools without touching
-MCP at all. The `AGENTS.md`/`CLAUDE.md` instruction is the durable nudge
-today; a deterministic hook-based gate (Claude Code's `PreToolUse`,
-Codex's project hooks) that actually intercepts native tool calls too is
-real future work, not yet built — said plainly rather than implied.
+still reach for their own native Bash/file-edit tools without touching MCP
+at all. The `AGENTS.md`/`CLAUDE.md` instruction is the durable nudge; a
+deterministic hook-based gate that actually intercepts native tool calls
+too is `belay hooks install` (E18), below.
+
+### Native Agent Gate: `belay hooks install` (E18)
+
+```bash
+belay hooks install --yes
+# -> installed PreToolUse hook in .claude/settings.json
+# -> approvals queued by this hook land in .../belay-hooks.db -- review with
+#    belay approvals list --db belay-hooks.db
+# -> restart the agent for the hook to take effect
+```
+
+First slice, said plainly rather than oversold: **Claude Code's native Bash
+tool only** — `PreToolUse`, not yet `PostToolUse`/file edits/MCP tool calls;
+Codex is not wired up yet (its hook surface for non-Bash tools couldn't be
+verified against real behavior in time, only against docs that
+partially conflicted with each other — better to ship a narrower, verified
+slice than a broader, unverified one). Every Bash command Claude Code is
+about to run goes through `belay/hooks/decision.py`, a deterministic (no
+LLM) classifier: an explicit, narrow allowlist of read-only commands (`ls`,
+`cat`, `git status`/`diff`/`log`/`show`, `grep`, `pytest`, `pwd`, `echo`) is
+allowed; **everything else pauses**, including any allowlisted-looking
+command combined with shell chaining/redirection/substitution (`;`, `&&`,
+`|`, `` ` ``, `$()`, a newline) — those are rejected before the allowlist is
+even checked, so `git status; rm -rf /` never slips through on the strength
+of its safe-looking prefix. A paused command is queued as a real pending
+item in the exact same `ApprovalQueue` (spec §7) `belay run`'s MCP path
+uses — `belay approvals list/approve/reject --db belay-hooks.db` reviews it,
+never a native "ask" prompt the agent's own client would show (that would
+let a human bypass Belay's queue entirely). Once approved, the identical
+command is allowed on retry; a rejected command stays denied without being
+re-queued.
+
+Same safety guarantees as `belay init`/`belay uninstall` (E17.1): atomic
+write with backup, a `.belay-manifest.json`, preview + one confirmation, a
+pre-write re-check that aborts on an external edit instead of clobbering it,
+and `belay hooks uninstall`/`belay hooks doctor` with the identical
+restore-vs-surgical/BROKEN-detection logic.
 
 ### Wrapping a non-Python MCP server
 
@@ -558,6 +595,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
+| E18 | Native Agent Gate: `belay hooks install` — deterministic Bash risk classifier + PreToolUse hook, routed through the same `ApprovalQueue` as the MCP path | §7 (extended), adoption/DX | **first slice** — Claude Code/Bash only |
 
 ## Conformance
 
@@ -608,7 +646,7 @@ replacement for any:
 Done, §0) but **not published to PyPI yet** — that's a manual step for the
 maintainer (PyPI trusted publishing must be configured on the PyPI project
 first; an agent cannot do that). `main` is currently ahead of the `v0.1.0`
-tag with E10-E17 (see "What's new since v0.1.0" above); no new tag has been
+tag with E10-E18 (see "What's new since v0.1.0" above); no new tag has been
 cut for those yet. See
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
 [`CHANGELOG.md`](CHANGELOG.md).

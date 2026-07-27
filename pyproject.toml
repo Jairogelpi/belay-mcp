@@ -94,11 +94,15 @@ markers = [
 source = ["belay"]
 
 [tool.coverage.report]
-# 79.65% real, measured, after E17.1's init/uninstall/doctor lifecycle tests
-# (reinstall-preserves-backup, missing-file-then-uninstall, manifest.name
-# surgical removal, dry-run/write TOCTOU abort, manifest-write-failure
-# rollback, atomic byte-exact restore, doctor BROKEN detection). Locked in as
-# a floor against regressions -- raise it as more integration tests land,
-# target 90% (plan.md §0), but never lower it silently.
+# 79.7-80.0% real, measured (observed to vary by a few tenths of a point run
+# to run with no code changes -- likely test-order/hash-seed nondeterminism
+# affecting which conditional branches execute -- so the floor below is set
+# with real margin under the low end, not pinned to a single run's number),
+# after the E18 first slice (belay/hooks/: Bash risk classifier,
+# ApprovalQueue-backed PreToolUse gate, belay hooks
+# install/uninstall/doctor/run) plus the one-line installers
+# (scripts/install.sh/.ps1). Locked in as a floor against regressions --
+# raise it as more integration tests land, target 90% (plan.md §0), but
+# never lower it silently.
 fail_under = 79
 exclude_also = ["if TYPE_CHECKING:"]
