@@ -234,6 +234,8 @@ _CLIENT_CONFIG_PATHS: dict[str, str] = {
     "claude-desktop": "~claude-desktop~",  # resolved per-OS below
     "claude-code": ".mcp.json",
     "cursor": ".cursor/mcp.json",
+    "codex": "~codex~",  # resolved per-OS below
+    "opencode": "opencode.json",
 }
 
 
@@ -251,6 +253,8 @@ def _claude_desktop_config_path() -> Path:
 def _client_config_path(client: str) -> Path:
     if client == "claude-desktop":
         return _claude_desktop_config_path()
+    if client == "codex":
+        return Path.home() / ".codex" / "config.toml"
     return Path(_CLIENT_CONFIG_PATHS[client]).resolve()
 
 
@@ -260,6 +264,24 @@ def _register_client(client: str, wrap_path: Path, name: str) -> Path:
 
     target = _client_config_path(client)
     target.parent.mkdir(parents=True, exist_ok=True)
+    command = sys.executable
+    args = ["-m", "belay.cli.main", "run", "--config", str(wrap_path)]
+
+    if client == "codex":
+        from belay.cli.client_configs import render_codex_toml
+
+        existing_toml = target.read_text(encoding="utf-8") if target.is_file() else ""
+        target.write_text(render_codex_toml(existing_toml, name, command, args), encoding="utf-8")
+        return target
+
+    if client == "opencode":
+        from belay.cli.client_configs import render_opencode_json
+
+        existing_json = target.read_text(encoding="utf-8") if target.is_file() else ""
+        target.write_text(
+            render_opencode_json(existing_json, name, [command, *args]), encoding="utf-8"
+        )
+        return target
 
     doc: dict[str, object] = {}
     if target.is_file():
@@ -270,10 +292,7 @@ def _register_client(client: str, wrap_path: Path, name: str) -> Path:
     servers = doc.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise ValueError(f"{target}: 'mcpServers' is not an object")
-    servers[name] = {
-        "command": sys.executable,
-        "args": ["-m", "belay.cli.main", "run", "--config", str(wrap_path)],
-    }
+    servers[name] = {"command": command, "args": args}
     target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     return target
 
@@ -284,7 +303,7 @@ def init(
         ...,
         "--client",
         help="MCP client(s) to register Belay with, comma-separated: claude-desktop, "
-        "claude-code, cursor, or 'all'.",
+        "claude-code, cursor, codex, opencode, or 'all'.",
     ),
     config: str = typer.Option(
         "belay.wrap.json",

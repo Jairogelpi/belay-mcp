@@ -341,14 +341,22 @@ belay bootstrap ./sandbox --command npx --arg -y \
 
 Runs `draft-contracts` (skip with `--contracts <file>` if you already have
 one), `wrap`, `init` against every known client (`--client
-claude-desktop,claude-code,cursor`, or `all`), and upserts a
-standing-instruction block into `./AGENTS.md` and `./CLAUDE.md` telling
-whatever agent reads them (Claude Code, Codex, opencode, ...) to use
-Belay's MCP tools **by default, without being told each session** — those
-files are the one thing every agent actually re-reads automatically, so
-that's where a durable instruction has to live, not a one-off chat message.
-Safe to re-run: the block is idempotent (marked, replaced in place, never
-duplicated), and other content in those files is left untouched.
+claude-desktop,claude-code,cursor,codex,opencode`, or `all`), and upserts
+a standing-instruction block into `./AGENTS.md` and `./CLAUDE.md` telling
+whatever agent reads them to use Belay's MCP tools **by default, without
+being told each session** — those files are the one thing every agent
+actually re-reads automatically, so that's where a durable instruction
+has to live, not a one-off chat message. Safe to re-run: the block is
+idempotent (marked, replaced in place, never duplicated), and other
+content in those files is left untouched.
+
+Registering Belay as an MCP server does not, by itself, mean an agent's
+*every* tool call goes through it — Claude Code/Cursor/Codex/OpenCode can
+still reach for their own native Bash/file-edit tools without touching
+MCP at all. The `AGENTS.md`/`CLAUDE.md` instruction is the durable nudge
+today; a deterministic hook-based gate (Claude Code's `PreToolUse`,
+Codex's project hooks) that actually intercepts native tool calls too is
+real future work, not yet built — said plainly rather than implied.
 
 ### Wrapping a non-Python MCP server
 
@@ -360,16 +368,26 @@ belay wrap ./sandbox --contracts contracts/fs.yaml \
   --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg ./sandbox
 ```
 
-### Registering with an MCP client (Claude Desktop / Claude Code / Cursor)
+### Registering with an MCP client (Claude Desktop / Claude Code / Cursor / Codex / OpenCode)
 
 ```bash
 belay init --client claude-desktop --config belay.wrap.json
+belay init --client codex,opencode --config belay.wrap.json
 ```
 
-Merges a `belay` entry into the client's `mcpServers` config (autodetected
-per-OS path for Claude Desktop; `.mcp.json` / `.cursor/mcp.json` in the
-project root for the others) — other MCP servers already configured are
-left untouched. Restart the client afterward.
+Merges a `belay` entry into the client's own config, in its own native
+format — other MCP servers already configured are left untouched, and
+re-running is idempotent (replaces in place, never duplicates):
+
+| Client | File | Format |
+| --- | --- | --- |
+| Claude Desktop | OS-specific (autodetected) | JSON `mcpServers` |
+| Claude Code | `.mcp.json` (project root) | JSON `mcpServers` |
+| Cursor | `.cursor/mcp.json` (project root) | JSON `mcpServers` |
+| Codex CLI | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]` |
+| OpenCode | `opencode.json` (project root) | JSON `mcp.<name>` (`command` as one array, not split `command`/`args`) |
+
+Restart the client afterward.
 
 ### Drafting contracts from a live server
 
