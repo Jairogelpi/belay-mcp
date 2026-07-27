@@ -97,3 +97,41 @@ def test_run_declared_test_builds_command_from_ref_not_free_form() -> None:
 def test_run_declared_test_rejects_unknown_runner() -> None:
     with pytest.raises(ValueError, match="unknown runner"):
         run_declared_test("tests/x.py::test_y", "not_a_real_runner")
+
+
+def test_run_declared_test_cmd_is_not_a_shell_string_it_can_reinterpret() -> None:
+    """The recorded `cmd` display string must reflect an argv join, not a shell
+    string that could itself be re-executed unsafely by something downstream."""
+    result = run_declared_test("tests/x.py::test_a; touch x", "pytest")
+    assert result.cmd == "pytest tests/x.py::test_a; touch x"  # display only, never re-run
+
+
+@pytest.mark.parametrize(
+    "injection",
+    [
+        "tests/x.py::test_a; touch INJECTED.txt",
+        "tests/x.py::test_a && touch INJECTED.txt",
+        "tests/x.py::test_a & touch INJECTED.txt",
+        "tests/x.py::test_a $(touch INJECTED.txt)",
+        "tests/x.py::test_a `touch INJECTED.txt`",
+        "tests/x.py::test_a\ntouch INJECTED.txt",
+    ],
+)
+def test_run_declared_test_does_not_execute_injected_shell_syntax(injection, tmp_path) -> None:
+    """The critical fix: test_ref is agent-supplied and untrusted. A fake ref plus
+    shell metacharacters must never (a) let the injected command run (no side
+    effect file appears) or (b) report passed=True -- previously, with
+    shell=True, `; true`/`&& true`/etc. after a nonexistent test made the whole
+    pipeline exit 0 even though pytest was never truly satisfied."""
+    result = run_declared_test(injection, "pytest", cwd=str(tmp_path))
+    assert not (tmp_path / "INJECTED.txt").exists(), "injected shell command executed!"
+    assert result.passed is False
+
+
+def test_run_declared_test_treats_whole_ref_as_one_argv_element() -> None:
+    """A ref containing spaces/semicolons is passed to pytest as ONE argument
+    (whatever pytest itself does with it, e.g. fail to collect) -- never split
+    or interpreted by a shell."""
+    result = run_declared_test("tests/x.py::test a; rm -rf /tmp/nonexistent", "pytest")
+    assert result.mode == "test"
+    assert result.passed is False

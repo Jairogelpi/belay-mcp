@@ -189,7 +189,7 @@ def build_proof_body(
     """
     from fnmatch import fnmatch
 
-    from belay.cli.causal import build_causal_graph
+    from belay.cli.causal import CausalNode, build_causal_graph
 
     nodes = build_causal_graph(events)
     by_step = {n.step_seq: n for n in nodes}
@@ -249,12 +249,22 @@ def build_proof_body(
     unproven = [n for n in nodes if n.test_verified is not True and not n.test_ref]
     failed = [n for n in nodes if n.test_verified is False]
 
-    verified_lines = [
-        f"- step {n.step_seq} ({n.tool}): `{n.test_ref or (n.test_evidence or {}).get('cmd')}` "
-        f"-- **actually run**, exit_code=0, output_hash="
-        f"`{(n.test_evidence or {}).get('output_hash')}` (`belay verify-test`)"
-        for n in verified
-    ]
+    def _verified_line(n: CausalNode) -> str:
+        ev = n.test_evidence or {}
+        dirty_note = (
+            " -- **⚠ tree was dirty when verified**: tree_hash reflects HEAD, not "
+            "the modified working tree, so this is not fully reproducible from the "
+            "recorded hash alone"
+            if ev.get("git_dirty")
+            else ""
+        )
+        return (
+            f"- step {n.step_seq} ({n.tool}): `{n.test_ref or ev.get('cmd')}` "
+            f"-- **actually run**, exit_code=0, output_hash=`{ev.get('output_hash')}` "
+            f"(`belay verify-test`){dirty_note}"
+        )
+
+    verified_lines = [_verified_line(n) for n in verified]
     if failed:
         verified_lines += [
             f"- step {n.step_seq} ({n.tool}): `{n.test_ref}` -- **ran and FAILED**, "

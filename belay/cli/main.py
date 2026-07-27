@@ -535,9 +535,16 @@ def causal(
                 lines.append(f"    intent: {n.intent_id}")
             if n.test_verified is True:
                 ev = n.test_evidence or {}
+                label = "VERIFIED ON DIRTY TREE" if ev.get("git_dirty") else "VERIFIED"
+                dirty_note = (
+                    " -- tree_hash reflects HEAD, not the modified working tree; "
+                    "not fully reproducible from the recorded hash alone"
+                    if ev.get("git_dirty")
+                    else ""
+                )
                 lines.append(
-                    f"    VERIFIED by test: {n.test_ref or ev.get('cmd')} "
-                    f"(exit_code=0, output_hash={ev.get('output_hash')})"
+                    f"    {label} by test: {n.test_ref or ev.get('cmd')} "
+                    f"(exit_code=0, output_hash={ev.get('output_hash')}){dirty_note}"
                 )
             elif n.test_verified is False:
                 ev = n.test_evidence or {}

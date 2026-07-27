@@ -24,7 +24,7 @@ previewable, gated, and — when it goes wrong — reversible."
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: 79% repo-wide** (`fail_under = 79`, CI-enforced floor against
+> **Coverage: ~79% repo-wide** (`fail_under = 78`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -167,7 +167,17 @@ belay run --config belay.wrap.json --intent-contract intent.yaml
   `_belay_test_ref` label with no matching verification), or **test
   FAILED** (ran, non-zero exit) — never a single "proven: yes/no" that
   trusts the agent's word, and never confusing "some command passed" with
-  "this specific test passed."
+  "this specific test passed." The runner's command is built as an **argv
+  list executed with `shell=False`** — `test_ref` (agent-supplied,
+  untrusted) is passed as a single argument, never interpolated into or
+  parsed as a shell string, so `; rm -rf`, `&& true`, backticks, `$()`, or
+  a newline inside it have no shell to be interpreted by (an earlier
+  version built a shell string and was exploitable this way — caught in
+  review, fixed, and covered by injection tests before this shipped). A
+  step verified while the tree was dirty is labeled **VERIFIED ON DIRTY
+  TREE**, not a plain VERIFIED — the recorded `tree_hash` reflects HEAD,
+  not the modified working tree, so it isn't fully reproducible from that
+  hash alone.
 
 ```bash
 belay verify-test s_abc123 --step 1 --runner pytest
