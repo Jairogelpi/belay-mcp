@@ -431,11 +431,32 @@ def export_pr(
     key: str = typer.Option(
         "", "--key", help="Ed25519 signing key (belay keygen) to attach signed evidence (E13)."
     ),
+    config: str = typer.Option(
+        "",
+        "--config",
+        "-c",
+        help="Wrap config path -- include to compute a real `belay rewind --dry-run` plan "
+        "in the PR body's 'How is this undone?' section.",
+    ),
+    intent_contract: str = typer.Option(
+        "",
+        "--intent-contract",
+        help="Intent contract YAML -- include to answer 'what was asked?' and 'what "
+        "changed without being asked?' (scope deviations) with real data instead of "
+        "an explicit 'not available'.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print what would change without touching git."
     ),
 ) -> None:
-    """Package a committed session's file changes as a real branch + PR.
+    """Package a committed session's file changes as a real branch + PR, proof-carrying.
+
+    The PR body answers a reviewer's real questions from real data --
+    what was asked, what changed outside that scope, what's proven by a
+    test, what isn't, what external effects occurred, and how to undo it
+    (a real `belay rewind --dry-run` plan) -- rather than just listing
+    files. Any section without enough data says so explicitly instead of
+    guessing.
 
     Post-hoc, not a pre-execution gate (see `docs/adr` if one is later added
     for the rejected gate design): the session already ran through the full
@@ -447,6 +468,7 @@ def export_pr(
     """
     from belay.cli.export_pr import (
         apply_changes,
+        build_proof_body,
         create_branch_and_commit,
         extract_file_changes,
         gh_pr_create_command,
@@ -498,16 +520,41 @@ def export_pr(
     create_branch_and_commit(repo_path, branch, base, message, paths)
     typer.echo(f"branch {branch} created in {repo_path} ({len(paths)} file(s) committed)")
 
-    body_path = repo_path / f".belay-pr-body-{session_id}.md"
-    body = (
-        f"Automated PR from Belay session `{session_id}` (spec §3-§8: contract -> "
-        f"plan -> policy -> approval -> saga commit already ran; this is the "
-        f"paper trail, not a new gate).\n\n"
-        + "\n".join(
-            f"- {'delete' if c.after is None else 'write'} `{c.path}` (step {c.step_seq})"
-            for c in changes
+    intent_text: str | None = None
+    allowed_scope: list[str] | None = None
+    if intent_contract:
+        from belay.intent.loader import load_intent_contract
+
+        ic = load_intent_contract(intent_contract)
+        intent_text = ic.intent
+        allowed_scope = ic.allowed_scope
+
+    rewind_plan_lines: list[str] | None = None
+    if config:
+        import anyio
+
+        from belay.contracts.loader import load_contract_set
+        from belay.policy.model import default_policy
+        from belay.proxy.config import WrapConfig
+        from belay.rewind.service import RewindService
+
+        wrap_config = WrapConfig.load(config)
+        contract_set_for_rewind = load_contract_set(wrap_config.contracts)
+        rewind_service = RewindService(
+            ledger=ledger, policy=default_policy(), contract_set=contract_set_for_rewind
         )
-        + evidence_note
+
+        async def _no_upstream(tool: str, args: dict[str, object]) -> dict[str, object]:
+            raise AssertionError("PR-body dry-run must never call upstream")
+
+        report = anyio.run(
+            lambda: rewind_service.rewind(session_id, _no_upstream, dry_run=True, by="export-pr")
+        )
+        rewind_plan_lines = [f"step {s.step_seq}: {s.tool} -> {s.status}" for s in report.plan.steps]
+
+    body_path = repo_path / f".belay-pr-body-{session_id}.md"
+    body = build_proof_body(
+        session_id, events, changes, evidence_note, intent_text, allowed_scope, rewind_plan_lines
     )
     body_path.write_text(body, encoding="utf-8")
 

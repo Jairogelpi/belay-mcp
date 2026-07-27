@@ -111,3 +111,96 @@ def gh_pr_create_command(branch: str, base: str, title: str, body_file: str) -> 
         "--title", title,
         "--body-file", body_file,
     ]
+
+
+def build_proof_body(
+    session_id: str,
+    events: list[Event],
+    changes: list[FileChange],
+    evidence_note: str,
+    intent: str | None,
+    allowed_scope: list[str] | None,
+    rewind_plan_lines: list[str] | None,
+) -> str:
+    """A "proof-carrying PR" body answering a reviewer's actual questions, not just a diff list.
+
+    Every section is either real ledger data or an explicit "not available"
+    -- no section fabricates an answer it doesn't have the data to back.
+    """
+    from fnmatch import fnmatch
+
+    from belay.cli.causal import build_causal_graph
+
+    nodes = build_causal_graph(events)
+    by_step = {n.step_seq: n for n in nodes}
+
+    sections = [
+        f"Automated PR from Belay session `{session_id}` (spec §3-§8: contract -> "
+        f"plan -> policy -> approval -> saga commit already ran; this is the "
+        f"paper trail, not a new gate)."
+    ]
+
+    sections.append(
+        "\n### What was asked?\n" + (intent if intent else "_not declared (no intent contract given)_")
+    )
+
+    deviations = []
+    if allowed_scope:
+        for c in changes:
+            if not any(fnmatch(c.path, pattern) for pattern in allowed_scope):
+                deviations.append(c.path)
+    sections.append(
+        "\n### What changed without being asked?\n"
+        + (
+            "\n".join(f"- `{p}` (outside declared allowed_scope)" for p in deviations)
+            if deviations
+            else ("_none — every changed file is inside the declared scope_" if allowed_scope else "_not checked (no intent contract given)_")
+        )
+    )
+
+    behavior_lines = [
+        f"- step {c.step_seq}: {'delete' if c.after is None else 'write'} `{c.path}`"
+        + (f" (intent: {by_step[c.step_seq].intent_id})" if by_step.get(c.step_seq) and by_step[c.step_seq].intent_id else "")
+        for c in changes
+    ]
+    sections.append("\n### What new behavior exists?\n" + "\n".join(behavior_lines))
+
+    proven = [n for n in nodes if n.test_ref]
+    unproven = [n for n in nodes if not n.test_ref]
+    sections.append(
+        "\n### What was verified?\n"
+        + (
+            "\n".join(f"- step {n.step_seq} ({n.tool}): `{n.test_ref}`" for n in proven)
+            or "_none of this session's steps carry a `_belay_test_ref`_"
+        )
+    )
+    sections.append(
+        "\n### What couldn't be proven?\n"
+        + (
+            "\n".join(f"- step {n.step_seq} ({n.tool}): no test reference attached" for n in unproven)
+            or "_every step carries a test reference_"
+        )
+    )
+
+    effects = []
+    for event in events:
+        if event.type == "plan_created" and event.step_seq is not None:
+            for eff in event.payload.get("effects") or []:
+                effects.append(f"- step {event.step_seq}: {eff.get('type')} {eff.get('resource')}")
+    sections.append(
+        "\n### What external effects occurred?\n" + ("\n".join(effects) or "_none recorded_")
+    )
+
+    sections.append(
+        "\n### How is this undone?\n"
+        + (
+            "```\n" + "\n".join(rewind_plan_lines) + "\n```"
+            if rewind_plan_lines
+            else "_not computed (pass --config to include a real `belay rewind --dry-run` plan)_"
+        )
+    )
+
+    if evidence_note:
+        sections.append(evidence_note)
+
+    return "\n".join(sections)

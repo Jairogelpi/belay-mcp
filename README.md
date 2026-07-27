@@ -179,7 +179,16 @@ belay rewind s_abc123 --intent cache-refactor --keep auth-fix --by jairo
   Post-hoc, not a pre-execution gate: the session already ran the full
   governed pipeline (contract → plan → policy → approval → saga commit);
   this turns that into a paper trail reviewable the way a human's change
-  would be, backed by evidence rather than a trust-me summary.
+  would be, backed by evidence rather than a trust-me summary. With
+  `--intent-contract` and `--config`, the PR body becomes **proof-carrying**
+  — it answers a reviewer's real questions instead of just listing files:
+  What was asked? (the contract's `intent`) What changed without being
+  asked? (files outside `allowed_scope`) What new behavior exists? (causal
+  graph, per file) What was verified / what couldn't be proven?
+  (`_belay_test_ref` present or not, per step) What external effects
+  occurred? (each step's declared effects) How is this undone? (a real
+  `belay rewind --dry-run` plan). Any section without enough data says so
+  explicitly (`_not declared_`, `_not computed_`) instead of guessing.
 
 ```bash
 belay export-pr s_ed182c2544f8 --repo ./infra-repo --db belay.db \
