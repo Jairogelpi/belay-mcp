@@ -10,9 +10,11 @@ from __future__ import annotations
 import sys
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
+
+from belay.errors import BelayError
 
 if TYPE_CHECKING:
     from belay.approvals.queue import ApprovalQueue
@@ -338,6 +340,144 @@ def dashboard(
     html = render_dashboard(db)
     Path(out).write_text(html, encoding="utf-8")
     typer.echo(f"wrote {out}")
+
+
+@app.command()
+def replay(
+    session_id: str = typer.Argument(..., help="Real session to replay (spec §9)."),
+    at_step: int = typer.Option(
+        ..., "--at-step", help="step_seq whose args are overridden (spec §9.1 step_seq)."
+    ),
+    override: str = typer.Option(
+        ..., "--override", help="JSON object merged into that step's original args."
+    ),
+    by: str = typer.Option(..., "--by", help="Identity (E14) driving this replay."),
+    config: str = typer.Option("belay.wrap.json", "--config", "-c", help="Wrap config path."),
+    policy: str = typer.Option(
+        "", "--policy", help="Policy document path (spec §6.1); default is the built-in policy."
+    ),
+    resume: str = typer.Option(
+        "",
+        "--resume",
+        help="A replay session_id from a previous `belay replay` run that paused for "
+        "approval -- continue it from its next step instead of starting a new one "
+        "(approve/reject the pause first via `belay approvals`).",
+    ),
+) -> None:
+    """Re-execute a real session against the live upstream, one step overridden.
+
+    Unlike `belay counterfactual` (plan-v2 E12, purely offline, never calls
+    the real upstream), this drives a brand-new session through the real
+    `Lifecycle` -- resolve -> plan -> policy -> approval -> execute -- for
+    every step the original session attempted (`plan_created` events, in
+    `step_seq` order), with `--override` merged into the one step named by
+    `--at-step`; every other step reuses its originally recorded args
+    verbatim. It is real execution, not a simulation: if a step pauses for
+    approval or fails for real, replay stops there and reports it rather
+    than guessing what happens next -- steps after that point are never
+    attempted. The new session is fully real and ledgered (`initiated_by`
+    records the source session and driving identity for lineage), never
+    written back onto the original session's chain.
+    """
+    import json as jsonlib
+    import os
+    import uuid as uuidlib
+
+    import anyio
+
+    from belay.contracts.loader import load_contract_set
+    from belay.ledger.store import LedgerStore
+    from belay.policy.model import default_policy, load_policy
+    from belay.proxy.config import WrapConfig
+    from belay.proxy.lifecycle import Lifecycle
+    from belay.proxy.upstream import connect_stdio
+
+    override_args = jsonlib.loads(override)
+    if not isinstance(override_args, dict):
+        typer.echo("error: --override must be a JSON object", err=True)
+        raise typer.Exit(code=1)
+
+    wrap_config = WrapConfig.load(config)
+    contract_set = load_contract_set(wrap_config.contracts)
+    policy_doc = load_policy(policy) if policy else default_policy()
+    ledger = LedgerStore(f"sqlite:///{Path(wrap_config.db).resolve().as_posix()}")
+
+    original_events = ledger.read(session_id)
+    steps: dict[int, tuple[str, dict[str, Any]]] = {}
+    for event in original_events:
+        if event.type == "plan_created" and event.step_seq is not None:
+            steps.setdefault(event.step_seq, (event.payload["tool"], event.payload["args"]))
+    if not steps:
+        typer.echo(f"error: no plan_created steps found for session {session_id!r}", err=True)
+        raise typer.Exit(code=1)
+    if at_step not in steps:
+        typer.echo(
+            f"error: --at-step {at_step} not in session's steps ({sorted(steps)})", err=True
+        )
+        raise typer.Exit(code=1)
+
+    resumed_through = 0
+    if resume:
+        new_session_id = resume
+        prior_events = ledger.read(new_session_id)
+        if not prior_events:
+            typer.echo(f"error: no such replay session to resume: {resume!r}", err=True)
+            raise typer.Exit(code=1)
+        resumed_through = max((e.step_seq or 0) for e in prior_events)
+    else:
+        new_session_id = f"replay_{uuidlib.uuid4().hex[:12]}"
+
+    async def _main() -> None:
+        async with connect_stdio(
+            wrap_config.upstream.command, wrap_config.upstream.args, env=dict(os.environ)
+        ) as upstream:
+            lifecycle = Lifecycle(
+                contract_set=contract_set,
+                unsafe_passthrough_tools=frozenset(wrap_config.unsafe_passthrough),
+                ledger=ledger,
+                session_id=new_session_id,
+                policy=policy_doc,
+            )
+            if resume:
+                lifecycle._step_seq = resumed_through  # noqa: SLF001
+                typer.echo(f"resuming {new_session_id} after step {resumed_through}")
+            else:
+                lifecycle.start_session(
+                    initiated_by=f"replay:{by}", on_behalf_of=f"replay-of:{session_id}"
+                )
+                typer.echo(f"new session: {new_session_id} (replay of {session_id})")
+
+            async def executor(tool: str, args: dict[str, Any]) -> Any:
+                return await upstream.call_tool(tool, args)
+
+            for step_seq in sorted(steps):
+                if step_seq <= resumed_through:
+                    continue
+                tool, args = steps[step_seq]
+                if step_seq == at_step:
+                    args = {**args, **override_args}
+                    typer.echo(f"  step {step_seq}: {tool} (OVERRIDDEN args={args})")
+                else:
+                    typer.echo(f"  step {step_seq}: {tool}")
+                annotations = upstream.annotations_for(tool)
+                read_only_hint = bool(annotations and annotations.readOnlyHint)
+                try:
+                    result = await lifecycle.govern_and_execute(
+                        tool, args, read_only_hint=read_only_hint, executor=executor
+                    )
+                except BelayError as exc:
+                    typer.echo(f"    -> stopped: {exc.to_dict()}", err=True)
+                    return
+                if isinstance(result, dict) and result.get("status") == "pending_approval":
+                    typer.echo(
+                        f"    -> pending_approval (approval={result['approval_id']}) -- resolve "
+                        f"with `belay approvals list/approve/reject --db {wrap_config.db}`, "
+                        "replay stops here"
+                    )
+                    return
+                typer.echo("    -> committed")
+
+    anyio.run(_main)
 
 
 @app.command(name="draft-contracts")

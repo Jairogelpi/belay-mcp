@@ -111,6 +111,28 @@ conformance:
   live server" below.
 - **`belay dashboard`** renders a static HTML snapshot of a ledger's
   sessions/steps/approvals — see "Dashboard" below.
+- **`belay replay`** re-executes a real session against the live upstream
+  with one step's args overridden, producing a brand-new, fully real,
+  ledgered session — not a simulation. Unlike `belay counterfactual` (E12,
+  purely offline, never touches a real upstream), this is genuine
+  "do it again, but differently starting here" debugging: every step from
+  the original session's `plan_created` events replays in order, through
+  the real `Lifecycle` (resolve → plan → policy → approval → execute); if a
+  step pauses for approval, replay stops honestly and reports it —
+  `--resume <replay_session_id>` continues after you resolve the pause via
+  `belay approvals`.
+
+```bash
+belay replay s_5a814ae53684 --at-step 3 --override '{"before_year": 2021}' \
+  --by jairo --config belay.wrap.json
+# -> new session: replay_9b37580f2501 (replay of s_5a814ae53684)
+#      step 1: crm.import_records
+#        -> pending_approval (approval=ap_...) -- replay stops here
+belay approvals approve ap_... --by jairo --db belay.db
+belay replay s_5a814ae53684 --at-step 3 --override '{"before_year": 2021}' \
+  --by jairo --config belay.wrap.json --resume replay_9b37580f2501
+# -> resumes at step 2, applies the override at step 3, pauses/commits for real
+```
 
 ## How it fits
 
