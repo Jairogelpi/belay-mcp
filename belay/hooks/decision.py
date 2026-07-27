@@ -19,6 +19,14 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+#: Bumped whenever the allowlist or metacharacter rules change. Folded into
+#: an approval's plan_id (belay/hooks/gate.py) so a human's approval, granted
+#: under one ruleset, is never silently reinterpreted under a different one
+#: -- a rule change could turn a previously-PAUSE command into ALLOW or vice
+#: versa, and an approval minted before that change shouldn't be assumed to
+#: still mean the same thing.
+DECISION_LOGIC_VERSION = 1
+
 
 class Verdict(str, Enum):
     ALLOW = "allow"

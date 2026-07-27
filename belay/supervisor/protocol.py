@@ -28,7 +28,14 @@ SCHEMA_VERSION = 1
 
 Phase = Literal["pre", "post"]
 Surface = Literal["shell", "file", "mcp", "other"]
-TrustTier = Literal["T0", "T1", "T2"]
+#: Spec §5.2 defines T0/T1/T2. `"UNKNOWN"` is spec §1's separate state
+#: ("Belay cannot establish the state safely. It MUST never render this as
+#: green or protected") -- included here because an adapter that hasn't
+#: actually been verified against a real host binary and pinned version
+#: range (spec §7.2's conformance suite; TRUTH-004: "PROTECTED only after
+#: its pinned-version end-to-end bypass suite passes") has no honest T0/T1/T2
+#: answer to give. See `claude_code_adapter.py`'s `_trust_tier()`.
+TrustTier = Literal["T0", "T1", "T2", "UNKNOWN"]
 
 
 @dataclass(frozen=True)

@@ -15,22 +15,32 @@ after. This module never imports or knows about any specific host.
 No new schema: `ApprovalQueue.request()` takes a free-form `session_id`/
 `plan_id`/`plan` dict, so this reuses it as-is. `session_id` comes straight
 from the normalized event's `host_session_id` -- no separate "hook session"
-concept needed. `plan_id` is a deterministic hash of the exact command
-string, so a second attempt at the identical command finds the same
-approval item instead of opening a new one -- and once a human approves it,
-every future identical command in that session is allowed without asking
-again (deliberate: the human approved *this exact string*, not "trust this
-agent from now on").
+concept needed. `plan_id` is a deterministic hash of the full context the
+command was proposed in (host, session, tool, command, cwd, repo HEAD, and
+the decision-logic ruleset version -- see `_plan_id_for_event`), not the
+command text alone: an earlier version hashed only the command string,
+which a P0 review correctly flagged -- it let one approval silently cover
+the identical command string run in a *different* repository, branch,
+directory, or session than the one a human actually approved it for. A
+second attempt at the identical command **in the identical context** finds
+the same approval item instead of opening a new one -- and once a human
+approves it, every future identical (command, context) pair is allowed
+without asking again (deliberate: the human approved *this exact
+situation*, not "trust this agent from now on").
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from belay.approvals.queue import ApprovalQueue
-from belay.hooks.decision import Verdict, classify_bash
+from belay.hooks.decision import DECISION_LOGIC_VERSION, Verdict, classify_bash
+from belay.supervisor.addressing import belay_home
 from belay.supervisor.protocol import HookEvent
 
 
@@ -41,8 +51,79 @@ class GateDecision:
     approval_id: str | None = None
 
 
-def _plan_id_for_command(command: str) -> str:
-    return "bash:" + hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
+def _resolve_arg(token: str, cwd: str | None) -> Path | None:
+    try:
+        candidate = Path(os.path.expanduser(token))
+        if candidate.is_absolute():
+            return candidate.resolve()
+        base = Path(cwd) if cwd else Path.cwd()
+        return (base / candidate).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _is_under(path: Path, base: Path) -> bool:
+    # Path.relative_to is case-sensitive; Windows filesystems generally
+    # aren't, so also compare normcased strings -- a command spelling the
+    # path with different case must not slip past this on Windows.
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        p, b = os.path.normcase(str(path)), os.path.normcase(str(base))
+        return p == b or p.startswith(b + os.sep)
+
+
+def _touches_belay_home(command: str, cwd: str | None) -> bool:
+    """Defense in depth, checked only after `classify_bash` has already
+    allowlisted a command: even a "safe read" command must never be allowed
+    to read belay's own internal paths -- the capability token, the private
+    approvals database (`belay/supervisor/addressing.py`'s `belay_home()`).
+    A P0 review correctly pointed out that "outside the project directory"
+    does not mean "outside the OS user's own read permissions": Claude
+    Code's Bash tool runs as that same user, so an otherwise-innocuous `cat`
+    could be pointed at `~/.belay/keys/....key` and exfiltrate the token.
+
+    Best-effort, not foolproof -- said plainly rather than implied (spec
+    TRUTH-010: T1 does not resist an arbitrary same-user process; this
+    closes the *obvious* path-argument case, not every conceivable one, e.g.
+    reading it indirectly through a symlink this check doesn't happen to
+    resolve, or a language runtime's own file APIs called from a command
+    this classifier didn't recognize as reading a path at all). Tokenizing
+    on whitespace is safe here specifically because `classify_bash` already
+    rejected any shell metacharacter/quoting complexity before this ever
+    runs -- there's no chaining or substitution left to misparse.
+    """
+    home = belay_home().resolve()
+    for token in command.split():
+        if token.startswith("-"):
+            continue
+        resolved = _resolve_arg(token, cwd)
+        if resolved is not None and _is_under(resolved, home):
+            return True
+    return False
+
+
+def _plan_id_for_event(event: HookEvent, command: str) -> str:
+    """Binds an approval to the full context it was granted in, not just the
+    command text: host, session, tool, the command itself, cwd, the
+    repository's real git HEAD (see `claude_code_adapter._repo_identity`),
+    and the decision-logic ruleset version (so a rule change never silently
+    reinterprets an approval granted under the old rules)."""
+    material = json.dumps(
+        {
+            "decision_logic_version": DECISION_LOGIC_VERSION,
+            "host": event.host,
+            "host_session_id": event.host_session_id,
+            "tool_name": event.tool_name,
+            "command": command,
+            "cwd": event.cwd,
+            "repo_identity": event.repo_identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "bash:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
 def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
@@ -78,9 +159,16 @@ def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
 
     decision = classify_bash(command)
     if decision.verdict is Verdict.ALLOW:
+        if _touches_belay_home(command, event.cwd):
+            return GateDecision(
+                "deny",
+                "belay: command argument resolves into belay's own private storage -- "
+                "denying even though the command itself is otherwise allowlisted "
+                "(read access to belay's capability token/approvals data is never allowed)",
+            )
         return GateDecision("allow", f"belay: {decision.reason}")
 
-    plan_id = _plan_id_for_command(command)
+    plan_id = _plan_id_for_event(event, command)
     existing = queue.for_plan(plan_id)
 
     if existing is not None and existing.state == "approved":

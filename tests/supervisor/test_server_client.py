@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 from belay.approvals.queue import ApprovalQueue
-from belay.hooks.gate import _plan_id_for_command
 from belay.supervisor.addressing import SupervisorIdentity, supervisor_identity
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.protocol import SupervisorRequest, SupervisorResponse
@@ -200,11 +199,14 @@ def test_duplicate_event_id_returns_cached_response_even_after_approval(
     assert first.payload["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     # Approve the underlying item out-of-band, as `belay approvals approve`
-    # (a separate process) would against the same db file.
+    # (a separate process) would against the same db file. Found via
+    # queue.list() rather than recomputing gate.py's internal plan_id hash
+    # formula -- that's an implementation detail this test shouldn't be
+    # coupled to.
     queue = ApprovalQueue(db_url=f"sqlite:///{db_path}")
-    item = queue.for_plan(_plan_id_for_command(command))
-    assert item is not None
-    queue.approve(item.approval_id, approved_by="jairo")
+    pending = [i for i in queue.list() if i.state == "pending"]
+    assert len(pending) == 1
+    queue.approve(pending[0].approval_id, approved_by="jairo")
 
     # Same event_id again: must still return the ORIGINAL (deny) response,
     # not re-evaluate and see the now-approved state.

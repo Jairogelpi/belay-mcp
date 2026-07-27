@@ -15,6 +15,7 @@ shaped like the old raw-payload API.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from belay.approvals.queue import ApprovalQueue
@@ -34,13 +35,16 @@ def queue(clock: FixedClock) -> ApprovalQueue:
     return ApprovalQueue(clock=clock)
 
 
-def _event(command: str, session_id: str = "sess-1", tool_name: str = "Bash") -> HookEvent:
+def _event(
+    command: str, session_id: str = "sess-1", tool_name: str = "Bash", cwd: str = "/repo-a"
+) -> HookEvent:
     raw = {
         "session_id": session_id,
         "hook_event_name": "PreToolUse",
         "tool_name": tool_name,
         "tool_input": {"command": command},
-        "tool_use_id": f"toolu_{abs(hash((session_id, tool_name, command)))}",
+        "tool_use_id": f"toolu_{abs(hash((session_id, tool_name, command, cwd)))}",
+        "cwd": cwd,
     }
     return normalize(raw, installation_id="test-install")
 
@@ -160,6 +164,43 @@ def test_post_phase_event_is_denied_not_crashed(queue: ApprovalQueue) -> None:
     assert "post-phase" in result.reason
 
 
+def test_same_command_different_cwd_gets_independent_approvals(queue: ApprovalQueue) -> None:
+    """The P0 fix itself: plan_id used to be sha256(command) alone, so
+    approving 'rm -rf /tmp/x' in one directory would silently also allow
+    the identical string run from a completely different directory/repo.
+    Now cwd (and repo HEAD, session, host, tool) are part of the binding."""
+    event_a = _event("rm -rf /tmp/x", cwd="/repo-a")
+    event_b = _event("rm -rf /tmp/x", cwd="/repo-b")
+
+    result_a = evaluate(event_a, queue)
+    result_b = evaluate(event_b, queue)
+    assert result_a.verdict == "deny"
+    assert result_b.verdict == "deny"
+    assert result_a.approval_id != result_b.approval_id
+    assert len(queue.list()) == 2
+
+    # Approving the /repo-a item must NOT allow the identical command in /repo-b.
+    queue.approve(result_a.approval_id, approved_by="jairo")
+    still_denied = evaluate(event_b, queue)
+    assert still_denied.verdict == "deny"
+
+    now_allowed = evaluate(event_a, queue)
+    assert now_allowed.verdict == "allow"
+
+
+def test_same_command_different_session_gets_independent_approvals(queue: ApprovalQueue) -> None:
+    event_a = _event("rm -rf /tmp/x", session_id="session-a")
+    event_b = _event("rm -rf /tmp/x", session_id="session-b")
+
+    result_a = evaluate(event_a, queue)
+    result_b = evaluate(event_b, queue)
+    assert result_a.approval_id != result_b.approval_id
+
+    queue.approve(result_a.approval_id, approved_by="jairo")
+    assert evaluate(event_b, queue).verdict == "deny"
+    assert evaluate(event_a, queue).verdict == "allow"
+
+
 def test_missing_event_id_is_denied_as_ambiguous(queue: ApprovalQueue) -> None:
     raw = {
         "session_id": "s",
@@ -171,3 +212,85 @@ def test_missing_event_id_is_denied_as_ambiguous(queue: ApprovalQueue) -> None:
     result = evaluate(normalize(raw, installation_id="test-install"), queue)
     assert result.verdict == "deny"
     assert "ambiguous identity" in result.reason
+
+
+class TestBelayHomeProtection:
+    """The P0 fix: an otherwise-allowlisted "safe read" command must never
+    be allowed to read belay's own private storage (the capability token,
+    the approvals database) -- even though that storage lives outside the
+    project, Claude Code's Bash tool runs as the same OS user and can reach
+    anything that user can read."""
+
+    @pytest.fixture(autouse=True)
+    def _belay_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        home = tmp_path / "belay-home"
+        monkeypatch.setenv("BELAY_HOME", str(home))
+        (home / "keys").mkdir(parents=True)
+        (home / "keys" / "install1.key").write_bytes(b"secret-token-bytes")
+        return home
+
+    def test_cat_of_the_capability_key_is_denied_not_allowed(
+        self, queue: ApprovalQueue, _belay_home: Path
+    ) -> None:
+        key_path = _belay_home / "keys" / "install1.key"
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": f"cat {key_path}"},
+            "tool_use_id": "toolu_1",
+        }
+        result = evaluate(normalize(raw, installation_id="test-install"), queue)
+        assert result.verdict == "deny"
+        assert "private storage" in result.reason
+        assert queue.list() == []  # never queued as a normal pause either -- denied outright
+
+    def test_cat_of_an_unrelated_file_is_still_allowed(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "README.md"
+        other.write_text("hello", encoding="utf-8")
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": f"cat {other}"},
+            "tool_use_id": "toolu_1",
+        }
+        result = evaluate(normalize(raw, installation_id="test-install"), queue)
+        assert result.verdict == "allow"
+
+    def test_relative_path_resolved_against_cwd_is_also_caught(
+        self, queue: ApprovalQueue, _belay_home: Path
+    ) -> None:
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat keys/install1.key"},
+            "tool_use_id": "toolu_1",
+            "cwd": str(_belay_home),
+        }
+        result = evaluate(normalize(raw, installation_id="test-install"), queue)
+        assert result.verdict == "deny"
+        assert "private storage" in result.reason
+
+    def test_reading_a_sibling_of_belay_home_is_not_falsely_blocked(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        """Guards against an overly broad prefix check -- a directory that
+        merely starts with the same characters as belay_home (but isn't
+        actually inside it) must not be treated as belay-internal."""
+        sibling = Path(str(tmp_path / "belay-home") + "-not-actually-it")
+        sibling.mkdir()
+        target = sibling / "innocent.txt"
+        target.write_text("hi", encoding="utf-8")
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": f"cat {target}"},
+            "tool_use_id": "toolu_1",
+        }
+        result = evaluate(normalize(raw, installation_id="test-install"), queue)
+        assert result.verdict == "allow"

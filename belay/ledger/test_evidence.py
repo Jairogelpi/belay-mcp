@@ -94,7 +94,7 @@ def _run_argv(argv: list[str], cwd: str | None, timeout: float) -> tuple[int, st
         return 127, f"(runner not found: {exc})"
 
 
-def _git_context(cwd: str | None) -> GitContext:
+def git_context(cwd: str | None) -> GitContext:
     def _git(*args: str) -> str | None:
         result = subprocess.run(
             ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10
@@ -128,7 +128,7 @@ def run_command(
         output_hash=output_hash,
         duration_ms=duration_ms,
         passed=exit_code == 0,
-        git=_git_context(cwd),
+        git=git_context(cwd),
         verified_by=verified_by,
     )
 
@@ -161,6 +161,6 @@ def run_declared_test(
         output_hash=output_hash,
         duration_ms=duration_ms,
         passed=exit_code == 0,
-        git=_git_context(cwd),
+        git=git_context(cwd),
         verified_by=verified_by,
     )

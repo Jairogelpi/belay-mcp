@@ -1,0 +1,112 @@
+"""belay/hooks/claude_code_adapter.py: normalize() and its git HEAD capture."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+from belay.hooks.claude_code_adapter import _repo_identity, normalize
+
+
+def _init_repo(path: Path) -> str:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / "f.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def test_repo_identity_returns_real_head_sha(tmp_path: Path) -> None:
+    head = _init_repo(tmp_path)
+    assert _repo_identity(str(tmp_path)) == head
+    assert len(head) == 40  # a real git SHA-1, not a placeholder
+
+
+def test_repo_identity_changes_after_a_new_commit(tmp_path: Path) -> None:
+    first_head = _init_repo(tmp_path)
+    (tmp_path / "g.txt").write_text("more\n", encoding="utf-8")
+    subprocess.run(["git", "add", "g.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "second"], cwd=tmp_path, check=True)
+
+    second_head = _repo_identity(str(tmp_path))
+    assert second_head != first_head
+
+
+def test_repo_identity_is_none_outside_a_git_repo(tmp_path: Path) -> None:
+    non_repo = tmp_path / "not-a-repo"
+    non_repo.mkdir()
+    assert _repo_identity(str(non_repo)) is None
+
+
+def test_repo_identity_is_none_for_missing_cwd() -> None:
+    assert _repo_identity(None) is None
+    assert _repo_identity("") is None
+
+
+def test_repo_identity_does_not_raise_for_nonexistent_directory() -> None:
+    assert _repo_identity("/this/path/does/not/exist/anywhere") is None
+
+
+def test_normalize_uses_real_repo_identity(tmp_path: Path) -> None:
+    head = _init_repo(tmp_path)
+    raw = {
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_1",
+        "cwd": str(tmp_path),
+    }
+    event = normalize(raw, installation_id="install1")
+    assert event.repo_identity == head
+
+
+@pytest.mark.parametrize(
+    "tool_name,expected_surface",
+    [
+        ("Bash", "shell"),
+        ("mcp__filesystem__read_file", "mcp"),
+        ("Edit", "file"),
+        ("Write", "file"),
+        ("Read", "file"),
+        ("NotebookEdit", "file"),
+        ("SomethingElse", "other"),
+    ],
+)
+def test_surface_classification(tool_name: str, expected_surface: str) -> None:
+    raw = {
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {},
+        "tool_use_id": "toolu_1",
+    }
+    event = normalize(raw, installation_id="install1")
+    assert event.surface == expected_surface
+
+
+def test_normalize_rejects_unrecognized_hook_event_name() -> None:
+    with pytest.raises(ValueError, match="unrecognized"):
+        normalize({"hook_event_name": "SomethingWeird"}, installation_id="i")
+
+
+def test_trust_tier_is_honestly_unknown_not_a_hardcoded_t1() -> None:
+    """P0 fix: no pinned-version conformance suite (spec §7.2) has run
+    against a real Claude Code binary yet, so claiming T1 unconditionally
+    would be an overclaim (TRUTH-004). Must report UNKNOWN until that
+    verification actually exists -- not silently claim proven enforcement."""
+    raw = {
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_1",
+    }
+    event = normalize(raw, installation_id="install1")
+    assert event.trust_tier == "UNKNOWN"
