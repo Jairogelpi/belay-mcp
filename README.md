@@ -584,6 +584,36 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   avoided elsewhere (shipping an unverified guess as a working
   integration) — so this stops at tested normalize/render logic, not a
   live gate.
+- **OpenCode adapter (E18.6): normalize/render only, and for a different
+  reason than Codex.** `belay/hooks/opencode_adapter.py` normalizes real
+  `tool.execute.before`/`tool.execute.after` calls into the same
+  `HookEvent`; the Bash classifier runs against an OpenCode-shaped event
+  unmodified, same as it does for Codex. Verified two ways against the
+  actual installed `opencode-ai` binary (OpenCode ships no schema command
+  like Codex's, so docs alone wouldn't have been enough): a real
+  already-installed third-party plugin
+  (`~/.config/opencode/plugins/engram.ts`) uses `tool.execute.after`'s
+  exact shape in production, and the compiled binary itself was searched
+  for the literal `W.trigger("tool.execute.before"/"after", ...)` call
+  sites, confirming the `(input, output)` argument shape directly from the
+  shipped code. The gap here isn't a missing proxy layer (Codex's problem)
+  — it's that OpenCode's hooks are plain **in-process function calls** made
+  by the binary into a TypeScript/JavaScript plugin module; there is no
+  Python-reachable seam at all. Gating it for real means shipping an
+  actual TS plugin package that calls out to belay's supervisor — a new
+  language and packaging surface for this repo, not built here. Whether a
+  plugin can actually *deny* a call by throwing inside
+  `tool.execute.before` looks architecturally plausible from the bundle's
+  control flow but was not proven against a live session.
+- **Cursor: skipped, not guessed.** The installed `cursor` binary on this
+  machine is only the GUI editor's launcher CLI (open a file, diff, add an
+  MCP server to its config) — it exposes no way to headlessly verify
+  Cursor Agent's actual tool-call hook payload shape the way Codex's own
+  schema generator or OpenCode's installed plugin + compiled binary did.
+  Rather than write an adapter against docs alone with no way to check it
+  against real behavior (exactly what this project avoided doing for
+  Claude Code's PostToolUse field names until the ambiguity could at least
+  be flagged honestly), Cursor has no adapter yet.
 
 ### Wrapping a non-Python MCP server
 
@@ -745,7 +775,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only (Codex not yet live) |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only (Codex/OpenCode adapters built but not live; Cursor not attempted) |
 
 ## Conformance
 
