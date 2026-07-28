@@ -565,6 +565,25 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   Agent Gate hook is even installed for that host; `doctor` lists every
   other server name found so that exposure isn't invisible, whether or not
   belay itself is registered there.
+- **Codex adapter (E18.5): normalize/render only, not wired to a live
+  session, said plainly rather than oversold.** `belay/hooks/codex_adapter.py`
+  normalizes Codex's own `ExecCommandApprovalParams`/`ApplyPatchApprovalParams`
+  approval-request shapes into the exact same host-agnostic `HookEvent`
+  Claude Code events become — the existing Bash classifier and file-edit
+  gate run against a Codex-shaped event completely unmodified, confirming
+  the host-agnostic design pays off. Every field name was read straight
+  from `codex app-server generate-json-schema --experimental` run against
+  the real installed `codex-cli` binary (not guessed from docs). What's
+  *not* here yet: Codex's approval mechanism is a bidirectional JSON-RPC
+  protocol inside a long-lived session (`codex app-server`), not a
+  one-shot subprocess hook like Claude Code's — actually intercepting it
+  live means belay driving or transparently proxying that whole session,
+  materially more infrastructure than `belay hooks run`, closer in shape
+  to `belay wrap`'s MCP proxy. Building that without running it end-to-end
+  against a real session would repeat the exact mistake this project has
+  avoided elsewhere (shipping an unverified guess as a working
+  integration) — so this stops at tested normalize/render logic, not a
+  live gate.
 
 ### Wrapping a non-Python MCP server
 
@@ -726,7 +745,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only (Codex not yet live) |
 
 ## Conformance
 
