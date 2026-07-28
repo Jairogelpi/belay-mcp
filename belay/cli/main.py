@@ -894,7 +894,8 @@ def hooks_install(
     typer.echo(
         f"approvals queued by this hook land in {data_path} (private -- outside this "
         f"project, so the agent this gates can't reach it directly) -- review with "
-        f"`belay approvals list --db {data_path}`"
+        f"`belay hooks approvals list --db {db}` (NOT `belay approvals`, which opens "
+        f"--db as a literal file rather than this project's identity anchor)"
     )
     typer.echo("restart the agent for the hook to take effect")
 

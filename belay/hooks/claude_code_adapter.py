@@ -31,15 +31,23 @@ ADAPTER_VERSION = "claude-code/1"
 #: An earlier version hardcoded `trust_tier="T1"` on every event -- a P0
 #: review correctly called that an overclaim: spec TRUTH-004 says a host
 #: integration is PROTECTED "only after its pinned-version end-to-end
-#: bypass suite passes" (spec §7.2), and no such suite has run against a
-#: real Claude Code binary yet (that's E18.7, separate future work; this
-#: gate's own extensive local testing this session is real evidence the
-#: *mechanism* works, but isn't the pinned-version conformance suite the
-#: spec specifically requires before claiming T1). Reporting `"UNKNOWN"`
-#: until that exists is the honest answer, not `"T0"` (which would
-#: incorrectly claim no pre-execution blocking happens at all -- it does)
-#: or a bare `"T1"` (which would claim more than has actually been proven).
-_VERIFIED_TRUST_TIER: TrustTier | None = None
+#: bypass suite passes" (spec §7.2). That suite now exists and passes:
+#: `tests/hooks/test_live_conformance.py` (E18.7) spawns the real,
+#: installed `claude` CLI (pinned to `PINNED_CLAUDE_VERSION` there --
+#: currently 2.1.219, skips rather than claiming conformance against an
+#: unverified version), with belay's hooks actually installed and Claude's
+#: own permission layer bypassed so the result is attributable to belay's
+#: hook alone, and confirms two independent ways per scenario: an
+#: unrecognized Bash command's side effect genuinely never happens on
+#: disk (not just "the model said it didn't run it") and a real pending
+#: item lands in the actual approval queue, while a safe command still
+#: reaches the real host and returns real output. That is the pinned-
+#: version end-to-end bypass suite spec §7.2 asks for, so `"T1"` here is
+#: no longer an overclaim the way the earlier hardcoded version was --
+#: it's specifically scoped to Claude Code's Bash surface (what the suite
+#: actually exercises), not a claim about Edit/Write/MCP surfaces or any
+#: other host.
+_VERIFIED_TRUST_TIER: TrustTier | None = "T1"
 
 
 def _trust_tier() -> TrustTier:

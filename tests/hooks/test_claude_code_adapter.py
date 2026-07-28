@@ -96,11 +96,18 @@ def test_normalize_rejects_unrecognized_hook_event_name() -> None:
         normalize({"hook_event_name": "SomethingWeird"}, installation_id="i")
 
 
-def test_trust_tier_is_honestly_unknown_not_a_hardcoded_t1() -> None:
-    """P0 fix: no pinned-version conformance suite (spec §7.2) has run
-    against a real Claude Code binary yet, so claiming T1 unconditionally
-    would be an overclaim (TRUTH-004). Must report UNKNOWN until that
-    verification actually exists -- not silently claim proven enforcement."""
+def test_trust_tier_is_t1_now_that_the_conformance_suite_actually_passed() -> None:
+    """P0 fix (original): no pinned-version conformance suite (spec §7.2)
+    had run against a real Claude Code binary, so claiming T1
+    unconditionally was an overclaim (TRUTH-004) -- it reported UNKNOWN
+    instead. E18.7 (tests/hooks/test_live_conformance.py) is that suite,
+    it exists now and passed against the pinned real `claude` binary, so
+    T1 here reflects real evidence, not a hardcoded assumption -- the
+    same honesty bar applied in the other direction. If this ever needs
+    to go back to UNKNOWN (an unpinned claude upgrade, a suite
+    regression), that's a deliberate edit to
+    `claude_code_adapter._VERIFIED_TRUST_TIER`, not this test's problem
+    to guess at."""
     raw = {
         "session_id": "s1",
         "hook_event_name": "PreToolUse",
@@ -109,7 +116,7 @@ def test_trust_tier_is_honestly_unknown_not_a_hardcoded_t1() -> None:
         "tool_use_id": "toolu_1",
     }
     event = normalize(raw, installation_id="install1")
-    assert event.trust_tier == "UNKNOWN"
+    assert event.trust_tier == "T1"
 
 
 class TestPostToolUseResultExtraction:

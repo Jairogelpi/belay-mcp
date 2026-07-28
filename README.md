@@ -507,11 +507,12 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   correlation id, phase, surface, normalized tool identity, structured
   args, cwd/repo identity, OS user obtained independently of the payload,
   monotonic + wall-clock timestamps) before the classifier ever sees it —
-  adding Codex later is a new adapter module, not a rewrite of the decision
-  logic in `belay/hooks/gate.py`. `trust_tier` honestly reports `UNKNOWN`
-  until a real pinned-version conformance suite (spec §7.2) exists to back
-  a `T1` claim — this gate's own extensive local/hard-kill testing is real
-  evidence the *mechanism* works, but isn't that suite.
+  adding a host is a new adapter module, not a rewrite of the decision
+  logic in `belay/hooks/gate.py`. `trust_tier` reports `T1` for Claude
+  Code's Bash surface (E18.7, below) — every other host adapter still
+  honestly reports `UNKNOWN` until each gets its own pinned-version
+  conformance suite; a claim this project has been careful not to make
+  early elsewhere shouldn't be made early here either.
 - **`PostToolUse` records real evidence, into the same evidence system as
   the MCP path** (E18.2) — once the Bash tool actually runs, the supervisor
   appends the result (exit code, a computed duration correlated against the
@@ -614,6 +615,30 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   against real behavior (exactly what this project avoided doing for
   Claude Code's PostToolUse field names until the ambiguity could at least
   be flagged honestly), Cursor has no adapter yet.
+
+#### Live conformance (E18.7): `trust_tier="T1"` for Claude Code's Bash surface, earned not assumed
+
+`tests/hooks/test_live_conformance.py` is the spec §7.2 "pinned-version
+end-to-end bypass suite" TRUTH-004 requires before a host can claim `T1` —
+opt-in only (`pytest tests/hooks/test_live_conformance.py -m
+live_conformance --no-cov`), never part of the default suite or CI, since
+it spawns the real, installed `claude` CLI and spends real Anthropic API
+usage. Pinned to the exact `claude --version` (`PINNED_CLAUDE_VERSION`)
+it was verified against — a mismatch **skips**, never silently claims
+conformance against a binary the suite never actually ran against.
+
+What it actually proves, against a real session with belay's hooks
+installed and Claude's own permission layer bypassed (so any block is
+attributable to belay's hook, not Claude's separate permission prompt):
+an unrecognized Bash command's side effect genuinely never happens on
+disk — not "the model said it didn't run it" — while a real pending item
+lands in the actual approval queue, and a safe command still reaches the
+real host and returns real output (bypass resistance that doesn't just
+mean "blocks everything"). `belay/hooks/claude_code_adapter.py`'s
+`_VERIFIED_TRUST_TIER` is `"T1"` now specifically because this suite
+exists and passed — scoped to Claude Code's Bash surface, since that's
+what it exercises, not a blanket claim about Edit/Write/MCP surfaces or
+any other host (those still honestly report `UNKNOWN`).
 
 ### Wrapping a non-Python MCP server
 
@@ -775,7 +800,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code only (Codex/OpenCode adapters built but not live; Cursor not attempted) |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone. E18.7: `tests/hooks/test_live_conformance.py`, spec §7.2's pinned-version end-to-end bypass suite, opt-in only (spends real Anthropic API usage) — spawns the real installed `claude` CLI with belay's hooks actually installed, confirms a denied Bash command's side effect genuinely never happens on disk (not just "the model said so") while a safe one still works normally; `claude_code_adapter._VERIFIED_TRUST_TIER` is now `"T1"` for Claude Code's Bash surface specifically, because this suite exists and passed, not asserted ahead of the evidence | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code Bash surface is T1-verified; Edit/Write/MCP surfaces and Codex/OpenCode adapters remain UNKNOWN; Cursor not attempted |
 
 ## Conformance
 

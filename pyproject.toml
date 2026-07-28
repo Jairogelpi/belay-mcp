@@ -84,10 +84,11 @@ strict = false
 ignore_errors = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=belay --cov-report=term-missing -m \"not slow\""
+addopts = "--cov=belay --cov-report=term-missing -m \"not slow and not live_conformance\""
 testpaths = ["tests"]
 markers = [
     "slow: starts a real MCP subprocess or otherwise runs noticeably longer than the fast suite",
+    "live_conformance: spawns a real host CLI binary (claude, codex, ...) and calls its real backing API -- costs real usage/credits, opt-in only, never part of the default suite or CI",
 ]
 
 [tool.coverage.run]
