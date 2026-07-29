@@ -114,6 +114,22 @@ class Supervisor:
     def __init__(self, identity: SupervisorIdentity) -> None:
         self._identity = identity
         identity.data_path.parent.mkdir(parents=True, exist_ok=True)
+        # `identity.lock_path` and (on POSIX) `identity.address` share the
+        # same "run" directory (belay/supervisor/addressing.py) -- normally
+        # already created as a side effect of the spawning client's own
+        # `_acquire_spawn_lock` call before this process ever starts
+        # (belay/supervisor/lifecycle.py), but this constructor must not
+        # silently depend on always being reached that way: a direct
+        # `belay supervisor serve` invocation (the CLI's own documented
+        # "debugging or explicit service-manager integration" use case) or
+        # a test constructing `Supervisor` directly never goes through that
+        # path at all. On POSIX, `Listener(identity.address, ...)` binding
+        # a Unix domain socket into a directory that doesn't exist yet
+        # fails with FileNotFoundError -- invisible on Windows, where named
+        # pipes aren't backed by a real filesystem directory the same way,
+        # which is exactly why this went uncaught until real POSIX CI ran
+        # (plan-v2 E19.7).
+        identity.lock_path.parent.mkdir(parents=True, exist_ok=True)
         engine = create_engine(f"sqlite:///{identity.data_path}", future=True)
         self._queue = ApprovalQueue(engine=engine)
         self._idempotency = IdempotencyStore(engine)

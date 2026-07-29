@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,10 +80,23 @@ def supervisor_identity(
     if sys.platform == "win32":
         address = f"\\\\.\\pipe\\belay-supervisor-{install_id}"
     else:
-        # AF_UNIX path length is limited (~100 bytes on some platforms) -- a
-        # short hashed name under a per-user runtime dir stays well within
-        # that regardless of how long the real project path is.
-        address = str(home / "run" / f"{install_id}.sock")
+        # AF_UNIX path length is limited (~104 bytes on macOS, ~108 on
+        # Linux). `belay_home()` (e.g. `~/.belay`) is normally short enough
+        # -- but a long real-world home directory, or (confirmed for real
+        # via macOS CI, plan-v2 E19.7 -- OSError: AF_UNIX path too long) a
+        # test's own belay_home override under pytest's tmp_path, can blow
+        # past that; macOS's own $TMPDIR is notorious for exactly this. The
+        # system temp directory is kept deliberately short by the OS for
+        # this exact reason -- the conventional place for a Unix domain
+        # socket -- so the socket lives there instead, namespaced by both
+        # OS user (a shared /tmp on a multi-user machine must not let one
+        # user's install collide with another's -- home-directory-based
+        # paths got this for free via $HOME, this needs it explicitly) and
+        # install_id. The lock/data/authkey files (ordinary file opens, no
+        # such length limit) stay under belay_home() as before -- this
+        # change is scoped to the socket path alone.
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or str(os.getuid())
+        address = str(Path(tempfile.gettempdir()) / f"belay-{user}-{install_id}.sock")
     return SupervisorIdentity(
         install_id=install_id,
         address=address,
