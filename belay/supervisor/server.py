@@ -23,8 +23,11 @@ edit its own approval state by hand.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import queue
+import sys
 import threading
 from collections.abc import Callable
 
@@ -252,6 +255,24 @@ class Supervisor:
         terminates.
         """
         authkey = load_or_create_authkey(self._identity.authkey_path)
+        if sys.platform != "win32":
+            # A hard-killed (not gracefully shut down) prior supervisor for
+            # this same identity leaves its Unix domain socket FILE behind
+            # on disk -- unlike Windows named pipes, which the OS reclaims
+            # automatically when the owning process dies. bind() on that
+            # stale path fails with "address already in use" even though
+            # nothing is actually listening there, blocking every future
+            # respawn for this install until the file is manually removed.
+            # Safe to unlink unconditionally here: by the time this runs,
+            # the caller (ensure_running -> _acquire_spawn_lock) has
+            # already won the exclusive right to spawn for this identity
+            # and confirmed via is_listening() that nothing is genuinely
+            # listening there -- a real, verified bug (plan-v2 E19.7,
+            # confirmed via real Linux/macOS CI:
+            # test_a_fresh_supervisor_can_be_spawned_after_a_hard_kill),
+            # not a hypothetical one.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self._identity.address)
         listener = Listener(self._identity.address, authkey=authkey, backlog=self.MAX_WORKERS * 2)
         shutdown_event = threading.Event()
         connections: queue.Queue[Any] = queue.Queue()
