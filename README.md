@@ -19,13 +19,14 @@ previewable, gated, and — when it goes wrong — reversible."
 > Appendix C), planner + policy (§5, §6), approvals (§7), the saga executor
 > (§8), and rewind (§10), diagrammed in
 > [`docs/architecture.md`](docs/architecture.md). Nine further entregas
-> (E10-E18, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
+> (E10-E19, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code only,
-> said plainly in its own section below). 613 tests,
+> said plainly in its own section below). 702 tests, passing on real
+> Linux/macOS/Windows CI (not just one dev machine — see E19.7 below), plus
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~81% repo-wide** (`fail_under = 79`, CI-enforced floor against
+> **Coverage: ~82% repo-wide** (`fail_under = 79`, CI-enforced floor against
 > regressions — raised as more lands, never lowered silently). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
@@ -848,6 +849,47 @@ GitHub Actions runners — genuinely fresh VMs per run, nothing
 pre-installed beyond the image defaults — on every push, so platform
 support is verified by CI actually passing there, not asserted from a
 single development machine.
+
+This job earned its keep immediately: the entire Native Agent Gate
+supervisor (E18) had been built and tested exclusively on Windows, and
+turning this job on for real found **four genuine POSIX bugs** the whole
+E18/E19 test suite had never once exercised, plus a fifth, unrelated
+issue found the same way (checking real CI results instead of only local
+checks):
+
+1. `Supervisor` never created its own listen-address directory — fine on
+   Windows (named pipes aren't filesystem-backed), but `Listener(...)`
+   binding a real Unix domain socket on Linux/macOS failed with
+   `FileNotFoundError` whenever a supervisor was reached any way other
+   than the normal client-spawns-it path (e.g. `belay supervisor serve`
+   run directly, or a test constructing `Supervisor` itself).
+2. `OSError: AF_UNIX path too long` on macOS — the socket lived under
+   `belay_home()`, fine for a normal short home directory, but macOS's own
+   temp-path layout is notoriously deep and blew past the ~104-byte
+   `sun_path` limit for real. Fixed by moving the POSIX socket to the
+   system temp directory (kept short by the OS for exactly this reason),
+   namespaced per OS user.
+3. A hard-killed supervisor left its stale Unix socket file on disk,
+   permanently blocking every future respawn for that install with
+   "address already in use" — Windows named pipes don't have this failure
+   mode at all, so it was invisible until real POSIX CI ran. Fixed: the
+   supervisor now removes its own stale socket file before binding.
+4. `scripts/install.sh` had been committed without the executable bit
+   (`git` mode `100644` instead of `100755`) — invisible on Windows, since
+   NTFS doesn't track the POSIX exec bit the way git does.
+
+Separately, actually checking `gh run list` after pushing (rather than
+trusting local `ruff`/`mypy`/`pytest` alone) turned up that CI had been
+failing on **every single push since the first E18 commit** — a stale
+local `ruff` version masked a rule (`UP042`) a newer CI-installed `ruff`
+enforced, and this dev machine's cached `mcp` SDK install (1.26.0)
+predated a real breaking release (`mcp` 2.0.0 renamed several Pydantic
+field aliases from camelCase to snake_case), which would have broken
+`belay`'s actual MCP proxy server for anyone installing fresh. `mcp` is
+now pinned `<2.0` until that migration is done as its own dedicated piece
+of work. Said plainly rather than smoothed over: local checks looking
+clean is not the same claim as CI passing, and only the second one is
+real verification.
 
 ### Drafting contracts from a live server
 
