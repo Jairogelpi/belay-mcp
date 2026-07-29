@@ -383,12 +383,37 @@ def _register_client(client: str, wrap_path: Path, name: str, scope: str = "proj
 
 
 @app.command()
+def detect() -> None:
+    """Report which supported MCP clients (claude-code, cursor, codex, opencode,
+    claude-desktop) are actually installed on this machine (plan-v2 E19.1).
+
+    Read-only -- never writes anything. `belay init --client auto` uses this
+    same detection to register Belay only where a real client was found,
+    rather than blindly writing config for a tool that isn't installed here.
+    """
+    from belay.cli.host_detection import detect_all_clients
+
+    detected = detect_all_clients(claude_desktop_config_dir=_claude_desktop_config_path().parent)
+    for name, d in detected.items():
+        path_note = f" ({d.binary_path})" if d.binary_path else ""
+        if d.installed and d.version:
+            typer.echo(f"{name}: detected -- {d.version}{path_note}")
+        elif d.installed:
+            typer.echo(f"{name}: detected{path_note}")
+        else:
+            typer.echo(f"{name}: not detected")
+
+
+@app.command()
 def init(
     client: str = typer.Option(
         ...,
         "--client",
         help="MCP client(s) to register Belay with, comma-separated: claude-desktop, "
-        "claude-code, cursor, codex, opencode, or 'all'.",
+        "claude-code, cursor, codex, opencode, 'all' (every supported type, "
+        "installed or not -- e.g. preparing committed config for teammates), or "
+        "'auto' (E19.1: only clients actually detected installed on this machine, "
+        "see `belay detect`).",
     ),
     config: str = typer.Option(
         "belay.wrap.json",
@@ -436,17 +461,44 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    clients = (
-        list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
-    )
-    for c in clients:
-        if c not in _CLIENT_CONFIG_PATHS:
+    if client == "auto":
+        from belay.cli.host_detection import detect_all_clients
+
+        desktop_dir = _claude_desktop_config_path().parent
+        detected = detect_all_clients(claude_desktop_config_dir=desktop_dir)
+        # NOT `name` -- that's this function's own `--name` parameter (the
+        # server name to register under, default "belay"); a P0 caught in
+        # this exact spot shadowed it with the loop variable here, silently
+        # overwriting it to whichever detected client happened to be last in
+        # iteration order before it was ever used to render/write anything.
+        clients = [client_name for client_name, d in detected.items() if d.installed]
+        for client_name, d in detected.items():
+            status = f"detected ({d.version})" if d.installed and d.version else (
+                "detected" if d.installed else "not detected"
+            )
+            typer.echo(f"{client_name}: {status}")
+        if not clients:
             typer.echo(
-                f"error: unknown --client {c!r} (expected one of: "
-                f"{', '.join(_CLIENT_CONFIG_PATHS)}, or 'all')",
+                "error: --client auto detected no supported clients installed on this "
+                "machine -- pass --client explicitly (or 'all' to register regardless "
+                "of detection)",
                 err=True,
             )
             raise typer.Exit(code=1)
+    else:
+        clients = (
+            list(_CLIENT_CONFIG_PATHS)
+            if client == "all"
+            else [c.strip() for c in client.split(",")]
+        )
+        for c in clients:
+            if c not in _CLIENT_CONFIG_PATHS:
+                typer.echo(
+                    f"error: unknown --client {c!r} (expected one of: "
+                    f"{', '.join(_CLIENT_CONFIG_PATHS)}, 'all', or 'auto')",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
 
     wrap_path = Path(config).resolve()
     if not wrap_path.is_file():

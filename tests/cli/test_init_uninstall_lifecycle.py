@@ -219,3 +219,93 @@ def test_doctor_reports_bypass_servers_even_when_not_belay_managed(tmp_path: Pat
     assert result.exit_code == 0, result.output
     assert "not belay-managed" in result.output
     assert "github" in result.output
+
+
+def _fake_detected(monkeypatch: pytest.MonkeyPatch, installed: set[str]) -> None:
+    """Deterministic stand-in for `detect_all_clients` -- these tests must
+    not depend on which MCP clients actually happen to be installed on
+    whatever machine runs the suite."""
+    from belay.cli.host_detection import DetectedClient
+
+    def fake_detect_all_clients(*, claude_desktop_config_dir: Path | None = None) -> dict:
+        return {
+            name: DetectedClient(
+                name=name,
+                installed=name in installed,
+                binary_path=f"/usr/bin/{name}" if name in installed else None,
+                version="1.0.0" if name in installed else None,
+            )
+            for name in ("claude-code", "cursor", "codex", "opencode", "claude-desktop")
+        }
+
+    monkeypatch.setattr(
+        "belay.cli.host_detection.detect_all_clients", fake_detect_all_clients
+    )
+
+
+def test_detect_command_reports_installed_and_missing_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_detected(monkeypatch, {"claude-code", "opencode"})
+    result = runner.invoke(app, ["detect"])
+    assert result.exit_code == 0, result.output
+    assert "claude-code: detected -- 1.0.0" in result.output
+    assert "opencode: detected -- 1.0.0" in result.output
+    assert "cursor: not detected" in result.output
+    assert "codex: not detected" in result.output
+
+
+def test_init_client_auto_registers_only_detected_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_detected(monkeypatch, {"claude-code", "opencode"})
+    result = runner.invoke(app, ["init", "--client", "auto", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".mcp.json").is_file()
+    assert (tmp_path / "opencode.json").is_file()
+    assert not (tmp_path / ".cursor" / "mcp.json").is_file()
+
+
+def test_init_client_auto_registers_under_the_correct_server_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the `--client auto` detection loop's own loop variable
+    was originally named `name`, silently shadowing this function's
+    `--name` parameter (default "belay") -- after the loop, every
+    downstream use of `name` (the actual registered server key) had been
+    overwritten to whichever client was last in iteration order
+    ("claude-desktop"), not "belay". Caught only by checking file
+    *existence* was not enough; this asserts the actual registered key."""
+    _fake_detected(monkeypatch, {"claude-code"})
+    result = runner.invoke(app, ["init", "--client", "auto", "--yes"])
+    assert result.exit_code == 0, result.output
+    servers = _mcp_servers(tmp_path / ".mcp.json")
+    assert "belay" in servers
+    assert "claude-desktop" not in servers
+
+
+def test_init_client_auto_errors_cleanly_when_nothing_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_detected(monkeypatch, set())
+    result = runner.invoke(app, ["init", "--client", "auto", "--yes"])
+    assert result.exit_code != 0
+    assert "detected no supported clients installed" in result.output
+
+
+def test_init_client_all_ignores_detection_unlike_auto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'all' is the pre-existing, still-supported behavior: register every
+    known client type regardless of whether it was detected -- 'auto' is
+    the new, narrower default this E19.1 slice adds, not a replacement."""
+    # 'all' includes claude-desktop, whose config path is a REAL machine-wide
+    # location (%APPDATA%\Claude\...) -- never derived from cwd/tmp_path the
+    # way every other client here is. Redirect it into tmp_path so this test
+    # can never touch a real file on the machine running the suite.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData-fake"))
+    _fake_detected(monkeypatch, set())  # nothing detected at all
+    result = runner.invoke(app, ["init", "--client", "all", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".mcp.json").is_file()
+    assert (tmp_path / ".cursor" / "mcp.json").is_file()

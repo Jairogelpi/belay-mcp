@@ -692,6 +692,29 @@ belay init --client claude-code --config belay.wrap.json --dry-run
 
 belay doctor --client claude-code
 # -> claude-code: registered at .mcp.json -- unchanged since install, backup available
+```
+
+#### Automatic detection: `belay detect` / `--client auto` (E19.1)
+
+`--client all` (above) registers Belay in every supported client's config
+regardless of whether that client is actually installed here — useful for
+preparing a repo's committed config for teammates who might have a
+different client than you do. `--client auto` is narrower: it detects
+which clients are *actually installed on this machine* (binary presence
+via the same PATH search Python itself would use, plus a best-effort
+version read; Claude Desktop has no CLI to probe, so its signal is
+whether its app-data config directory exists) and registers only those.
+
+```bash
+belay detect
+# -> claude-code: detected -- 2.1.219 (Claude Code) (...\claude.CMD)
+# -> cursor: detected -- 2.0.43 (...\cursor.CMD)
+# -> codex: detected -- codex-cli 0.145.0 (...\codex.CMD)
+# -> opencode: detected -- 1.14.33 (...\opencode.CMD)
+# -> claude-desktop: not detected
+
+belay init --client auto --config belay.wrap.json --yes
+```
 
 belay uninstall --client claude-code --yes
 # -> unchanged since install -> restores the full pre-install backup
