@@ -19,7 +19,18 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "mcp>=1.0",
+    # mcp 2.0.0 (released after this pin was last checked) renamed its
+    # camelCase Pydantic field aliases to snake_case (Tool.inputSchema ->
+    # input_schema, ToolAnnotations.readOnlyHint -> read_only_hint,
+    # CallToolResult.isError/structuredContent -> is_error/
+    # structured_content) and moved/removed
+    # mcp.shared.memory.create_connected_server_and_client_session --
+    # genuine breaking changes belay/proxy/server.py, belay/contracts/
+    # draft.py, and belay/cli/main.py are not yet updated for (found via a
+    # real fresh CI install, not assumed). Pinned below 2.0 until that
+    # migration happens as its own dedicated, tested piece of work --
+    # not attempted piecemeal alongside unrelated changes.
+    "mcp>=1.0,<2.0",
     "anyio>=4.0",
     "pydantic>=2.0",
     "sqlalchemy>=2.0",
