@@ -314,6 +314,107 @@ def test_disable_bypass_unknown_client_errors_cleanly() -> None:
     assert "unknown client" in result.output
 
 
+class TestRepair:
+    """E19.4: `belay repair` -- detects and restores belay-managed
+    registrations that have gone BROKEN (manifest says it should be
+    there, but the entry was hand-removed), across MCP clients and hooks
+    in one command."""
+
+    def test_reports_nothing_broken_when_everything_is_healthy(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        result = runner.invoke(app, ["repair", "--client", "claude-code", "--no-hooks", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "nothing broken" in result.output
+
+    def test_repairs_a_hand_removed_mcp_entry(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        target = tmp_path / ".mcp.json"
+        target.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["repair", "--client", "claude-code", "--no-hooks", "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "repaired claude-code" in result.output
+
+        servers = _mcp_servers(target)
+        assert "belay" in servers
+
+    def test_never_touches_a_client_that_was_never_installed(self, tmp_path: Path) -> None:
+        """No manifest at all for cursor -- repair must leave it alone
+        entirely, not treat "never installed" as "broken"."""
+        result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        result = runner.invoke(app, ["repair", "--client", "all", "--no-hooks", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "cursor" not in result.output
+        assert not (tmp_path / ".cursor" / "mcp.json").exists()
+
+    def test_never_touches_a_healthy_client_while_repairing_a_broken_one(
+        self, tmp_path: Path
+    ) -> None:
+        result = runner.invoke(app, ["init", "--client", "claude-code,opencode", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        opencode_before = (tmp_path / "opencode.json").read_text(encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["repair", "--client", "claude-code,opencode", "--no-hooks", "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "repaired claude-code" in result.output
+        assert "repaired opencode" not in result.output
+        assert (tmp_path / "opencode.json").read_text(encoding="utf-8") == opencode_before
+
+    def test_repairs_broken_hooks(self, tmp_path: Path) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["repair", "--client", "claude-code", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "repaired claude-code hooks" in result.output
+
+        doc = json.loads(settings.read_text(encoding="utf-8"))
+        for hook_event in ("PreToolUse", "PostToolUse"):
+            assert doc["hooks"][hook_event]
+
+    def test_no_hooks_flag_skips_hook_repair(self, tmp_path: Path) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["repair", "--client", "claude-code", "--no-hooks", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "nothing broken" in result.output
+
+        doc = json.loads(settings.read_text(encoding="utf-8"))
+        assert doc["hooks"] == {}
+
+    def test_missing_wrap_config_errors_cleanly_without_touching_hooks(
+        self, tmp_path: Path
+    ) -> None:
+        result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+        assert result.exit_code == 0, result.output
+        (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        (tmp_path / "belay.wrap.json").unlink()
+
+        result = runner.invoke(app, ["repair", "--client", "claude-code", "--no-hooks", "--yes"])
+        assert result.exit_code != 0
+        assert "not found" in result.output
+
+    def test_unknown_client_errors_cleanly(self) -> None:
+        result = runner.invoke(app, ["repair", "--client", "not-a-client", "--yes"])
+        assert result.exit_code != 0
+        assert "unknown --client" in result.output
+
+
 def _fake_detected(monkeypatch: pytest.MonkeyPatch, installed: set[str]) -> None:
     """Deterministic stand-in for `detect_all_clients` -- these tests must
     not depend on which MCP clients actually happen to be installed on

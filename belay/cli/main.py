@@ -818,6 +818,132 @@ def doctor(
             )
 
 
+@app.command()
+def repair(
+    config: str = typer.Option(
+        "belay.wrap.json",
+        "--config",
+        "-c",
+        help="Wrap config path -- same requirement as `belay init`, needed to "
+        "re-render any broken MCP client registration.",
+    ),
+    client: str = typer.Option(
+        "all",
+        "--client",
+        help="Which MCP clients to consider repairing, comma-separated, or 'all'.",
+    ),
+    scope: str = typer.Option("project", "--scope", help="Same meaning as `belay init --scope`."),
+    db: str = typer.Option(
+        "belay-hooks.db",
+        "--db",
+        help="Hooks db anchor -- same meaning as `belay hooks install --db`.",
+    ),
+    hooks: bool = typer.Option(
+        True, "--hooks/--no-hooks", help="Also repair Claude Code hooks if they're broken."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Detect and restore any belay-managed registration that's gone BROKEN
+    (plan-v2 E19.4) -- the manifest says an entry should be registered, but
+    it's been hand-removed from the config since. Same detection `belay
+    doctor`/`belay hooks doctor` already report; this orchestrates repairing
+    everything broken in one command instead of requiring doctor -> read the
+    output -> manually re-run `init`/`hooks install` yourself for each one.
+
+    Reuses `init`'s/`hooks install`'s own atomic-write + backup + manifest
+    machinery for the actual write -- this command only figures out WHICH
+    registrations need repairing and drives that, it does not reimplement
+    how one gets written. Unregistered (never installed) or already-healthy
+    clients are left alone; this never touches anything that isn't BROKEN.
+    """
+    from belay.cli.client_configs import (
+        claude_hooks_entry_present,
+        entry_present,
+        load_manifest,
+        render_claude_hooks_settings,
+    )
+
+    clients = (
+        list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
+    )
+    for c in clients:
+        if c not in _CLIENT_CONFIG_PATHS:
+            typer.echo(f"error: unknown --client {c!r}", err=True)
+            raise typer.Exit(code=1)
+
+    broken_mcp: list[tuple[str, str]] = []  # (client, name)
+    for c in clients:
+        target = _client_config_path(c, scope)
+        if not target.is_file():
+            continue
+        manifest = load_manifest(target)
+        if manifest is None:
+            continue
+        current_text = target.read_text(encoding="utf-8")
+        try:
+            present = entry_present(c, current_text, manifest.name)
+        except (ValueError, LookupError):
+            present = False
+        if not present:
+            broken_mcp.append((c, manifest.name))
+
+    broken_hooks = False
+    hooks_target = _claude_settings_path(scope)
+    if hooks and hooks_target.is_file():
+        hooks_manifest = load_manifest(hooks_target)
+        if hooks_manifest is not None:
+            current_text = hooks_target.read_text(encoding="utf-8")
+            try:
+                present_by_event = {
+                    hook_event: claude_hooks_entry_present(current_text, event=hook_event)
+                    for hook_event in _HOOKS_EVENTS
+                }
+            except (ValueError, LookupError):
+                present_by_event = dict.fromkeys(_HOOKS_EVENTS, False)
+            broken_hooks = not all(present_by_event.values())
+
+    if not broken_mcp and not broken_hooks:
+        typer.echo("nothing broken -- every belay-managed registration checked out fine")
+        return
+
+    typer.echo("this will repair:")
+    for c, name in broken_mcp:
+        typer.echo(f"  {c}: re-register '{name}'")
+    if broken_hooks:
+        typer.echo(f"  claude-code hooks: re-register {'/'.join(_HOOKS_EVENTS)}")
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    wrap_path = Path(config).resolve() if broken_mcp else None
+    if broken_mcp and (wrap_path is None or not wrap_path.is_file()):
+        typer.echo(
+            f"error: {wrap_path} not found -- run `belay wrap` first, or pass the right "
+            "--config, to repair MCP registrations",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    for c, name in broken_mcp:
+        assert wrap_path is not None
+        target = _client_config_path(c, scope)
+        before_text = target.read_text(encoding="utf-8") if target.is_file() else None
+        new_text = _render_client_config(c, target, wrap_path, name)
+        _write_client_config(c, target, name, new_text, before_text)
+        typer.echo(f"repaired {c}: re-registered '{name}' at {target}")
+
+    if broken_hooks:
+        before_text = hooks_target.read_text(encoding="utf-8") if hooks_target.is_file() else None
+        new_text = before_text or ""
+        for hook_event in _HOOKS_EVENTS:
+            new_text = render_claude_hooks_settings(
+                new_text, _hooks_command_for(db, hook_event), event=hook_event
+            )
+        _write_client_config(
+            "claude-code-hooks", hooks_target, "belay-hooks", new_text, before_text
+        )
+        typer.echo(f"repaired claude-code hooks: re-registered {'/'.join(_HOOKS_EVENTS)}")
+
+
 hooks_app = typer.Typer(
     name="hooks",
     help="Native Agent Gate (plan-v2 E18): PreToolUse/PostToolUse hooks gating native "
