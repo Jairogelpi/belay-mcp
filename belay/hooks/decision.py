@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 #: Bumped whenever the allowlist or metacharacter rules change. Folded into
 #: an approval's plan_id (belay/hooks/gate.py) so a human's approval, granted
@@ -28,7 +28,7 @@ from enum import Enum
 DECISION_LOGIC_VERSION = 1
 
 
-class Verdict(str, Enum):
+class Verdict(StrEnum):
     ALLOW = "allow"
     PAUSE = "pause"
 
