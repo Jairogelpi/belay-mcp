@@ -49,6 +49,9 @@ dev = [
     "types-PyYAML>=6.0",
     "pre-commit>=3.7",
 ]
+build = [
+    "pyinstaller>=6.10",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["belay", "conformance"]

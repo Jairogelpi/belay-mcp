@@ -9,6 +9,9 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+dist-bin/
+build-pyinstaller/
+*.spec
 .venv/
 venv/
 *.db

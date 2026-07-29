@@ -781,6 +781,74 @@ belay repair --config belay.wrap.json
 # -> repaired claude-code hooks: re-registered PreToolUse/PostToolUse
 ```
 
+#### Native binaries (E19.5)
+
+No Python installation required: `scripts/build_binary.py` produces a
+single-file, standalone `belay`(`.exe`) via PyInstaller, using the exact
+same `belay.cli.main:main` entry point the pip-installed console script
+uses — one code path to keep working, not a second copy-pasted build
+target. `.github/workflows/ci.yaml`'s `build-binaries` job builds and
+smoke-tests it on real Linux, macOS, and Windows runners on every push
+(not cross-compiled and hoped to work), uploading each as a CI artifact.
+
+```bash
+pip install -e ".[build]"
+python scripts/build_binary.py
+# -> built: dist-bin/belay (or belay.exe on Windows)
+```
+
+Built and smoke-tested for real on this machine: ~500 MB. `--collect-all
+belay` (needed for correctness — this CLI leans on function-body-local
+lazy imports throughout, and `--collect-all` is the reliable way to make
+sure PyInstaller's static analysis doesn't miss one) pulls in every
+dependency's full transitive closure (SQLAlchemy, cryptography, the MCP
+SDK, Alembic) plus the CPython runtime into one file; belay's own code is
+1.5 MB of that. Said plainly rather than glossed over — this is
+noticeably larger than a typical CLI binary, and shrinking it (targeted
+`--hidden-import`s instead of `--collect-all`, excluding unused
+SQLAlchemy dialects) is real follow-up work, not done in this slice.
+
+#### Signed offline bundle: `belay release sign`/`verify` (E19.6)
+
+Ed25519 authenticity signing for a directory of built artifacts (wheel,
+binaries), reusing the exact same `SigningKey`/`verify_signature`
+primitives `belay keygen`/`verify-export`/`verify-evidence` already use
+for signed ledger evidence (spec-adjacent, plan-v2 E13) — one signing
+mechanism, not two. `belay release sign` writes `SHA256SUMS.txt` (every
+file's hash), `SHA256SUMS.txt.sig` (an Ed25519 signature over the sums
+file), and `release.pub` (the public key) alongside the artifacts;
+`belay release verify` checks the signature and recomputes every listed
+file's hash, failing loudly on any mismatch, missing file, or invalid
+signature — never a partial "mostly OK".
+
+**Said plainly, not implied:** this is authenticity signing — it proves a
+bundle came from whoever holds the private key and wasn't altered in
+transit. It is **not** OS-level code-signing or notarization (Windows
+Authenticode, Apple Developer ID + notarization) — those require a paid,
+identity-verified certificate from Microsoft/Apple that this project does
+not have, so Windows SmartScreen/macOS Gatekeeper will still show an
+"unknown publisher" warning on the raw binaries regardless of this
+signature. That gap is real, deliberately out of scope for this slice
+(see the roadmap table), and not something to paper over with wording.
+
+```bash
+belay keygen release-signing.key
+belay release sign dist-bin --key release-signing.key
+belay release verify dist-bin
+# -> signature: OK
+# -> OK:       belay
+# -> OK:       belay.exe
+```
+
+#### Cross-platform clean-room CI (E19.7)
+
+`.github/workflows/ci.yaml`'s `cross-platform-clean-room` job runs the
+fast test suite on real `ubuntu-latest`/`macos-latest`/`windows-latest`
+GitHub Actions runners — genuinely fresh VMs per run, nothing
+pre-installed beyond the image defaults — on every push, so platform
+support is verified by CI actually passing there, not asserted from a
+single development machine.
+
 ### Drafting contracts from a live server
 
 Writing a contract by hand per tool is real friction. `belay draft-contracts`
@@ -883,7 +951,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
 | E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone. E18.7: `tests/hooks/test_live_conformance.py`, spec §7.2's pinned-version end-to-end bypass suite, opt-in only (spends real Anthropic API usage) — spawns the real installed `claude` CLI with belay's hooks actually installed, confirms a denied Bash command's side effect genuinely never happens on disk (not just "the model said so") while a safe one still works normally; `claude_code_adapter._VERIFIED_TRUST_TIER` is now `"T1"` for Claude Code's Bash surface specifically, because this suite exists and passed, not asserted ahead of the evidence | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code Bash surface is T1-verified; Edit/Write/MCP surfaces and Codex/OpenCode adapters remain UNKNOWN; Cursor not attempted |
-| E19 | One-command lifecycle and exclusive routing — software-only slice (native binaries/launcher, signed offline bundle, and cross-platform clean-room tests deliberately deferred: real release-engineering infrastructure decisions, not something to assume unilaterally from a single Windows dev machine). E19.1: `belay detect`/`belay init --client auto` — real binary-presence + version detection (`shutil.which`, best-effort `--version`) instead of blindly registering every client type regardless of whether it's installed; caught and fixed a real P0 during manual verification (a loop variable shadowing the `--name` parameter, which briefly mis-registered a real machine's Claude Desktop config under the wrong key before being caught and reverted from its own backup). E19.2: `belay disable-bypass` — the write half of E18.4's bypass detection, atomically removing one named non-belay MCP server entry from a client config (same backup/preview/confirm safety as `init`/`uninstall`), without attempting to auto-rewrap the removed server (would require guessing its command/args). E19.3: `belay hooks doctor --deep` — real reachability checks (registered interpreter exists and can import belay, supervisor genuinely reachable, spawning one on demand exactly like a real hook invocation would) instead of only comparing config-file hashes; opt-in since it's not purely read-only. E19.4: `belay repair` — detects every belay-managed registration gone BROKEN (MCP clients and hooks) and restores all of them in one command, reusing `init`'s/`hooks install`'s own atomic-write machinery rather than reimplementing it; never touches anything never-installed or already healthy | §14.3 (partial — software-only), adoption/DX | **software-only slice done** — E19.1–E19.4 shipped; native binaries/launcher, signed offline bundle, and cross-platform clean-room tests are real release-engineering infrastructure this slice deliberately didn't build |
+| E19 | One-command lifecycle and exclusive routing. E19.1: `belay detect`/`belay init --client auto` — real binary-presence + version detection (`shutil.which`, best-effort `--version`) instead of blindly registering every client type regardless of whether it's installed; caught and fixed a real P0 during manual verification (a loop variable shadowing the `--name` parameter, which briefly mis-registered a real machine's Claude Desktop config under the wrong key before being caught and reverted from its own backup). E19.2: `belay disable-bypass` — the write half of E18.4's bypass detection, atomically removing one named non-belay MCP server entry from a client config, without attempting to auto-rewrap the removed server. E19.3: `belay hooks doctor --deep` — real reachability checks (interpreter exists and can import belay, supervisor genuinely reachable) instead of only comparing config-file hashes; opt-in since it's not purely read-only. E19.4: `belay repair` — detects every belay-managed registration gone BROKEN (MCP clients and hooks) and restores all of them in one command, reusing `init`'s/`hooks install`'s own atomic-write machinery. E19.5: standalone `belay`(`.exe`) binaries via PyInstaller (`scripts/build_binary.py`), built and smoke-tested on real Linux/macOS/Windows CI runners — ~500 MB, said plainly (heavy transitive deps via `--collect-all`, size-reduction is real follow-up work, not done here). E19.6: `belay release sign`/`verify` — Ed25519 authenticity signing of a release bundle (SHA256SUMS.txt + signature + public key), reusing E13's `SigningKey`/`verify_signature`; explicitly NOT OS-level code-signing/notarization (Authenticode/Apple notarization need a paid, identity-verified certificate this project doesn't have — Windows SmartScreen/macOS Gatekeeper will still warn regardless of this signature). E19.7: `cross-platform-clean-room` CI job — the fast suite on real ubuntu-latest/macos-latest/windows-latest runners, verified by CI actually passing there, not asserted from one dev machine | §14.3, adoption/DX | done |
 
 ## Conformance
 

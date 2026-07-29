@@ -75,9 +75,13 @@ class SigningKey:
         return self._private_key.sign(data)
 
 
-def _verify_signature(public_key_hex: str, data: bytes, signature_hex: str) -> bool:
+def verify_signature(public_key_hex: str, data: bytes, signature_hex: str) -> bool:
     """True iff `signature_hex` is a valid Ed25519 signature of `data` under
-    `public_key_hex`. Never raises -- any malformed input is just "not valid"."""
+    `public_key_hex`. Never raises -- any malformed input is just "not valid".
+    Public (not module-private) because it's the shared primitive behind both
+    signed-evidence verification (`verify_evidence`, spec-adjacent, plan-v2
+    E13) and signed release bundle verification (`belay release verify`,
+    plan-v2 E19.6) -- one verification routine, not two copies."""
     try:
         public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
         public_key.verify(bytes.fromhex(signature_hex), data)
@@ -247,7 +251,7 @@ def verify_evidence(
 
     pubkey_hex = trusted_public_key_hex if trusted_public_key_hex is not None else bundle.public_key
     stated_summary_bytes = canonical_bytes(_signed_summary(bundle))
-    if not _verify_signature(pubkey_hex, stated_summary_bytes, bundle.signature):
+    if not verify_signature(pubkey_hex, stated_summary_bytes, bundle.signature):
         return VerificationResult(
             ok=False,
             stage="signature",

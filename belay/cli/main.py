@@ -2846,6 +2846,139 @@ def counterfactual_command(
         )
 
 
+release_app = typer.Typer(
+    name="release",
+    help="Sign/verify an offline release bundle (plan-v2 E19.6) -- Ed25519 authenticity "
+    "signing, NOT OS-level code-signing/notarization (see `belay release sign --help`).",
+    no_args_is_help=True,
+)
+app.add_typer(release_app, name="release")
+
+
+_RELEASE_SUMS_FILENAME = "SHA256SUMS.txt"
+_RELEASE_SIG_FILENAME = "SHA256SUMS.txt.sig"
+_RELEASE_PUBKEY_FILENAME = "release.pub"
+
+
+@release_app.command("sign")
+def release_sign(
+    dist_dir: str = typer.Argument(
+        ..., help="Directory of built artifacts to sign (wheel, binaries, ...)."
+    ),
+    key: str = typer.Option(
+        ..., "--key", help="Path to an Ed25519 private signing key PEM (`belay keygen`)."
+    ),
+) -> None:
+    """Compute SHA256SUMS.txt over every file in DIST_DIR, sign it with an
+    Ed25519 key, and write SHA256SUMS.txt/.sig/release.pub alongside the
+    artifacts -- everything a downloader needs to verify the bundle with no
+    other trust relationship than this one public key.
+
+    This is authenticity signing (Ed25519, via the same key mechanism
+    `belay keygen`/`verify-export` already use for signed evidence, spec-
+    adjacent plan-v2 E13) -- it proves the bundle came from whoever holds
+    --key and hasn't been altered since. It is explicitly NOT OS-level
+    code-signing or notarization (Windows Authenticode, Apple Developer ID
+    + notarization): those require a paid, identity-verified certificate
+    from Microsoft/Apple that this project does not have, so Windows
+    SmartScreen/macOS Gatekeeper will still show an "unknown publisher"
+    warning on the raw binaries regardless of this signature. Said plainly
+    rather than implied -- this closes the "was this file tampered with in
+    transit" gap, not the "is this a Microsoft/Apple-vetted publisher" one.
+    """
+    import hashlib
+
+    from belay.ledger.signing import SigningKey
+
+    root = Path(dist_dir).resolve()
+    if not root.is_dir():
+        typer.echo(f"error: {root} is not a directory", err=True)
+        raise typer.Exit(code=1)
+
+    skip = {_RELEASE_SUMS_FILENAME, _RELEASE_SIG_FILENAME, _RELEASE_PUBKEY_FILENAME}
+    files = sorted(p for p in root.rglob("*") if p.is_file() and p.name not in skip)
+    if not files:
+        typer.echo(f"error: no files found under {root}", err=True)
+        raise typer.Exit(code=1)
+
+    lines = [
+        f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.relative_to(root).as_posix()}"
+        for f in files
+    ]
+    sums_text = "\n".join(lines) + "\n"
+
+    signing_key = SigningKey.load(key)
+    signature_hex = signing_key.sign(sums_text.encode("utf-8")).hex()
+
+    (root / _RELEASE_SUMS_FILENAME).write_text(sums_text, encoding="utf-8")
+    (root / _RELEASE_SIG_FILENAME).write_text(signature_hex + "\n", encoding="utf-8")
+    (root / _RELEASE_PUBKEY_FILENAME).write_text(signing_key.public_hex() + "\n", encoding="utf-8")
+
+    typer.echo(f"signed {len(files)} file(s) in {root}")
+    typer.echo(f"  {_RELEASE_SUMS_FILENAME} (checksums)")
+    typer.echo(f"  {_RELEASE_SIG_FILENAME} (Ed25519 signature)")
+    typer.echo(f"  {_RELEASE_PUBKEY_FILENAME} (public key: {signing_key.public_hex()})")
+
+
+@release_app.command("verify")
+def release_verify(
+    dist_dir: str = typer.Argument(..., help="Directory containing a signed release bundle."),
+    pubkey: str = typer.Option(
+        "",
+        "--pubkey",
+        help="Path to a trusted public key (hex text). If omitted, the bundle's own "
+        "release.pub is used -- weaker trust, since a tampered bundle could embed a "
+        "matching forged key (same caveat as `verify-evidence --pubkey`).",
+    ),
+) -> None:
+    """Verify a release bundle signed by `belay release sign`: the signature over
+    SHA256SUMS.txt is valid, and every listed file's actual SHA256 matches
+    what's recorded. Exits non-zero on any signature failure, missing file,
+    or hash mismatch -- never a partial "mostly OK"."""
+    import hashlib
+
+    from belay.ledger.signing import verify_signature
+
+    root = Path(dist_dir).resolve()
+    sums_path = root / _RELEASE_SUMS_FILENAME
+    sig_path = root / _RELEASE_SIG_FILENAME
+    if not sums_path.is_file() or not sig_path.is_file():
+        typer.echo(
+            f"error: {root} is missing {_RELEASE_SUMS_FILENAME}/{_RELEASE_SIG_FILENAME}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    pubkey_path = Path(pubkey) if pubkey else (root / _RELEASE_PUBKEY_FILENAME)
+    if not pubkey_path.is_file():
+        typer.echo(f"error: public key not found: {pubkey_path}", err=True)
+        raise typer.Exit(code=1)
+    trusted_pubkey = pubkey_path.read_text(encoding="utf-8").strip()
+
+    sums_text = sums_path.read_text(encoding="utf-8")
+    signature_hex = sig_path.read_text(encoding="utf-8").strip()
+    signature_ok = verify_signature(trusted_pubkey, sums_text.encode("utf-8"), signature_hex)
+    typer.echo(f"signature: {'OK' if signature_ok else 'INVALID'}")
+
+    all_ok = signature_ok
+    for line in sums_text.strip().splitlines():
+        digest, _, rel_path = line.partition("  ")
+        target = root / rel_path
+        if not target.is_file():
+            typer.echo(f"MISSING:  {rel_path}")
+            all_ok = False
+            continue
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual == digest:
+            typer.echo(f"OK:       {rel_path}")
+        else:
+            typer.echo(f"MISMATCH: {rel_path}")
+            all_ok = False
+
+    if not all_ok:
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     app()
 
