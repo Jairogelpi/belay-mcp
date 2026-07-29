@@ -122,6 +122,51 @@ def test_doctor_reports_unchanged_since_install(tmp_path: Path) -> None:
     assert "unchanged since install" in result.output
 
 
+class TestDeepDoctor:
+    """E19.3: `belay hooks doctor --deep` -- real reachability checks
+    (interpreter exists and can import belay, supervisor is genuinely
+    reachable), not just "the config file parses correctly"."""
+
+    def test_without_deep_flag_behavior_is_unchanged(self, tmp_path: Path) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        result = runner.invoke(app, ["hooks", "doctor"])
+        assert result.exit_code == 0, result.output
+        assert "DEEP CHECK" not in result.output
+        assert "deep check" not in result.output
+
+    def test_deep_check_passes_for_a_real_working_install(self, tmp_path: Path) -> None:
+        """The install this suite itself creates uses sys.executable (a
+        real, working interpreter with belay importable, since that's
+        what's running this test) -- --deep should report success, and
+        genuinely spawn/connect to a real supervisor as a side effect."""
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        result = runner.invoke(app, ["hooks", "doctor", "--deep"])
+        assert result.exit_code == 0, result.output
+        assert "deep check OK" in result.output
+        assert "DEEP CHECK FAILED" not in result.output
+
+    def test_deep_check_reports_a_missing_interpreter(self, tmp_path: Path) -> None:
+        """Simulates a moved/uninstalled interpreter without needing to
+        actually break the real one running this test -- hand-crafts a
+        settings.json pointing at a path that doesn't exist."""
+        from belay.cli.client_configs import write_manifest
+
+        target = _settings_path(tmp_path)
+        target.parent.mkdir(parents=True)
+        bogus_python = str(tmp_path / "no-such-python.exe")
+        command = f'"{bogus_python}" -m belay.cli.main hooks run PreToolUse --db "belay-hooks.db"'
+        hook_entry = {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}
+        doc = {"hooks": {"PreToolUse": [hook_entry], "PostToolUse": [hook_entry]}}
+        text = json.dumps(doc, indent=2) + "\n"
+        target.write_text(text, encoding="utf-8")
+        write_manifest("claude-code-hooks", target, "belay-hooks", None, text, None)
+
+        result = runner.invoke(app, ["hooks", "doctor", "--deep"])
+        assert result.exit_code == 0, result.output
+        assert "DEEP CHECK FAILED" in result.output
+        assert "interpreter not found" in result.output
+
+
 def test_hooks_run_pretooluse_allows_safe_command_end_to_end(tmp_path: Path) -> None:
     payload = json.dumps(
         {

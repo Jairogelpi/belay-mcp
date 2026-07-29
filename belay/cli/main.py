@@ -1102,15 +1102,75 @@ def hooks_uninstall(
     typer.echo(f"removed belay's hooks from {target}")
 
 
+def _deep_check_hook_command(command: str) -> list[str]:
+    """Real reachability checks for one registered hook command string
+    (plan-v2 E19.3) -- not just "the config file looks right", but "this
+    would actually work if the host invoked it right now". Returns a list
+    of problems found (empty means everything checked out).
+
+    Side effect, said plainly rather than hidden: if the supervisor for
+    the embedded --db anchor isn't already running, this spawns one on
+    demand (`ensure_running`) to check reachability -- exactly what a real
+    hook invocation would do anyway, not an extra action invented for this
+    check. `--deep` trades "purely read-only" for "actually proves the
+    thing works", the same tradeoff any real health check makes.
+    """
+    import re
+    import subprocess
+
+    issues: list[str] = []
+    interpreter_match = re.match(r'"([^"]+)"', command)
+    interpreter = interpreter_match.group(1) if interpreter_match else None
+    if interpreter is None or not Path(interpreter).is_file():
+        issues.append(f"interpreter not found on disk: {interpreter!r}")
+        return issues  # nothing else here is checkable without a real interpreter
+
+    try:
+        import_check = subprocess.run(
+            [interpreter, "-c", "import belay"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        issues.append(f"could not run {interpreter} to check belay is importable: {exc}")
+    else:
+        if import_check.returncode != 0:
+            stderr = import_check.stderr.strip().splitlines()[-1] if import_check.stderr else ""
+            issues.append(f"belay is not importable from {interpreter}: {stderr}")
+
+    db_match = re.search(r'--db "([^"]+)"', command)
+    if db_match is None:
+        issues.append("could not find --db in the hook command to check supervisor reachability")
+        return issues
+
+    from belay.supervisor.addressing import supervisor_identity
+    from belay.supervisor.lifecycle import ensure_running
+
+    db_path = db_match.group(1)
+    identity = supervisor_identity(Path(db_path))
+    if not ensure_running(identity, db_path):
+        issues.append("supervisor could not be reached or spawned for this install")
+    return issues
+
+
 @hooks_app.command("doctor")
 def hooks_doctor(
     client: str = typer.Option(
         "claude-code", "--client", help="Agent(s) to check, comma-separated."
     ),
     scope: str = typer.Option("project", "--scope", help="Same meaning as `belay hooks install`."),
+    deep: bool = typer.Option(
+        False,
+        "--deep",
+        help="E19.3: also verify the hook would actually work right now -- the "
+        "registered interpreter exists and can import belay, and the supervisor "
+        "for this install is genuinely reachable (spawning one on demand if "
+        "needed, same as a real hook invocation would). Slower, and not purely "
+        "read-only (may start a background process) -- omit for the fast, "
+        "config-only check.",
+    ),
 ) -> None:
     """Report whether belay's hook is registered, modified since, missing, or BROKEN.
-    Read-only, same semantics as `belay doctor`."""
+    Read-only (config-only check), same semantics as `belay doctor`, unless
+    `--deep` is passed."""
     from belay.cli.client_configs import claude_hooks_entry_present, load_manifest, sha256_of
 
     clients = [c.strip() for c in client.split(",")]
@@ -1151,6 +1211,20 @@ def hooks_doctor(
             f"{c}: {'/'.join(_HOOKS_EVENTS)} hooks registered at {target} -- {status}, "
             f"{backup_note}"
         )
+        if deep:
+            import json as _json
+
+            doc = _json.loads(current_text)
+            command = doc["hooks"][_HOOKS_EVENTS[0]][0]["hooks"][0]["command"]
+            issues = _deep_check_hook_command(command)
+            if issues:
+                for issue in issues:
+                    typer.echo(f"{c}:   DEEP CHECK FAILED -- {issue}")
+            else:
+                typer.echo(
+                    f"{c}:   deep check OK -- interpreter, belay import, and supervisor "
+                    "all reachable"
+                )
 
 
 @hooks_app.command("list-edits")
