@@ -716,10 +716,29 @@ belay detect
 belay init --client auto --config belay.wrap.json --yes
 ```
 
+```bash
 belay uninstall --client claude-code --yes
 # -> unchanged since install -> restores the full pre-install backup
 # -> modified since install (you added another MCP server, etc.) ->
 #    surgically removes only the belay entry, leaving your other edits intact
+```
+
+#### Exclusive routing: `belay disable-bypass` (E19.2)
+
+`belay doctor` (above) reports other MCP servers configured alongside
+belay as an ungated bypass route — reachable by the agent's own client
+directly, contract enforcement or not. `belay disable-bypass` is the
+write half: removes one *named*, non-belay server entry from a client's
+config, atomically (backup, preview, one confirmation, refuses to touch
+belay's own entry). It does not try to auto-rewrap the removed server
+through belay — that would mean guessing its command/args to reconstruct
+a `belay wrap` config, a materially bigger and riskier automatic action;
+this only closes the direct route.
+
+```bash
+belay disable-bypass claude-code github
+# -> this will remove 'github' from .mcp.json
+# -> removed 'github' from .mcp.json
 ```
 
 ### Drafting contracts from a live server
@@ -824,6 +843,7 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
 | E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone. E18.7: `tests/hooks/test_live_conformance.py`, spec §7.2's pinned-version end-to-end bypass suite, opt-in only (spends real Anthropic API usage) — spawns the real installed `claude` CLI with belay's hooks actually installed, confirms a denied Bash command's side effect genuinely never happens on disk (not just "the model said so") while a safe one still works normally; `claude_code_adapter._VERIFIED_TRUST_TIER` is now `"T1"` for Claude Code's Bash surface specifically, because this suite exists and passed, not asserted ahead of the evidence | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code Bash surface is T1-verified; Edit/Write/MCP surfaces and Codex/OpenCode adapters remain UNKNOWN; Cursor not attempted |
+| E19 | One-command lifecycle and exclusive routing — software-only slice (native binaries/launcher, signed offline bundle, and cross-platform clean-room tests deliberately deferred: real release-engineering infrastructure decisions, not something to assume unilaterally from a single Windows dev machine). E19.1: `belay detect`/`belay init --client auto` — real binary-presence + version detection (`shutil.which`, best-effort `--version`) instead of blindly registering every client type regardless of whether it's installed; caught and fixed a real P0 during manual verification (a loop variable shadowing the `--name` parameter, which briefly mis-registered a real machine's Claude Desktop config under the wrong key before being caught and reverted from its own backup). E19.2: `belay disable-bypass` — the write half of E18.4's bypass detection, atomically removing one named non-belay MCP server entry from a client config (same backup/preview/confirm safety as `init`/`uninstall`), without attempting to auto-rewrap the removed server (would require guessing its command/args) | §14.3 (partial — software-only), adoption/DX | **in progress** — E19.1/E19.2 done; deep doctor and transactional repair (E19.3/E19.4) not yet started; native binaries/signed bundle/cross-platform CI out of scope for this slice |
 
 ## Conformance
 

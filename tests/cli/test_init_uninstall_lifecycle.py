@@ -221,6 +221,99 @@ def test_doctor_reports_bypass_servers_even_when_not_belay_managed(tmp_path: Pat
     assert "github" in result.output
 
 
+def test_doctor_bypass_report_points_at_disable_bypass(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+    assert result.exit_code == 0, result.output
+    servers = _mcp_servers(tmp_path / ".mcp.json")
+    servers["github"] = {"command": "npx"}
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": servers}), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["doctor", "--client", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "belay disable-bypass claude-code <name>" in result.output
+
+
+def test_disable_bypass_removes_only_the_named_entry(tmp_path: Path) -> None:
+    target = tmp_path / ".mcp.json"
+    target.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "belay": {"command": "python"},
+                    "github": {"command": "npx", "args": ["-y", "mcp-github"]},
+                    "other": {"command": "x"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["disable-bypass", "claude-code", "github", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "removed 'github'" in result.output
+
+    servers = _mcp_servers(target)
+    assert "github" not in servers
+    assert "belay" in servers  # untouched
+    assert "other" in servers  # untouched
+
+
+def test_disable_bypass_refuses_to_touch_belays_own_entry(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", "--client", "claude-code", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["disable-bypass", "claude-code", "belay", "--yes"])
+    assert result.exit_code != 0
+    assert "belay uninstall" in result.output
+
+    servers = _mcp_servers(tmp_path / ".mcp.json")
+    assert "belay" in servers  # untouched
+
+
+def test_disable_bypass_on_a_name_not_present_is_a_clean_no_op(tmp_path: Path) -> None:
+    target = tmp_path / ".mcp.json"
+    target.write_text(
+        json.dumps({"mcpServers": {"belay": {"command": "python"}}}), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["disable-bypass", "claude-code", "nonexistent", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" in result.output
+
+    servers = _mcp_servers(target)
+    assert "belay" in servers
+
+
+def test_disable_bypass_on_a_missing_config_file_is_a_clean_no_op(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["disable-bypass", "cursor", "github", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "nothing to do" in result.output
+    assert not (tmp_path / ".cursor" / "mcp.json").exists()
+
+
+def test_disable_bypass_creates_a_backup(tmp_path: Path) -> None:
+    target = tmp_path / ".mcp.json"
+    original = json.dumps(
+        {"mcpServers": {"belay": {"command": "python"}, "github": {"command": "npx"}}}
+    )
+    target.write_text(original, encoding="utf-8")
+
+    result = runner.invoke(app, ["disable-bypass", "claude-code", "github", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    backup = tmp_path / ".mcp.json.belay-backup"
+    assert backup.is_file()
+    assert backup.read_text(encoding="utf-8") == original
+
+
+def test_disable_bypass_unknown_client_errors_cleanly() -> None:
+    result = runner.invoke(app, ["disable-bypass", "not-a-client", "github", "--yes"])
+    assert result.exit_code != 0
+    assert "unknown client" in result.output
+
+
 def _fake_detected(monkeypatch: pytest.MonkeyPatch, installed: set[str]) -> None:
     """Deterministic stand-in for `detect_all_clients` -- these tests must
     not depend on which MCP clients actually happen to be installed on

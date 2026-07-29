@@ -660,6 +660,91 @@ def uninstall(
 
 
 @app.command()
+def disable_bypass(
+    client: str = typer.Argument(
+        ...,
+        help="Client whose config to edit: claude-desktop, claude-code, cursor, codex, "
+        "opencode.",
+    ),
+    name: str = typer.Argument(..., help="The MCP server name to remove (must not be 'belay')."),
+    scope: str = typer.Option("project", "--scope", help="Same meaning as `belay init --scope`."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Remove one non-belay MCP server entry from a client's config (plan-v2 E19.2)
+    -- the write half of `belay doctor`'s read-only bypass detection (E18.4).
+
+    Does NOT attempt to re-wrap the removed server through Belay -- that
+    would require guessing its command/args to reconstruct a `belay wrap`
+    config for it, a much bigger and riskier automatic action than this
+    command makes. This only closes the direct, ungated route: the agent
+    simply won't see that server through this client anymore, until/unless
+    someone wraps it and registers it through Belay properly (`belay wrap`
+    + `belay init`).
+
+    Same safety guarantees as `belay uninstall`: atomic write with backup,
+    preview + one confirmation, a pre-write re-check that aborts if the
+    file changed since the preview instead of clobbering it. Refuses to
+    touch belay's own entry -- use `belay uninstall` for that.
+    """
+    from belay.cli.client_configs import (
+        atomic_write_with_backup,
+        entry_present,
+        remove_codex_entry,
+        remove_json_mcp_entry,
+    )
+
+    if client not in _CLIENT_CONFIG_PATHS:
+        typer.echo(
+            f"error: unknown client {client!r} (expected one of: "
+            f"{', '.join(_CLIENT_CONFIG_PATHS)})",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if name == "belay":
+        typer.echo(
+            "error: won't remove belay's own entry this way -- use `belay uninstall` instead",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    target = _client_config_path(client, scope)
+    if not target.is_file():
+        typer.echo(f"{client}: {target} does not exist -- nothing to do")
+        return
+
+    before_text = target.read_text(encoding="utf-8")
+    try:
+        present = entry_present(client, before_text, name)
+    except (ValueError, LookupError) as exc:
+        typer.echo(f"error: {target} does not parse as {client}'s config format: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    if not present:
+        typer.echo(f"{client}: {name!r} is not registered in {target} -- nothing to do")
+        return
+
+    if client == "codex":
+        new_text = remove_codex_entry(before_text, name)
+    elif client == "opencode":
+        new_text = remove_json_mcp_entry(before_text, name, key="mcp")
+    else:
+        new_text = remove_json_mcp_entry(before_text, name)
+
+    typer.echo(f"this will remove {name!r} from {target}")
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    if target.read_text(encoding="utf-8") != before_text:
+        typer.echo(
+            f"error: {target} changed after preview -- aborting without writing anything",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    atomic_write_with_backup(target, new_text)
+    typer.echo(f"removed {name!r} from {target}")
+
+
+@app.command()
 def doctor(
     client: str = typer.Option(
         "all", "--client", help="MCP client(s) to check, comma-separated, or 'all' (default)."
@@ -728,7 +813,8 @@ def doctor(
             typer.echo(
                 f"{c}:   {len(other_servers)} other MCP server(s) configured here, reachable "
                 f"directly by the agent's own client -- not routed through belay's contract "
-                f"enforcement: {', '.join(sorted(other_servers))}"
+                f"enforcement: {', '.join(sorted(other_servers))} "
+                f"(remove one with `belay disable-bypass {c} <name>`)"
             )
 
 
