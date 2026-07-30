@@ -1,0 +1,54 @@
+# PACK-002 Git -- pack-level metadata (plan-v2 E20.2).
+#
+# This file is documentation, not (yet) machine-enforced -- same status as
+# packs/filesystem/pack.yaml, see that file's own note and
+# docs/adr/0020-e20-verified-packs-scope.md for the full scope decision.
+
+name: git
+version: "0.1.0"
+schema_version: "0.1"
+license: MIT
+publisher: belay-mcp
+source_repository: https://github.com/Jairogelpi/belay-mcp
+source_path: packs/git/contracts.yaml
+
+supported_belay_versions: ">=0.2.0a1"
+
+upstream:
+  identity: "mcp-server-git"
+  verified_version: "2026.7.10"
+  launch: "mcp-server-git -r <repository-path>"
+
+trust_state: unverified
+# Same honesty as packs/filesystem/pack.yaml: `official-verified` (spec
+# §11.2) requires signing/release-policy infrastructure that doesn't
+# exist yet. `unverified` reflects that gap, not a doubt about whether
+# the real integration test (tests/packs/test_git_pack.py) actually
+# passes.
+
+required_credentials: none
+redaction_rules: none
+
+fixtures_and_tests:
+  - tests/packs/test_git_pack.py
+
+known_limitations:
+  - "This server returns plain text only (CallToolResult.structuredContent
+     is always None) -- belay's contract expression grammar can only do
+     path access into structured data, not string parsing, so any undo
+     that would need to reference a specific captured value (\"restore
+     the exact commit that was HEAD\", \"checkout back to the exact
+     branch that was active\") cannot be expressed against this server.
+     git_commit, git_create_branch, and git_checkout are honestly
+     declared irreversible for exactly this reason -- not because
+     reverting a commit or switching back a branch is conceptually
+     impossible in git, but because THIS server exposes no tool call
+     whose result gives a contract anything structured to point at."
+  - "git_reset takes no path-scoping argument at all -- it unstages
+     EVERYTHING. git_add's undo (git_reset) is real and correct, but
+     will also unstage anything else that happened to already be staged
+     before that git_add call ran, not just what it added."
+  - "No push, no remote-deletion, no tag tool exists on this server at
+     all -- out of scope for this pack because they're not present to
+     wrap, not because they were judged out of scope for git in
+     general."

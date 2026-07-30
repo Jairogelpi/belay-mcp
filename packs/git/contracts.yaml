@@ -1,0 +1,224 @@
+# PACK-002 Git (plan-v2 E20.2) -- contracts for the REAL, official Python
+# `mcp-server-git` MCP server (verified against the actual installed
+# package, not guessed from its README):
+#
+#   mcp-server-git -r <repository-path>
+#
+# Every field below was confirmed by actually calling the real, running
+# server against a real local git repository -- see
+# tests/packs/test_git_pack.py, which drives these contracts against that
+# same real server, not a mock.
+#
+# A real, load-bearing constraint discovered during that verification,
+# not assumed up front: this server returns PLAIN TEXT only (every
+# `CallToolResult.structuredContent` is `None`; state comes back as
+# free-form human-readable strings like "On branch master\nChanges to be
+# committed:\n\tnew file: x.txt"). Belay's contract expression grammar
+# (belay/contracts/expressions.py) can only do PATH ACCESS into
+# structured data (`$state.before.field.nested`) -- it has no string
+# parsing/regex capability, deliberately (spec §4.3: "no user-defined
+# code in contracts"). That means any undo that would need to reference
+# a SPECIFIC captured value out of this server's own text output (e.g.
+# "restore the exact commit that was HEAD before" or "checkout back to
+# the exact branch name that was active before") cannot be expressed
+# through a capture+undo contract against this particular server --
+# there is nothing structured to point `$state.before...` at.
+#
+# The one real exception: `git_add`'s undo is `git_reset`, which takes
+# NO arguments beyond `repo_path` -- it doesn't need to reference any
+# captured value at all, so the text-output limitation above never
+# applies to it. Every other mutating tool this server exposes
+# (git_commit, git_create_branch, git_checkout, git_reset itself) is
+# honestly declared `irreversible` rather than forcing a fragile
+# contract that can't actually be expressed correctly. This is a smaller
+# pack than PACK-001's, and that's a fact about this specific upstream
+# server's own design (a real limitation, not a shortfall in contract
+# authoring), said plainly rather than papered over.
+#
+# Also real and worth noting: this server has no push/remote-deletion
+# tool at all (local-only git operations), no tag tool despite the spec
+# mentioning tags as in-scope for PACK-002, and `git_reset` unstages
+# EVERYTHING with no path-scoping -- so `git_add`'s undo, while real and
+# correct, unstages more than just what that one `git_add` call staged
+# if anything else was already staged beforehand. Documented in
+# pack.yaml's `known_limitations`, not hidden here.
+
+belay_contract: '0.1'
+tool: git_status
+summary: Shows the working tree status.
+reversibility: reversible
+undo:
+  tool: git_status
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.status
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_diff_unstaged
+summary: Shows changes in the working directory that are not yet staged.
+reversibility: reversible
+undo:
+  tool: git_diff_unstaged
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.diff
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_diff_staged
+summary: Shows changes that are staged for commit.
+reversibility: reversible
+undo:
+  tool: git_diff_staged
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.diff
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_diff
+summary: Shows differences between branches or commits.
+reversibility: reversible
+undo:
+  tool: git_diff
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.diff
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_log
+summary: Shows the commit logs.
+reversibility: reversible
+undo:
+  tool: git_log
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.log
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_show
+summary: Shows the contents of a specific commit.
+reversibility: reversible
+undo:
+  tool: git_show
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.commit
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_branch
+summary: Lists Git branches.
+reversibility: reversible
+undo:
+  tool: git_branch
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: read
+    resource: git.branch
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_add
+summary: Adds file contents to the staging area.
+reversibility: reversible
+undo:
+  tool: git_reset
+  args:
+    repo_path: "$args.repo_path"
+effects:
+  - type: update
+    resource: git.index
+    count: "1"
+verification:
+  tool: git_status
+  args:
+    repo_path: "$args.repo_path"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_reset
+summary: Unstages ALL staged changes (no path-scoping -- this server exposes no selective reset).
+reversibility: irreversible
+effects:
+  - type: update
+    resource: git.index
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_commit
+summary: Records staged changes as a new commit.
+reversibility: irreversible
+effects:
+  - type: create
+    resource: git.commit
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_create_branch
+summary: Creates a new branch from an optional base branch.
+reversibility: irreversible
+effects:
+  - type: create
+    resource: git.branch
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: git_checkout
+summary: Switches the working tree to a different branch.
+reversibility: irreversible
+effects:
+  - type: update
+    resource: git.branch
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
