@@ -136,7 +136,8 @@ where their guarantees actually diverge).
   suite passed against it). Edit/Write/native-MCP surfaces, and the Codex/
   OpenCode adapters, are normalize/render-only and have not been verified
   end-to-end against a live session — treat them as unverified until they
-  are.
+  are. See [`docs/adapter-compatibility.md`](../adapter-compatibility.md)
+  for the full per-host, per-surface matrix.
 
 ## MCP proxy vs. Native Agent Gate: known divergence
 

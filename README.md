@@ -223,7 +223,8 @@ installed `claude` CLI, confirming a denied Bash command's side effect
 genuinely never happens on disk. `"T1"` is earned by this suite existing
 and passing, not asserted ahead of the evidence -- every other surface
 (Edit/Write/MCP, and the Codex/OpenCode adapters) still honestly reports
-`UNKNOWN`.
+`UNKNOWN`. See [`docs/adapter-compatibility.md`](docs/adapter-compatibility.md)
+for the full per-host, per-surface matrix.
 
 ### Wrapping a non-Python MCP server
 

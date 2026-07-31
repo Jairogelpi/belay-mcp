@@ -54,7 +54,20 @@ ADAPTER_VERSION = "claude-code/1"
 _VERIFIED_TRUST_TIER: TrustTier | None = "T1"
 
 
-def _trust_tier() -> TrustTier:
+def _trust_tier(surface: Surface) -> TrustTier:
+    """`_VERIFIED_TRUST_TIER` only ever reflects what
+    `tests/hooks/test_live_conformance.py` (E18.7) actually exercises:
+    Claude Code's Bash surface. An earlier version applied it to every
+    event regardless of `surface` -- a real overclaim, caught while
+    building the adapter compatibility matrix
+    (docs/adapter-compatibility.md): the ledger would have recorded
+    `trust_tier: "T1"`
+    for an Edit/Write or native MCP event too, even though no conformance
+    suite has ever run against those surfaces. Only `"shell"` gets the
+    verified tier; every other surface honestly reports `UNKNOWN` here,
+    same as an entirely unverified host adapter would."""
+    if surface != "shell":
+        return "UNKNOWN"
     return _VERIFIED_TRUST_TIER if _VERIFIED_TRUST_TIER is not None else "UNKNOWN"
 
 _PHASE_BY_HOOK_EVENT_NAME: dict[str, Phase] = {
@@ -184,6 +197,7 @@ def normalize(raw: dict[str, Any], *, installation_id: str) -> HookEvent:
         raise ValueError(f"unrecognized Claude Code hook_event_name: {hook_event_name!r}")
 
     tool_name = str(raw.get("tool_name") or "")
+    surface = _surface_for(tool_name)
     tool_input = raw.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = {}
@@ -197,14 +211,14 @@ def normalize(raw: dict[str, Any], *, installation_id: str) -> HookEvent:
     return HookEvent(
         schema_version=SCHEMA_VERSION,
         installation_id=installation_id,
-        trust_tier=_trust_tier(),
+        trust_tier=_trust_tier(surface),
         host="claude-code",
         host_version=None,  # not present in Claude Code's hook payload today
         adapter_version=ADAPTER_VERSION,
         host_session_id=str(raw.get("session_id") or ""),
         event_id=str(raw.get("tool_use_id") or ""),
         phase=phase,
-        surface=_surface_for(tool_name),
+        surface=surface,
         tool_name=tool_name,
         normalized_identity=tool_name,
         args=tool_input,

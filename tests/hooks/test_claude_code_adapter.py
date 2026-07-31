@@ -121,6 +121,35 @@ def test_trust_tier_is_t1_now_that_the_conformance_suite_actually_passed() -> No
     assert event.trust_tier == "T1"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Edit", {"file_path": "f.py", "old_string": "a", "new_string": "b"}),
+        ("Write", {"file_path": "f.py", "content": "x"}),
+        ("NotebookEdit", {"notebook_path": "n.ipynb"}),
+        ("mcp__belay__wrap", {}),
+    ],
+)
+def test_trust_tier_is_unknown_for_non_bash_surfaces_even_though_bash_is_t1(
+    tool_name: str, tool_input: dict[str, object]
+) -> None:
+    """Regression: an earlier version applied `_VERIFIED_TRUST_TIER`
+    (`"T1"`) to every Claude Code event regardless of `surface` -- a real
+    overclaim, since `tests/hooks/test_live_conformance.py` (E18.7) only
+    ever exercises the Bash surface. Edit/Write/NotebookEdit and native MCP
+    calls must report `UNKNOWN`, same as an entirely unverified host, until
+    each surface earns its own pinned-version conformance suite."""
+    raw = {
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_use_id": "toolu_1",
+    }
+    event = normalize(raw, installation_id="install1")
+    assert event.trust_tier == "UNKNOWN"
+
+
 class TestPostToolUseResultExtraction:
     """The field name Claude Code actually uses for a PostToolUse result
     (`tool_response` vs `tool_result`) could not be pinned down with full
