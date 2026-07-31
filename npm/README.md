@@ -15,4 +15,4 @@ npx belay-mcp run --config belay.wrap.json
 bundle or install Python itself.
 
 Source, docs, and the actual implementation live in the main repo:
-https://github.com/belay-mcp/belay
+https://github.com/Jairogelpi/belay-mcp

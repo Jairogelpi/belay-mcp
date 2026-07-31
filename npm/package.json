@@ -3,10 +3,10 @@
   "version": "0.2.0-alpha.1",
   "description": "Belay: safe, reversible tool execution for AI agents. npm wrapper around the belay-mcp PyPI package -- lets `npx belay-mcp` and MCP-client `npx` configs work without a manual pip install.",
   "license": "MIT",
-  "homepage": "https://github.com/belay-mcp/belay",
+  "homepage": "https://github.com/Jairogelpi/belay-mcp",
   "repository": {
     "type": "git",
-    "url": "https://github.com/belay-mcp/belay"
+    "url": "https://github.com/Jairogelpi/belay-mcp"
   },
   "keywords": ["mcp", "agents", "safety", "contracts", "saga", "rollback"],
   "bin": {
