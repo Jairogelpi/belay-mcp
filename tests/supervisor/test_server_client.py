@@ -218,7 +218,8 @@ def test_oversized_message_is_rejected_not_buffered(
 def test_duplicate_event_id_returns_cached_response_even_after_approval(
     running_supervisor: tuple[SupervisorIdentity, str],
 ) -> None:
-    """Idempotency (spec ARCH-006): the exact same event_id retried must get
+    """Idempotency (ARCH-006, see docs/adr/0020-extended-requirement-catalog.md):
+    the exact same event_id retried must get
     the exact same answer, not be silently re-decided against state that
     has since changed underneath it (here: a human approving the item
     between the two retries)."""

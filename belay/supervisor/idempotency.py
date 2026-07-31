@@ -1,4 +1,5 @@
-"""Durable idempotency store for hook events (spec ARCH-006): duplicate
+"""Durable idempotency store for hook events (ARCH-006, see
+docs/adr/0020-extended-requirement-catalog.md): duplicate
 event IDs MUST be idempotent -- across a supervisor restart, not merely for
 one process's in-memory lifetime (an earlier version cached this in a plain
 dict; a P0 review correctly pointed out that a restart between two retries

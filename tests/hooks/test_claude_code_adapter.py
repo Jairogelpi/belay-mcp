@@ -97,9 +97,11 @@ def test_normalize_rejects_unrecognized_hook_event_name() -> None:
 
 
 def test_trust_tier_is_t1_now_that_the_conformance_suite_actually_passed() -> None:
-    """P0 fix (original): no pinned-version conformance suite (spec §7.2)
-    had run against a real Claude Code binary, so claiming T1
-    unconditionally was an overclaim (TRUTH-004) -- it reported UNKNOWN
+    """P0 fix (original): no pinned-version conformance suite (TRUTH-004,
+    see docs/adr/0020-extended-requirement-catalog.md -- not a
+    `docs/spec.md` §7.2 citation) had run against a real Claude Code
+    binary, so claiming T1 unconditionally was an overclaim -- it
+    reported UNKNOWN
     instead. E18.7 (tests/hooks/test_live_conformance.py) is that suite,
     it exists now and passed against the pinned real `claude` binary, so
     T1 here reflects real evidence, not a hardcoded assumption -- the

@@ -1,5 +1,7 @@
-"""Native file-edit snapshot capture for rewind (E18.3, spec §9.2:
-FILE-001/002/004/005/006/008). Captures enough of a file's pre-edit state
+"""Native file-edit snapshot capture for rewind (E18.3,
+FILE-001/002/004/005/006/008 -- not a `docs/spec.md` §9.2 citation, see
+docs/adr/0020-extended-requirement-catalog.md). Captures enough of a
+file's pre-edit state
 to restore it later via `belay hooks rewind <event_id>` -- content-addressed
 blob storage under `belay_home()/snapshots/`, indexed by
 `belay/db/models.py`'s `FileSnapshotRow` (shares the same SQLite engine as

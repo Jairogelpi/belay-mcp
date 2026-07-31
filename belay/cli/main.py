@@ -990,7 +990,8 @@ def hooks_run(
 ) -> None:
     """Hook entrypoint: reads the calling agent's JSON payload from stdin, sends it to
     this install's local supervisor (spawning it on demand if it isn't already running --
-    spec ARCH-001/008), prints the response JSON to stdout, exits 0. Not for direct human
+    ARCH-001/008, see docs/adr/0020-extended-requirement-catalog.md), prints the response
+    JSON to stdout, exits 0. Not for direct human
     use -- this is what `belay hooks install` points the agent's own hook config at.
 
     PreToolUse gets a real decision (allow/deny). PostToolUse only records
@@ -1023,7 +1024,7 @@ def hooks_run(
 
 supervisor_app = typer.Typer(
     name="supervisor",
-    help="The per-install local supervisor (spec ARCH-001) that `belay hooks run` talks "
+    help="The per-install local supervisor (ARCH-001) that `belay hooks run` talks "
     "to. Rarely invoked directly -- `belay hooks run` starts one on demand.",
     no_args_is_help=True,
 )

@@ -4,8 +4,10 @@ Real end-to-end proof, against the actual installed `claude` CLI binary,
 that belay's Native Agent Gate genuinely intercepts and blocks a real
 Claude Code session -- not just that our own decision logic returns
 "deny" in isolation (every other test in this repo), but that the real
-host binary never executes the denied command. This is what spec §7.2's
-"pinned-version end-to-end bypass suite" (TRUTH-004) means before a host
+host binary never executes the denied command. This is what TRUTH-004's
+"pinned-version end-to-end bypass suite" (see
+docs/adr/0020-extended-requirement-catalog.md; not a `docs/spec.md` §7.2
+citation -- that section is about approver identity) means before a host
 integration can claim `trust_tier="T1"` -- see
 `belay/hooks/claude_code_adapter.py`'s own `_VERIFIED_TRUST_TIER`
 docstring for the honesty bar this file exists to clear.

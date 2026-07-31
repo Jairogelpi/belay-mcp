@@ -1,4 +1,5 @@
-"""On-demand supervisor lifecycle (spec ARCH-008): connect to an
+"""On-demand supervisor lifecycle (ARCH-008, see
+docs/adr/0020-extended-requirement-catalog.md): connect to an
 already-running supervisor when there is one; otherwise spawn one as a
 detached background process and wait for it to come up. No system-service
 integration yet (ARCH-008's service-manager integration is P1) -- on-demand

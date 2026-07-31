@@ -1,5 +1,7 @@
 """belay/hooks/file_snapshot.py: native file-edit capture/restore for
-rewind (E18.3, spec §9.2 FILE-001/002/004/005/006/008)."""
+rewind (E18.3, FILE-001/002/004/005/006/008 -- see
+docs/adr/0020-extended-requirement-catalog.md, not a `docs/spec.md` §9.2
+citation)."""
 
 from __future__ import annotations
 

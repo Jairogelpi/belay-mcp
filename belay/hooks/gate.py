@@ -6,7 +6,9 @@ agent's own client would show, which would let a human bypass Belay's queue
 entirely -- the opposite of the point of routing through it (confirmed
 product decision, plan-v2 E18).
 
-Operates on the common `HookEvent` (spec §7.1), never a host's raw payload
+Operates on the common `HookEvent` (`belay/supervisor/protocol.py` --
+not a `docs/spec.md` section, see
+`docs/adr/0020-extended-requirement-catalog.md`), never a host's raw payload
 shape directly -- a host adapter (`belay/hooks/claude_code_adapter.py`, and
 whatever comes later for Codex) normalizes into `HookEvent` first and
 renders `GateDecision` back into its own host's expected response JSON
@@ -256,9 +258,10 @@ def evaluate_file_edit(
     for human approval would make this unusable for a normal coding
     session; the actual safety value here is being able to UNDO an edit
     afterward via `belay hooks rewind <event_id>`, which this captures a
-    snapshot for as a side effect of allowing (spec §9.2 FILE-001).
+    snapshot for as a side effect of allowing (FILE-001, see
+    docs/adr/0020-extended-requirement-catalog.md).
 
-    The one case that still pauses: a file too large to capture (spec
+    The one case that still pauses: a file too large to capture (
     FILE-006 -- "exceeding capture limits downgrades reversibility and
     normally requires approval"). Allowing that silently would make an
     edit that *can't* be undone look identical to one that can; ask a
@@ -408,8 +411,10 @@ def ledger_session_id(event: HookEvent) -> str:
 
 def pre_event_evidence(event: HookEvent, decision: GateDecision) -> dict[str, Any]:
     """Pure -- what belongs in the durable ledger for a PreToolUse decision
-    (spec §12.1: policy/contract/pack/adapter versions, repository state,
-    the actual verdict). The caller (the supervisor) owns writing this to
+    (policy/contract/pack/adapter versions, repository state, the actual
+    verdict -- not a `docs/spec.md` §12.1, which doesn't exist; see
+    `docs/adr/0020-extended-requirement-catalog.md`). The caller (the
+    supervisor) owns writing this to
     `LedgerStore`; this function only shapes the payload."""
     return {
         "event_id": event.event_id,
@@ -429,8 +434,11 @@ def pre_event_evidence(event: HookEvent, decision: GateDecision) -> dict[str, An
 
 def post_event_evidence(event: HookEvent, *, duration_ms: float | None) -> dict[str, Any]:
     """Pure -- what belongs in the durable ledger for a PostToolUse result
-    (spec §7.1: "result status, exit code, duration, output digest, and
-    truncation flag for post events"). `duration_ms` is passed in rather
+    (result status, exit code, duration, output digest, and truncation
+    flag for post events -- not a `docs/spec.md` §7.1 quote, which is
+    actually about approval queue semantics; see
+    `docs/adr/0020-extended-requirement-catalog.md`). `duration_ms` is
+    passed in rather
     than read from `event` because it can only be computed by whoever holds
     both this event's and its PreToolUse counterpart's monotonic timestamps
     -- a single stateless `normalize()` call never sees both."""

@@ -1,6 +1,8 @@
 """Claude Code host adapter: normalizes Claude Code's own hook stdin JSON
-into the common `HookEvent` (spec §7.1) the gate's decision logic runs
-against, and renders a `GateDecision` back into Claude Code's own expected
+into the common `HookEvent` (`belay/supervisor/protocol.py` -- not a
+`docs/spec.md` section, see `docs/adr/0020-extended-requirement-catalog.md`)
+the gate's decision logic runs against, and renders a `GateDecision` back
+into Claude Code's own expected
 response JSON (`hookSpecificOutput.permissionDecision`).
 
 Verified schema (fetched from code.claude.com/docs/en/hooks, the first-party
@@ -29,9 +31,11 @@ from belay.supervisor.protocol import (
 ADAPTER_VERSION = "claude-code/1"
 
 #: An earlier version hardcoded `trust_tier="T1"` on every event -- a P0
-#: review correctly called that an overclaim: spec TRUTH-004 says a host
-#: integration is PROTECTED "only after its pinned-version end-to-end
-#: bypass suite passes" (spec §7.2). That suite now exists and passes:
+#: review correctly called that an overclaim: TRUTH-004 (see
+#: docs/adr/0020-extended-requirement-catalog.md; not a docs/spec.md
+#: section) says a host integration is PROTECTED only after its
+#: pinned-version end-to-end bypass suite passes. That suite now exists
+#: and passes:
 #: `tests/hooks/test_live_conformance.py` (E18.7) spawns the real,
 #: installed `claude` CLI (pinned to `PINNED_CLAUDE_VERSION` there --
 #: currently 2.1.219, skips rather than claiming conformance against an
@@ -42,7 +46,7 @@ ADAPTER_VERSION = "claude-code/1"
 #: disk (not just "the model said it didn't run it") and a real pending
 #: item lands in the actual approval queue, while a safe command still
 #: reaches the real host and returns real output. That is the pinned-
-#: version end-to-end bypass suite spec §7.2 asks for, so `"T1"` here is
+#: version end-to-end bypass suite TRUTH-004 asks for, so `"T1"` here is
 #: no longer an overclaim the way the earlier hardcoded version was --
 #: it's specifically scoped to Claude Code's Bash surface (what the suite
 #: actually exercises), not a claim about Edit/Write/MCP surfaces or any
@@ -89,8 +93,9 @@ def _repo_identity(cwd: str | None) -> str | None:
     rev-parse HEAD` only -- not the fuller `belay/ledger/test_evidence.py`
     `git_context()` (tree hash + dirty-worktree scan too), since that runs
     `git status --porcelain`, which can be slow on a large repo and this
-    runs on every single hook decision (spec §16 latency budget), not once
-    per verified test."""
+    runs on every single hook decision (a latency budget for every hook
+    decision -- there is no `docs/spec.md` §16, the spec ends at §14), not
+    once per verified test."""
     if not cwd:
         return None
     try:

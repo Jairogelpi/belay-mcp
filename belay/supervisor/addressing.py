@@ -5,8 +5,9 @@ data lives -- all derived deterministically from the project-anchor path a
 that value is only ever used as an identity seed now, never opened directly
 as a database file -- see `data_path` below), so each project/install gets
 its own independent supervisor process, capability, and storage rather than
-one global daemon shared across unrelated projects (spec ARCH-003:
-"installation-scoped capability").
+one global daemon shared across unrelated projects (ARCH-003:
+"installation-scoped capability" -- see
+docs/adr/0020-extended-requirement-catalog.md).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def _default_belay_home() -> Path:
 def belay_home() -> Path:
     """User-scoped, outside any project directory -- an agent restricted to
     project-directory tool calls cannot read or tamper with anything stored
-    here (spec ARCH-003/004: not a project file, not solely an env var).
+    here (ARCH-003/004: not a project file, not solely an env var).
     Everything privacy/security-sensitive this package owns (capability
     tokens, spawn locks, and -- since a P0 review found the authoritative
     approvals database sitting inside the project it gates, defeating the
@@ -60,7 +61,7 @@ class SupervisorIdentity:
     install_id: str
     #: `multiprocessing.connection` address: a Windows named-pipe path
     #: (`\\.\pipe\...`) on win32, a Unix domain socket path elsewhere --
-    #: never an unauthenticated TCP port (spec ARCH-002).
+    #: never an unauthenticated TCP port (ARCH-002).
     address: str
     authkey_path: Path
     lock_path: Path

@@ -1,4 +1,5 @@
-"""Installation-scoped capability token (spec ARCH-003/004): a random secret,
+"""Installation-scoped capability token (ARCH-003/004, see
+docs/adr/0020-extended-requirement-catalog.md): a random secret,
 generated once, stored outside the project directory with restrictive
 permissions -- never a plain environment variable as the sole gate, since an
 agent can set environment variables itself. Both the supervisor server and

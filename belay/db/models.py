@@ -80,7 +80,8 @@ class IdempotencyRow(Base):
 
 class HookEventRow(Base):
     """One row per hook event the supervisor (`belay/supervisor/`) has
-    decided (spec ARCH-006: duplicate event IDs MUST be idempotent --
+    decided (ARCH-006, see docs/adr/0020-extended-requirement-catalog.md:
+    duplicate event IDs MUST be idempotent --
     durably, across a supervisor restart, not merely for one process's
     in-memory lifetime). A distinct table/key scheme from `IdempotencyRow`
     above on purpose: that one is the saga executor's own MCP-call
@@ -105,7 +106,8 @@ class HookEventRow(Base):
 
 class FileSnapshotRow(Base):
     """One row per native file-edit hook event captured for rewind (E18.3,
-    spec §9.2 FILE-001/004/005/008). Keyed by `event_id` (the host's
+    FILE-001/004/005/008, see docs/adr/0020-extended-requirement-catalog.md).
+    Keyed by `event_id` (the host's
     `tool_use_id` for the Edit/Write call) rather than path+timestamp, so a
     duplicate/retried event naturally maps to the same row instead of
     creating a second snapshot of the same edit.

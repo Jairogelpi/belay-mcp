@@ -1,4 +1,6 @@
-"""Recovery scenarios (spec ARCH-007, review point 8): abandoned pipe/socket
+"""Recovery scenarios (ARCH-007, see
+docs/adr/0020-extended-requirement-catalog.md; review point 8): abandoned
+pipe/socket
 after a hard kill, and durability across a restart. Spawns real `belay
 supervisor serve` subprocesses (not threads) and kills them forcefully
 (`Process.kill()` -- SIGKILL on POSIX, TerminateProcess on Windows, not a
@@ -104,7 +106,7 @@ def test_a_fresh_supervisor_can_be_spawned_after_a_hard_kill(tmp_path: Path) -> 
 def test_pending_approval_survives_a_hard_kill_and_is_visible_to_a_fresh_supervisor(
     tmp_path: Path,
 ) -> None:
-    """Durability across an unclean restart (spec ARCH-007): an approval
+    """Durability across an unclean restart (ARCH-007): an approval
     queued by supervisor A must still be there -- not lost, not corrupted --
     for supervisor B (a fresh process, same identity) after A is killed
     without any graceful shutdown."""

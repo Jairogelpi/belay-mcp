@@ -1,4 +1,5 @@
-"""The local supervisor (spec ARCH-001/002/006/007): a persistent,
+"""The local supervisor (ARCH-001/002/006/007, see
+docs/adr/0020-extended-requirement-catalog.md): a persistent,
 authenticated process holding the `ApprovalQueue`'s connection warm (so a
 hook decision doesn't pay Python interpreter cold-start on every single tool
 call) and providing duplicate-event idempotency that survives a restart
@@ -7,8 +8,8 @@ a P0 review correctly found that losing an in-memory cache on restart could
 re-decide a retried event against changed approval state).
 
 Listens on a `multiprocessing.connection` address (a Windows named pipe or a
-POSIX Unix domain socket -- never an unauthenticated TCP port, spec
-ARCH-002) with an installation-scoped `authkey` (spec ARCH-003/004,
+POSIX Unix domain socket -- never an unauthenticated TCP port,
+ARCH-002) with an installation-scoped `authkey` (ARCH-003/004,
 `belay/supervisor/auth.py`); `multiprocessing.connection` performs an
 HMAC-based challenge-response handshake using that key before any payload is
 exchanged, so the token itself never crosses the wire.
@@ -215,8 +216,9 @@ class Supervisor:
 
         if not event.event_id:
             # No durable key can be formed without one -- gate.evaluate()
-            # denies this itself (ambiguous identity, spec §7.1), every
-            # time, so there's nothing useful to cache anyway.
+            # denies this itself (ambiguous identity -- its own rule, not
+            # spec §7.1, which is about the approval queue, not HookEvent),
+            # every time, so there's nothing useful to cache anyway.
             return self._decide(event, render)
 
         key = event_key(event.installation_id, event.host, event.host_session_id,

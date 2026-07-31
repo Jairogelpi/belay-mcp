@@ -1,4 +1,10 @@
-"""Common hook event schema (spec §7.1) and the supervisor IPC envelope.
+"""Common hook event schema and the supervisor IPC envelope.
+
+This schema (`HookEvent`, `TrustTier`, and friends below) is an E18 Native
+Agent Gate concept, not a `docs/spec.md` section -- despite several
+citations below that used to say otherwise. See
+`docs/adr/0020-extended-requirement-catalog.md` for the real source of the
+`TRUTH-*`/`ARCH-*`/`FILE-*` IDs referenced in this module.
 
 Every host adapter normalizes its own hook payload into `HookEvent` before
 it ever reaches the decision logic in `belay/hooks/`, so `belay/hooks/gate.py`
@@ -28,20 +34,21 @@ SCHEMA_VERSION = 1
 
 Phase = Literal["pre", "post"]
 Surface = Literal["shell", "file", "mcp", "other"]
-#: Spec §5.2 defines T0/T1/T2. `"UNKNOWN"` is spec §1's separate state
-#: ("Belay cannot establish the state safely. It MUST never render this as
-#: green or protected") -- included here because an adapter that hasn't
+#: T0/T1/T2 are this module's own trust-tier scale (not a `docs/spec.md`
+#: definition). `"UNKNOWN"` is the honest default: an adapter that hasn't
 #: actually been verified against a real host binary and pinned version
-#: range (spec §7.2's conformance suite; TRUTH-004: "PROTECTED only after
-#: its pinned-version end-to-end bypass suite passes") has no honest T0/T1/T2
-#: answer to give. See `claude_code_adapter.py`'s `_trust_tier()`.
+#: range (TRUTH-004: "PROTECTED only after its pinned-version end-to-end
+#: bypass suite passes" -- see docs/adr/0020-extended-requirement-catalog.md)
+#: has no honest T0/T1/T2 answer to give, and this must never be rendered
+#: as green/protected regardless. See `claude_code_adapter.py`'s
+#: `_trust_tier()`.
 TrustTier = Literal["T0", "T1", "T2", "UNKNOWN"]
 
 
 @dataclass(frozen=True)
 class HookEvent:
-    """Spec §7.1's normalized event -- every field it requires, present
-    regardless of which host produced the raw payload."""
+    """The Native Agent Gate's normalized event -- every field it requires,
+    present regardless of which host produced the raw payload."""
 
     schema_version: int
     installation_id: str
@@ -61,8 +68,8 @@ class HookEvent:
     os_user: str
     monotonic_ns: int
     wall_clock: str
-    # Post-phase only (spec §7.1: "result status, exit code, duration,
-    # output digest, and truncation flag for post events").
+    # Post-phase only: result status, exit code, duration, output digest,
+    # and truncation flag.
     result_status: str | None = None
     exit_code: int | None = None
     duration_ms: float | None = None
@@ -76,8 +83,8 @@ class HookEvent:
 def local_os_user() -> str:
     """The OS user identity, obtained from the OS itself -- never from
     anything in a hook payload, which an adapter's own host process (and,
-    transitively, whatever's steering it) controls (spec §7.1: "obtained
-    outside agent-supplied text")."""
+    transitively, whatever's steering it) controls -- obtained outside
+    agent-supplied text."""
     try:
         return os.getlogin()
     except OSError:
@@ -85,7 +92,7 @@ def local_os_user() -> str:
 
 
 def now_fields() -> tuple[int, str]:
-    """(monotonic_ns, wall_clock ISO-8601) -- spec §7.1 wants both: monotonic
+    """(monotonic_ns, wall_clock ISO-8601) -- both matter: monotonic
     for duration/ordering, wall-clock for human-facing evidence, never one
     computed from the other."""
     return time.monotonic_ns(), datetime.now(UTC).isoformat()
