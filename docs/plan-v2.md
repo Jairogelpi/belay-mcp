@@ -6,6 +6,16 @@ Entregas are additive — they must not weaken any prior test or break L3
 conformance (`belay-conformance run --target belay --level 3` must still
 pass after each).
 
+This document's own planning detail stops at E16. E17-E20 shipped after it
+without a corresponding planning entry here — see
+[`README.md`](../README.md)'s "What's new since v0.1.0" table and
+`CHANGELOG.md` for what they are. Only E20 has a dedicated ADR
+([`docs/adr/0019`](adr/0019-e20-verified-packs-scope.md)); E17-E19 (including
+E18's Native Agent Gate) were never given their own ADR — `docs/adr/0017`
+and `0018` cover unrelated maintenance work (a flaky-test fix, the
+traceability matrix), not those entregas. Treat this file's title as
+"E10-E16, as planned" rather than "everything shipped past v0.1.0."
+
 ## E10 — Statistical anomaly baselines (DONE, shipped)
 ## E11 — Real SQL dry-run adapter (DONE, shipped)
 ## E12 — Counterfactual replay (DONE, shipped)
