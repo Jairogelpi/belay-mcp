@@ -215,6 +215,16 @@ this gate does and does not protect against.
 belay supervisor status --db belay-hooks.db   # running -- listening on ...
 ```
 
+**Opt-in contract check** (R1 first slice, [ADR 0021](docs/adr/0021-r1-native-gate-contract-check.md)):
+`--contracts <file>` makes native file edits resolve against a real
+`ContractSet`, the same way `belay run`'s MCP proxy resolves a tool -- a
+tool with no matching contract denies (`contract_missing`) instead of the
+default allow. Off unless you opt in:
+
+```bash
+belay hooks install --contracts packs/filesystem/contracts.yaml --yes
+```
+
 #### Live conformance (E18.7): `trust_tier="T1"` for Claude Code's Bash surface
 
 `tests/hooks/test_live_conformance.py` is a real, opt-in (spends real

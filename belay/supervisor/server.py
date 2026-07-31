@@ -44,6 +44,9 @@ from typing import Any
 from sqlalchemy import create_engine
 
 from belay.approvals.queue import ApprovalQueue
+from belay.contracts.loader import load_contract_set
+from belay.contracts.model import ContractSet
+from belay.errors import BelayError
 from belay.hooks import claude_code_adapter, gate
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
@@ -149,12 +152,36 @@ class Supervisor:
         #: (see `belay/supervisor/idempotency.py`).
         self._pre_times: dict[str, int] = {}
         self._pre_times_lock = threading.Lock()
+        self._contract_set = self._load_contract_set()
+
+    def _load_contract_set(self) -> ContractSet | None:
+        """`None` (the default) is unchanged legacy behavior -- this only
+        returns a real `ContractSet` when `belay hooks install --contracts
+        <file>` wrote `identity.contracts_pointer_path` for this install.
+        Best-effort: a missing or now-invalid pointed-to file falls back
+        to `None` rather than crashing the supervisor or fail-closed
+        denying every file edit -- this is opt-in extra strictness, not a
+        security invariant this process must enforce or refuse to start.
+        Revisiting this fail-open choice (e.g. surfacing it via `belay
+        hooks doctor`) is real follow-up work, not done in this slice."""
+        pointer = self._identity.contracts_pointer_path
+        if not pointer.is_file():
+            return None
+        try:
+            contracts_path = pointer.read_text(encoding="utf-8").strip()
+            if not contracts_path:
+                return None
+            return load_contract_set([contracts_path])
+        except (OSError, BelayError):
+            return None
 
     def _decide_pre(self, event: HookEvent) -> GateDecision:
         if event.surface == "shell" and event.tool_name == "Bash":
             return gate.evaluate(event, self._queue)
         if event.surface == "file":
-            return gate.evaluate_file_edit(event, self._queue, self._snapshots)
+            return gate.evaluate_file_edit(
+                event, self._queue, self._snapshots, contract_set=self._contract_set
+            )
         if event.surface == "mcp":
             return gate.evaluate_mcp_call(event, self._queue)
         return gate.evaluate(event, self._queue)  # its own guard denies unrecognized surfaces

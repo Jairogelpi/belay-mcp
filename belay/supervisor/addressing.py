@@ -71,6 +71,17 @@ class SupervisorIdentity:
     #: gate itself allowed) must not be able to reach it directly and, say,
     #: flip a `pending` row to `approved` by hand.
     data_path: Path
+    #: A one-line pointer file (plain text: the absolute path to a
+    #: contracts YAML/JSON) written by `belay hooks install --contracts
+    #: <file>`. Its presence is what turns on the R1-first-slice check in
+    #: `belay/hooks/gate.py::evaluate_file_edit`: native `Edit`/`Write`/
+    #: `NotebookEdit` calls get resolved against the real `ContractSet` the
+    #: same way the MCP proxy's `resolve()` does, instead of always
+    #: allowing by default. Absent (the default) means fully unchanged
+    #: behavior -- this is opt-in, not a silent tightening for existing
+    #: installs. Stored under `belay_home()`, same private-storage rule as
+    #: everything else here.
+    contracts_pointer_path: Path
 
 
 def supervisor_identity(
@@ -104,4 +115,5 @@ def supervisor_identity(
         authkey_path=home / "keys" / f"{install_id}.key",
         lock_path=home / "run" / f"{install_id}.lock",
         data_path=home / "data" / f"{install_id}.db",
+        contracts_pointer_path=home / "data" / f"{install_id}.contracts_path.txt",
     )

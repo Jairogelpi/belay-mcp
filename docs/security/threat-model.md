@@ -145,16 +145,23 @@ These are **not** the same governance engine. The MCP proxy
 (`belay/proxy/lifecycle.py`) enforces declared `Contract`/`effects` through
 a real `PolicyEngine`, with intent-contract enforcement, per-identity
 quotas, anomaly baselines, and session fencing on every call. The Native
-Agent Gate (`belay/hooks/gate.py`) has none of these: Bash is governed by a
-static pattern classifier, file edits are allowed by default (unlike the
-proxy's contract-missing-denies default), and native MCP calls always
-pause unconditionally. An approval granted on one path cannot satisfy the
-other, even for what a human would call the same action. Until this is
-resolved (tracked as an open design question, not yet an ADR), treat the
-Native Agent Gate as a **materially weaker, best-effort** governance layer
-compared to the MCP proxy — appropriate for routine coding-session safety
-net, not a substitute for wrapping a tool server through `belay run` when
-the stakes are high.
+Agent Gate (`belay/hooks/gate.py`) has none of these: Bash is still
+governed by a static pattern classifier (no `PolicyEngine`), and native MCP
+calls always pause unconditionally. An approval granted on one path cannot
+satisfy the other, even for what a human would call the same action.
+
+**One gap has been closed, opt-in** ([ADR 0021](../adr/0021-r1-native-gate-contract-check.md),
+R1's first slice): `belay hooks install --contracts <file>` makes native
+`Edit`/`Write`/`NotebookEdit` calls resolve against a real `ContractSet`
+the same way the MCP proxy's `resolve()` does -- no matching contract now
+denies (`contract_missing`), instead of the old unconditional allow. This
+is off by default; every install that doesn't pass `--contracts` is
+unchanged. Bash and native MCP calls are untouched by this slice and
+remain fully divergent from the proxy path. Until the rest is resolved
+(tracked as open R1 scope), treat the Native Agent Gate as a **materially
+weaker, best-effort** governance layer compared to the MCP proxy —
+appropriate for routine coding-session safety net, not a substitute for
+wrapping a tool server through `belay run` when the stakes are high.
 
 ## A note on unformalized invariants
 

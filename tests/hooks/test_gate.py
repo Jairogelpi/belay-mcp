@@ -20,16 +20,20 @@ from pathlib import Path
 import pytest
 from belay.approvals.queue import ApprovalQueue
 from belay.clock import FixedClock
+from belay.contracts.model import ContractSet
 from belay.hooks.claude_code_adapter import normalize
+from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import (
     GateDecision,
     evaluate,
+    evaluate_file_edit,
     evaluate_mcp_call,
     ledger_session_id,
     post_event_evidence,
     pre_event_evidence,
 )
 from belay.supervisor.protocol import HookEvent
+from sqlalchemy import create_engine
 
 
 @pytest.fixture
@@ -417,6 +421,103 @@ class TestMcpCall:
         result = evaluate_mcp_call(event, queue)
         assert result.verdict == "deny"
         assert queue.list() == []
+
+
+def _file_event(tool_name: str, path: str, session_id: str = "sess-1") -> HookEvent:
+    raw = {
+        "session_id": session_id,
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"file_path": path, "old_string": "a", "new_string": "b"},
+        "tool_use_id": f"toolu_{abs(hash((session_id, tool_name, path)))}",
+    }
+    return normalize(raw, installation_id="test-install")
+
+
+class TestFileEditContractCheck:
+    """R1 first slice: closes the exact divergence an audit of this module
+    against `belay/proxy/lifecycle.py` found -- the MCP proxy's `resolve()`
+    denies `contract_missing` for a tool with no declared contract, this
+    gate used to allow one unconditionally. `contract_set=None` (the
+    default, no `belay hooks install --contracts` configured) must stay
+    fully unchanged; only an explicitly configured `ContractSet` turns the
+    check on."""
+
+    def _snapshots(self, tmp_path: Path) -> SnapshotStore:
+        engine = create_engine("sqlite:///:memory:", future=True)
+        return SnapshotStore(engine, tmp_path / "snaps")
+
+    def test_no_contract_set_configured_is_unchanged_allow_by_default(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "f.txt"
+        target.write_text("original", encoding="utf-8")
+        event = _file_event("Write", str(target))
+        result = evaluate_file_edit(event, queue, self._snapshots(tmp_path))
+        assert result.verdict == "allow"
+        assert queue.list() == []
+
+    def test_contract_set_configured_but_no_matching_contract_denies(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "f.txt"
+        target.write_text("original", encoding="utf-8")
+        event = _file_event("Write", str(target))
+        empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
+
+        snapshots = self._snapshots(tmp_path)
+        result = evaluate_file_edit(event, queue, snapshots, contract_set=empty_set)
+
+        assert result.verdict == "deny"
+        assert "contract_missing" in result.reason
+        assert "'Write'" in result.reason
+        # Denied before ever reaching capture -- no snapshot, no queued item.
+        assert snapshots.get(event.event_id) is None
+        assert queue.list() == []
+
+    def test_contract_set_configured_with_a_matching_contract_falls_through_to_allow(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        from belay.contracts.model import Contract, Effect
+
+        target = tmp_path / "f.txt"
+        target.write_text("original", encoding="utf-8")
+        event = _file_event("Write", str(target))
+        write_contract = Contract(
+            belay_contract="0.1",
+            tool="Write",
+            reversibility="irreversible",
+            effects=[Effect(type="update", resource="native.file")],
+        )
+        configured_set = ContractSet(
+            contracts={"Write": write_contract}, set_hash="sha256:has-write"
+        )
+
+        snapshots = self._snapshots(tmp_path)
+        result = evaluate_file_edit(event, queue, snapshots, contract_set=configured_set)
+
+        assert result.verdict == "allow"
+        assert snapshots.get(event.event_id) is not None
+
+    def test_contract_missing_denial_happens_before_the_no_path_check(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        """A call with neither a resolvable path nor a matching contract
+        must report contract_missing, not the unrelated "no recognizable
+        path argument" reason -- the config problem is the one worth
+        surfacing first."""
+        raw = {
+            "session_id": "s",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {},  # no file_path/path key at all
+            "tool_use_id": "toolu_nopath",
+        }
+        event = normalize(raw, installation_id="test-install")
+        empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
+        result = evaluate_file_edit(event, queue, self._snapshots(tmp_path), contract_set=empty_set)
+        assert result.verdict == "deny"
+        assert "contract_missing" in result.reason
 
 
 class TestLedgerEvidenceHelpers:

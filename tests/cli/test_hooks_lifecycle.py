@@ -333,6 +333,141 @@ def test_install_reject_unsupported_client() -> None:
     assert "unsupported" in result.output
 
 
+class TestInstallWithContracts:
+    """R1 first slice: `belay hooks install --contracts <file>` -- opt-in,
+    off by default. Validates the contracts file up front (nothing written
+    on a bad one) and records its path in the per-install pointer file
+    `belay/supervisor/server.py::Supervisor._load_contract_set` reads."""
+
+    def _contracts_file(self, tmp_path: Path) -> Path:
+        path = tmp_path / "hook-contracts.yaml"
+        path.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: Write\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: update\n"
+            "    resource: native.file\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_valid_contracts_file_is_recorded_in_the_pointer_file(
+        self, tmp_path: Path
+    ) -> None:
+        contracts = self._contracts_file(tmp_path)
+        result = runner.invoke(
+            app, ["hooks", "install", "--contracts", str(contracts), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "will now be checked against" in result.output
+
+        from belay.supervisor.addressing import supervisor_identity
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        assert identity.contracts_pointer_path.is_file()
+        assert identity.contracts_pointer_path.read_text(encoding="utf-8").strip() == str(
+            contracts.resolve()
+        )
+
+    def test_invalid_contracts_file_fails_and_writes_nothing(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("belay_contract: '0.1'\ntool: Write\n", encoding="utf-8")  # missing effects
+
+        result = runner.invoke(app, ["hooks", "install", "--contracts", str(bad), "--yes"])
+        assert result.exit_code != 0
+        assert "invalid" in result.output
+        assert not _settings_path(tmp_path).is_file()
+
+        from belay.supervisor.addressing import supervisor_identity
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        assert not identity.contracts_pointer_path.is_file()
+
+    def test_nonexistent_contracts_file_fails_and_writes_nothing(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["hooks", "install", "--contracts", str(tmp_path / "missing.yaml"), "--yes"],
+        )
+        assert result.exit_code != 0
+        assert not _settings_path(tmp_path).is_file()
+
+    def test_omitting_contracts_writes_no_pointer_file(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["hooks", "install", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        from belay.supervisor.addressing import supervisor_identity
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        assert not identity.contracts_pointer_path.is_file()
+
+
+class TestFileEditContractCheckEndToEnd:
+    """R1 first slice, exercised through the real CLI end to end: `belay
+    hooks install --contracts <file>` followed by a real `belay hooks run`
+    against a real (detached, subprocess-spawned) supervisor -- not just
+    the unit-level `evaluate_file_edit`/`Supervisor._load_contract_set`
+    coverage elsewhere. Proves the pointer file written at install time is
+    actually picked up by the supervisor process that later spawns."""
+
+    def _install_with_contracts(self, tmp_path: Path) -> None:
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: Write\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: update\n"
+            "    resource: native.file\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app, ["hooks", "install", "--contracts", str(contracts), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+
+    def _run_pre(self, tool_name: str, target: Path, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "tool_input": {"file_path": str(target), "content": "new content"},
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "belay-hooks.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+
+    def test_tool_with_a_declared_contract_is_allowed(self, tmp_path: Path) -> None:
+        self._install_with_contracts(tmp_path)
+        target = tmp_path / "f.txt"
+        out = self._run_pre("Write", target, "toolu_has_contract")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_tool_with_no_declared_contract_is_denied_contract_missing(
+        self, tmp_path: Path
+    ) -> None:
+        self._install_with_contracts(tmp_path)  # only declares "Write", not "Edit"
+        target = tmp_path / "f.txt"
+        target.write_text("original", encoding="utf-8")
+        out = self._run_pre("Edit", target, "toolu_no_contract")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "contract_missing" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_without_contracts_configured_edit_is_still_allowed_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        result = runner.invoke(app, ["hooks", "install", "--yes"])  # no --contracts
+        assert result.exit_code == 0, result.output
+        target = tmp_path / "f.txt"
+        out = self._run_pre("Edit", target, "toolu_legacy_default")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
 class TestFileEditRewind:
     """E18.3: native Edit/Write calls are captured for rewind, end-to-end
     through the real CLI, two separate `belay hooks run` invocations (pre

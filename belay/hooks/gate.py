@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from belay.approvals.queue import ApprovalQueue
+from belay.contracts.model import ContractSet
 from belay.hooks.decision import DECISION_LOGIC_VERSION, Verdict, classify_bash
 from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
 from belay.supervisor.addressing import belay_home
@@ -251,7 +252,11 @@ def file_path_from_args(args: dict[str, Any]) -> str | None:
 
 
 def evaluate_file_edit(
-    event: HookEvent, queue: ApprovalQueue, snapshots: SnapshotStore
+    event: HookEvent,
+    queue: ApprovalQueue,
+    snapshots: SnapshotStore,
+    *,
+    contract_set: ContractSet | None = None,
 ) -> GateDecision:
     """Edit/Write/NotebookEdit calls are ALLOWED by default -- unlike Bash,
     where an unrecognized command pauses. Gating every routine file write
@@ -260,6 +265,22 @@ def evaluate_file_edit(
     afterward via `belay hooks rewind <event_id>`, which this captures a
     snapshot for as a side effect of allowing (FILE-001, see
     docs/adr/0020-extended-requirement-catalog.md).
+
+    `contract_set` is `None` by default -- fully unchanged legacy
+    behavior. When `belay hooks install --contracts <file>` configured
+    one (R1 first slice, closing the exact gap an audit of this module
+    against `belay/proxy/lifecycle.py` found: the MCP proxy's `resolve()`
+    denies `contract_missing` for an undeclared tool, this gate used to
+    allow one unconditionally), the tool name is resolved against it the
+    same way `belay/proxy/lifecycle.py::resolve()` does. No matching
+    contract is a hard `deny` -- not queued for approval, since spec §4.6
+    treats `contract_missing` as a configuration problem for the operator
+    to fix (declare a contract or explicitly opt this tool into
+    passthrough), not a one-off a human approves ad hoc. A matching
+    contract falls through to the existing capture-and-allow behavior
+    below -- this slice only adds the missing-contract check, it does not
+    yet reinterpret a *present* contract's `reversibility`/effects for
+    native edits (real follow-up work, not done here).
 
     The one case that still pauses: a file too large to capture (
     FILE-006 -- "exceeding capture limits downgrades reversibility and
@@ -273,6 +294,14 @@ def evaluate_file_edit(
         return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
     if not event.event_id:
         return GateDecision("deny", "belay: missing event id -- ambiguous identity, denying")
+
+    if contract_set is not None and contract_set.resolve(event.tool_name) is None:
+        return GateDecision(
+            "deny",
+            f"belay: contract_missing -- no contract declared for {event.tool_name!r} and a "
+            "ContractSet is configured for this install (spec §4.6 default rule) -- add one "
+            "to the contracts file this install was configured with, or this tool stays denied",
+        )
 
     path_str = file_path_from_args(event.args)
     if path_str is None:

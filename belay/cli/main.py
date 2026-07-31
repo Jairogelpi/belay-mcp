@@ -1091,6 +1091,14 @@ def hooks_install(
         help="'project' (.claude/settings.json, default) or 'user' (~/.claude/settings.json).",
     ),
     db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+    contracts: str | None = typer.Option(
+        None,
+        "--contracts",
+        help="Opt-in (R1 first slice): a contracts YAML/JSON file. When set, native "
+        "Edit/Write/NotebookEdit calls are resolved against it the same way belay run's "
+        "MCP proxy resolves a tool -- no matching contract denies (contract_missing) "
+        "instead of allowing by default. Omit for today's unchanged behavior.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would change, write nothing."
     ),
@@ -1112,6 +1120,28 @@ def hooks_install(
     if scope not in ("project", "user"):
         typer.echo(f"error: --scope must be 'project' or 'user', got {scope!r}", err=True)
         raise typer.Exit(code=1)
+
+    contracts_path: Path | None = None
+    if contracts is not None:
+        from belay.contracts.loader import load_contract_set
+        from belay.errors import BelayError
+
+        contracts_path = Path(contracts).resolve()
+        try:
+            load_contract_set([contracts_path])
+        except BelayError as exc:
+            typer.echo(
+                f"error: --contracts {contracts_path} is invalid: {exc} -- nothing was written",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(
+                f"error: could not read --contracts {contracts_path}: {exc} -- "
+                "nothing was written",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
 
     clients = [c.strip() for c in client.split(",")]
     for c in clients:
@@ -1155,13 +1185,22 @@ def hooks_install(
 
     from belay.supervisor.addressing import supervisor_identity
 
-    data_path = supervisor_identity(Path(db).resolve()).data_path
+    identity = supervisor_identity(Path(db).resolve())
     typer.echo(
-        f"approvals queued by this hook land in {data_path} (private -- outside this "
+        f"approvals queued by this hook land in {identity.data_path} (private -- outside this "
         f"project, so the agent this gates can't reach it directly) -- review with "
         f"`belay hooks approvals list --db {db}` (NOT `belay approvals`, which opens "
         f"--db as a literal file rather than this project's identity anchor)"
     )
+    if contracts_path is not None:
+        identity.contracts_pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        identity.contracts_pointer_path.write_text(str(contracts_path), encoding="utf-8")
+        typer.echo(
+            f"native Edit/Write/NotebookEdit calls will now be checked against "
+            f"{contracts_path} -- an undeclared tool denies (contract_missing) instead of "
+            f"allowing by default. A running supervisor for this install must be restarted "
+            f"(`belay supervisor stop --db {db}`) to pick this up."
+        )
     typer.echo("restart the agent for the hook to take effect")
 
 
