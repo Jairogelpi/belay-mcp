@@ -18,10 +18,10 @@ previewable, gated, and — when it goes wrong — reversible."
 > the full lifecycle — contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
 > Appendix C), planner + policy (§5, §6), approvals (§7), the saga executor
 > (§8), and rewind (§10), diagrammed in
-> [`docs/architecture.md`](docs/architecture.md). Nine further entregas
-> (E10-E19, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
+> [`docs/architecture.md`](docs/architecture.md). Eleven further entregas
+> (E10-E20, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code only,
-> said plainly in its own section below). 702 tests, passing on real
+> said plainly in its own section below). 704 tests, passing on real
 > Linux/macOS/Windows CI (not just one dev machine — see E19.7 below), plus
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
@@ -60,262 +60,6 @@ incident. Belay's answer isn't "trust the model more" — it's infrastructure:
   every tool call independently verifiable and replayable.
 
 No LLM sits on the safety path. Belay is deterministic end to end.
-
-## What's new since v0.1.0
-
-Seven entregas landed on top of the v0.1.0 lifecycle (`docs/plan-v2.md`,
-ADRs 0010-0018), each additive — none weakened an existing test or broke L3
-conformance:
-
-- **Statistical anomaly baselines** (E10) — a per-session rolling
-  mean/stddev (Welford's algorithm, no LLM, no manual threshold) pauses an
-  action that's wildly outside its own session's normal pattern, even with
-  zero `Cap` configured for that tool. `examples/demo_anomaly.py`.
-- **Real SQL dry-run** (E11) — instead of a declared estimate, a
-  `BEGIN ... ROLLBACK` against the actual database reports the real
-  affected-row count before a human approves anything, never committing.
-  `examples/demo_sql.py`.
-- **Counterfactual replay** (E12) — `belay counterfactual <session> --at-step
-  N --override '{"verdict":"deny"}'` answers "what would have happened if a
-  human had decided differently here" entirely offline, from the ledger
-  alone — never calling the real upstream, never touching the real
-  session's chain. Honest by construction: it only ever reports
-  `unchanged`, `diverged` (with the real basis), or `unknown` — never a
-  fabricated concrete outcome. `examples/demo_counterfactual.py`.
-- **Signed, offline-verifiable evidence** (E13) — `belay verify-export` +
-  `belay verify-evidence` produce and check an Ed25519-signed bundle that
-  needs nothing but the file itself and a public key: no `belay.db`, no
-  network. Tamper detection is precise (chain vs. signature vs. summary
-  mismatch), not a single opaque pass/fail. `examples/demo_signed_evidence.py`.
-- **Identity attribution** (E14) — every session is bound to an explicit
-  `--initiated-by` (and optional `--on-behalf-of`) identity, folded into
-  E13's signature so forging *who* triggered a session is caught exactly
-  like tampering with the ledger. `examples/demo_attribution.py`.
-- **Per-identity irreversible-action quota** (E15) — beyond E4's per-call
-  caps, a rolling window limits how many irreversible actions one identity
-  can accumulate, so "I approved this once" can't silently become "the
-  agent did it 200 times." `examples/demo_quota.py`.
-- **Blast-radius self-explanation** (E16) — the governed response back to
-  the *agent itself* (not just the human's CLI) carries a structured,
-  template-filled explanation of why a call paused/was denied, with a
-  deterministic `suggested_action` when one mechanically applies. In
-  `examples/demo_self_explain.py` the agent reads its own explanation,
-  narrows its request, and gets `allow` — with zero human approval step.
-
-### Adoption/DX (not spec-numbered — onboarding, not lifecycle)
-
-- **Any stdio MCP server, not just Python** — `belay wrap --command/--arg`
-  launches anything (`npx`, a compiled binary, ...); previously hardcoded to
-  `python server.py`. Found and fixed while wrapping the real
-  `@modelcontextprotocol/server-filesystem`.
-- **Fixed: strict `outputSchema` upstreams** — the self-explain payload
-  (E16) moved from `structuredContent` to MCP's `meta` field; putting it in
-  `structuredContent` broke any real upstream whose tool declares
-  `additionalProperties: false`, which the example servers never did.
-- **`belay init --client ...`** registers Belay in Claude Desktop/Code/
-  Cursor/Codex/OpenCode's MCP config in one command (E17), merged
-  non-destructively alongside whatever other MCP servers are already
-  configured — see "Registering with an MCP client" below.
-  **`belay uninstall`/`belay doctor`** (E17) use a `.belay-manifest.json`
-  written alongside each config as the one source of truth for whether the
-  file changed since install, rather than guessing from content. E17.1
-  hardened the lifecycle after review found it wasn't reinstall-safe:
-  running `init` twice no longer overwrites the pre-install backup with
-  already-belay content (so `uninstall` still restores the *true* original,
-  byte-for-byte, atomically); `uninstall` uses the name actually recorded in
-  the manifest, not a CLI default, so `init --name foo` is always fully
-  removable; `init`'s dry-run preview and its real write can no longer
-  diverge (a config changed in that window aborts the write instead of being
-  silently clobbered); a config uninstalled back to a state that never
-  existed before install is deleted, not left as an empty stub; a failed
-  manifest write rolls the config back instead of leaving belay
-  installed-but-unmanaged; and `doctor` reports **BROKEN** rather than
-  "registered" when the manifest exists but the entry itself doesn't.
-- **`belay draft-contracts`** proposes a starting contract per upstream tool
-  from its live MCP schema/annotations — see "Drafting contracts from a
-  live server" below.
-- **`belay dashboard`** renders a static HTML snapshot of a ledger's
-  sessions/steps/approvals — see "Dashboard" below.
-- **`belay approvals list --triage`** sorts the pending queue highest-risk
-  first with a deterministic reason (reversibility, plan confidence,
-  unknown effects, how many policy dimensions fired) — a pure label/sort
-  over data the plan/policy stages already computed, no LLM, no new
-  decision authority. It never approves or rejects anything; that stays
-  CLI-only and human-typed (spec §12 no-self-approval) — this just cuts
-  through a long queue to what actually needs eyes first.
-- **Intent contract** (`belay run --intent-contract <file>`) turns a task's
-  brief into an execution boundary, not just documentation. Deliberately
-  narrower than "no refactoring auth" as free English -- only what's
-  mechanically checkable is enforced: `allowed_scope`/`forbidden_scope`
-  (glob patterns against a call's `path`), `forbidden_tools` (exact
-  denylist), and `budgets.files_changed` (a cap on distinct paths touched).
-  A violating call is denied (`policy_denied`) before it ever reaches the
-  upstream. `acceptance` criteria stay plain informational text for a human
-  (or `belay export-pr`'s PR body) to judge — claiming to machine-verify
-  "the public API wasn't touched" without real static analysis would be
-  worse than not checking it. See `examples/contracts/intent-timezone.yaml`.
-  Its canonical hash (`belay/canonical.py`, same mechanism as contracts'
-  `set_hash`) is folded into `session_started`'s payload the moment the
-  session begins — part of the hash chain and the signed evidence bundle
-  (E13) from the start, not a fact asserted after the fact. `belay
-  export-pr --intent-contract` compares the file it's given against that
-  recorded hash and labels its "What was asked?" section: **verified**
-  (hashes match), **⚠ UNVERIFIED** (flagged loudly, never silently
-  trusted), or **not verified** (the session recorded no hash at all).
-
-```bash
-belay run --config belay.wrap.json --intent-contract intent.yaml
-# agent tries: fs.write_file(path="src/auth/login.py", ...)
-# -> denied before the upstream ever sees it:
-# {"code": "policy_denied", "detail": {"reason": "intent_contract:forbidden_scope", ...}}
-```
-- **`belay verify-test`** closes the gap in `_belay_test_ref` (a bare
-  string the agent itself supplies, never independently checked —
-  `tests/fake.py::test_ok` would show up as "proven" whether or not it
-  exists or passes). `--runner pytest|jest|go` reads the step's own
-  `_belay_test_ref` from the ledger and builds the command mechanically
-  from a fixed template — **not** typed in free-form, so an agent or
-  operator cannot substitute an easier-to-pass command under a false test
-  label (`_belay_test_ref="tests/fake.py::test_ok"` plus a `--cmd` that
-  merely happens to exit 0 is caught: it's recorded as `mode: "command"`
-  and never shown as a verified *test*). Real git context (HEAD, tree
-  hash, dirty flag) and who ran it are recorded too. `belay causal`/`belay
-  export-pr` distinguish three tiers per step: **VERIFIED** (`--runner`
-  ran the step's own declared test, exit 0), **claimed, never run** (a
-  `_belay_test_ref` label with no matching verification), or **test
-  FAILED** (ran, non-zero exit) — never a single "proven: yes/no" that
-  trusts the agent's word, and never confusing "some command passed" with
-  "this specific test passed." The runner's command is built as an **argv
-  list executed with `shell=False`** — `test_ref` (agent-supplied,
-  untrusted) is passed as a single argument, never interpolated into or
-  parsed as a shell string, so `; rm -rf`, `&& true`, backticks, `$()`, or
-  a newline inside it have no shell to be interpreted by (an earlier
-  version built a shell string and was exploitable this way — caught in
-  review, fixed, and covered by injection tests before this shipped). A
-  step verified while the tree was dirty is labeled **VERIFIED ON DIRTY
-  TREE**, not a plain VERIFIED — the recorded `tree_hash` reflects HEAD,
-  not the modified working tree, so it isn't fully reproducible from that
-  hash alone.
-
-```bash
-belay verify-test s_abc123 --step 1 --runner pytest
-# -> running declared test: 'tests/test_auth.py::test_login' via pytest
-# -> TEST PASSED (exit_code=0, 340ms, output_hash=sha256:..., git_head=...)
-belay causal s_abc123
-#   step 1: fs.write_file (auth.py)
-#     VERIFIED by test: tests/test_auth.py::test_login (exit_code=0, output_hash=sha256:...)
-```
-- **`belay causal <session>`** answers "what requirement caused this, what
-  did it read before deciding, what test proves it was necessary, what
-  would undo it" straight from the ledger — not a new subsystem, just
-  everything already recorded (`state_captured`, `plan_created`'s
-  `intent_id`/new `test_ref` tag, `policy_evaluated`,
-  `compensation_registered`) assembled into one graph instead of left for
-  a human to grep by hand. `--format mermaid` renders a real flowchart;
-  `depends_on` is one inferred (same-`path`) edge, documented as a
-  heuristic, not real data/control-flow analysis.
-
-```bash
-# agent calls: fs.write_file(..., _belay_intent="auth-fix",
-#              _belay_test_ref="tests/test_auth.py::test_login_bug")
-belay causal s_abc123 --format mermaid
-```
-- **`belay rewind --intent/--keep`** undoes exactly one declared subgoal,
-  keeping another, instead of a whole session or an arbitrary step cutoff.
-  An agent tags a call by adding a reserved `_belay_intent` key to its
-  arguments (stripped before the upstream ever sees it, recorded on that
-  step's `plan_created` ledger event); `belay rewind --intent
-  cache-refactor --keep auth-fix` then resolves to the exact `--to-step`
-  cutoff that undoes only the `cache-refactor`-tagged steps. This only
-  works when those steps are a safe contiguous trailing run — anything
-  interleaved (an untagged step, a third subgoal after the one being kept)
-  is refused outright (`rewind_intent_not_suffix`) rather than guessed at
-  with a fabricated semantic merge; no LLM is involved in the decision,
-  only in whatever agent chose the tag in the first place.
-
-```bash
-# agent calls: fs.write_file(path=auth.py, ..., _belay_intent="auth-fix")
-#              fs.write_file(path=cache.py, ..., _belay_intent="cache-refactor")
-belay rewind s_abc123 --intent cache-refactor --keep auth-fix --by jairo
-# -> --intent 'cache-refactor' resolved to --to-step 1
-# -> only cache.py's write is compensated; auth.py is untouched
-```
-- **`belay learn <approval_id>`** compiles a human's rejection into a
-  durable, enforced rule — not agent memory, a real addition to an
-  `IntentContract` (`forbidden_tools`/`forbidden_scope`) that every future
-  session loading it (`belay run --intent-contract`) actually can't
-  violate. Only two proposals are generated, both mechanical (no LLM
-  interpreting the free-text rejection reason): forbid the rejected tool,
-  or forbid its file scope. Printed by default; nothing is written until
-  `--apply <kind> --intent-contract <file>` says so explicitly.
-
-```bash
-belay approvals reject ap_91f9f9b9f2 --by jairo \
-  --reason "bulk_delete with unknown before_year is too risky"
-belay learn ap_91f9f9b9f2 --db belay.db
-# -> candidate rule(s): [forbidden_tools] crm.bulk_delete
-belay learn ap_91f9f9b9f2 --db belay.db \
-  --apply forbidden_tools --intent-contract learned.yaml
-# -> every session with --intent-contract learned.yaml now denies
-#    crm.bulk_delete outright, before the upstream ever sees it
-```
-- **`belay explore <session_id>...`** compares already-run session
-  variants side by side — steps, distinct files touched, tools used, steps
-  proven by a test vs not, unknown effects, and (with `--config`)
-  irreversible/indeterminate step count via a real rewind dry-run per
-  variant. Belay has no agent of its own to generate variants, so this
-  doesn't run anything new — it assembles a comparison table from what
-  each variant's session already produced (reusing `belay causal`'s graph
-  and `belay rewind`'s dry-run). No LLM ranks the results; it's a table,
-  not a verdict — a human picks.
-- **`belay export-pr`** packages a committed session's file changes
-  (the `path`/`content` shape `examples/contracts/fs.yaml` already uses) as
-  a real git branch + commit, with Belay's own signed evidence (E13)
-  attached under `.belay-evidence/`, and opens a PR via `gh` if it's on
-  `PATH` (otherwise prints the exact `git push`/`gh pr create` to run).
-  Post-hoc, not a pre-execution gate: the session already ran the full
-  governed pipeline (contract → plan → policy → approval → saga commit);
-  this turns that into a paper trail reviewable the way a human's change
-  would be, backed by evidence rather than a trust-me summary. With
-  `--intent-contract` and `--config`, the PR body becomes **proof-carrying**
-  — it answers a reviewer's real questions instead of just listing files:
-  What was asked? (the contract's `intent`) What changed without being
-  asked? (files outside `allowed_scope`) What new behavior exists? (causal
-  graph, per file) What was verified / what couldn't be proven?
-  (`_belay_test_ref` present or not, per step) What external effects
-  occurred? (each step's declared effects) How is this undone? (a real
-  `belay rewind --dry-run` plan). Any section without enough data says so
-  explicitly (`_not declared_`, `_not computed_`) instead of guessing.
-
-```bash
-belay export-pr s_ed182c2544f8 --repo ./infra-repo --db belay.db \
-  --base main --key signing.pem
-# -> 1 file change(s) found:  step 1: write configs/app.conf (fs.write_file)
-# -> branch belay/s_ed182c2544f8 created (2 file(s) committed)
-# -> gh CLI not found -- prints git push + gh pr create to run yourself
-```
-- **`belay replay`** re-executes a real session against the live upstream
-  with one step's args overridden, producing a brand-new, fully real,
-  ledgered session — not a simulation. Unlike `belay counterfactual` (E12,
-  purely offline, never touches a real upstream), this is genuine
-  "do it again, but differently starting here" debugging: every step from
-  the original session's `plan_created` events replays in order, through
-  the real `Lifecycle` (resolve → plan → policy → approval → execute); if a
-  step pauses for approval, replay stops honestly and reports it —
-  `--resume <replay_session_id>` continues after you resolve the pause via
-  `belay approvals`.
-
-```bash
-belay replay s_5a814ae53684 --at-step 3 --override '{"before_year": 2021}' \
-  --by jairo --config belay.wrap.json
-# -> new session: replay_9b37580f2501 (replay of s_5a814ae53684)
-#      step 1: crm.import_records
-#        -> pending_approval (approval=ap_...) -- replay stops here
-belay approvals approve ap_... --by jairo --db belay.db
-belay replay s_5a814ae53684 --at-step 3 --override '{"before_year": 2021}' \
-  --by jairo --config belay.wrap.json --resume replay_9b37580f2501
-# -> resumes at step 2, applies the override at step 3, pauses/commits for real
-```
 
 ## How it fits
 
@@ -398,6 +142,57 @@ still reach for their own native Bash/file-edit tools without touching MCP
 at all. The `AGENTS.md`/`CLAUDE.md` instruction is the durable nudge; a
 deterministic hook-based gate that actually intercepts native tool calls
 too is `belay hooks install` (E18), below.
+
+## Quickstart
+
+```bash
+belay wrap examples/fs-server --contracts examples/contracts/fs.yaml
+belay run &
+# any standard MCP client now talks to Belay instead of fs-server directly:
+# tools with a contract or readOnlyHint pass through, everything else is
+# refused with contract_missing (spec §4.6) — logged to belay.db either way.
+belay verify belay.db
+```
+
+Every command above was re-run against a clean checkout while writing this
+README; `belay verify belay.db` prints `chain: OK` / `coherence: OK` on an
+empty, freshly-wrapped ledger.
+
+## Demo
+
+The 3-minute portfolio demo (spec-driven scenario in `docs/plan.md` §10) is
+a real, runnable script — not a mock:
+
+```bash
+python examples/demo.py         # bulk delete -> pause -> narrow -> approve -> execute -> rewind
+python examples/demo.py --oops  # same, plus a wrong-filter mistake that rewind then undoes
+```
+
+It shells out to the real `belay` CLI (`wrap`, `approvals list/approve`,
+`rewind --dry-run`, `rewind --by`) and drives a real MCP session against
+`examples/crm-mock`, ending in `chain: OK` / `coherence: OK` and "session
+fully compensated" — genuine output, generated live each run.
+
+`belay approvals approve --narrow <filter>` does not exist as CLI surface
+(documented gap, see [ADR 0007](docs/adr/0007-e7-rewind.md) and
+[ADR 0009](docs/adr/0009-e9-demo-docs-polish.md)); the demo's "narrowing"
+step is the equivalent E7 actually built and tested — the agent retries with
+a different, narrower filter, which is a new plan the human approves
+instead of the original one.
+
+**Recording:** a VHS tape script (`examples/demo.tape`) is checked in for
+whoever has the `vhs` binary to render a GIF from — `asciinema` and `vhs`
+were not available in the sandbox this entrega was built in, so no
+recording is embedded here yet. This is an honest gap, not a placeholder
+GIF; see ADR 0009.
+
+## Advanced setup
+
+Everything below is deeper reference material -- the Native Agent Gate
+(hooks for Claude Code/Codex/OpenCode), verified action packs, MCP client
+registration, drafting contracts from a live server, and the dashboard.
+Skip ahead to "What's new since v0.1.0" or "Roadmap" if you just want the
+project's status at a glance.
 
 ### Native Agent Gate: `belay hooks install` (E18)
 
@@ -504,8 +299,11 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   hashed — never opened as a file itself), not a single global daemon
   shared across unrelated projects.
 - Host-agnostic by construction: the supervisor normalizes every event into
-  one common shape (spec §7.1-style: installation id, host/adapter version,
-  correlation id, phase, surface, normalized tool identity, structured
+  one common shape (`belay/supervisor/protocol.py`'s `HookEvent` — an E18
+  concept, not a `docs/spec.md` section, see
+  [ADR 0020](docs/adr/0020-extended-requirement-catalog.md): installation
+  id, host/adapter version, correlation id, phase, surface, normalized
+  tool identity, structured
   args, cwd/repo identity, OS user obtained independently of the payload,
   monotonic + wall-clock timestamps) before the classifier ever sees it —
   adding a host is a new adapter module, not a rewrite of the decision
@@ -528,7 +326,9 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
   several plausible names defensively and never fabricates a value for a
   field it didn't actually find, said plainly rather than assumed correct.
 - **Native `Edit`/`Write`/`NotebookEdit` calls are captured for rewind**
-  (E18.3, spec FILE-001/002/004/005/006/008) — unlike Bash, these are
+  (E18.3, FILE-001/002/004/005/006/008 — see
+  [ADR 0020](docs/adr/0020-extended-requirement-catalog.md), not a
+  `docs/spec.md` citation) — unlike Bash, these are
   **allowed by default** (gating every routine file edit would make the
   gate unusable for real coding); the supervisor instead snapshots the
   file's pre-edit content as a side effect of the `allow`, then records its
@@ -619,8 +419,10 @@ belay supervisor stop --db belay-hooks.db     # ask it to shut down
 
 #### Live conformance (E18.7): `trust_tier="T1"` for Claude Code's Bash surface, earned not assumed
 
-`tests/hooks/test_live_conformance.py` is the spec §7.2 "pinned-version
-end-to-end bypass suite" TRUTH-004 requires before a host can claim `T1` —
+`tests/hooks/test_live_conformance.py` is the "pinned-version
+end-to-end bypass suite" TRUTH-004 requires before a host can claim `T1`
+(TRUTH-004 is an E18 invariant, not a `docs/spec.md` citation — see
+[ADR 0020](docs/adr/0020-extended-requirement-catalog.md)) —
 opt-in only (`pytest tests/hooks/test_live_conformance.py -m
 live_conformance --no-cov`), never part of the default suite or CI, since
 it spawns the real, installed `claude` CLI and spends real Anthropic API
@@ -954,48 +756,261 @@ approve/reject` command to run. No server, no live DB access from the page
 (refresh by re-running the command); approval stays CLI-only and
 human-typed by design (spec §7, §12 no-self-approval).
 
-## Quickstart
+## What's new since v0.1.0
+
+Seven entregas landed on top of the v0.1.0 lifecycle (`docs/plan-v2.md`,
+ADRs 0010-0018), each additive — none weakened an existing test or broke L3
+conformance:
+
+- **Statistical anomaly baselines** (E10) — a per-session rolling
+  mean/stddev (Welford's algorithm, no LLM, no manual threshold) pauses an
+  action that's wildly outside its own session's normal pattern, even with
+  zero `Cap` configured for that tool. `examples/demo_anomaly.py`.
+- **Real SQL dry-run** (E11) — instead of a declared estimate, a
+  `BEGIN ... ROLLBACK` against the actual database reports the real
+  affected-row count before a human approves anything, never committing.
+  `examples/demo_sql.py`.
+- **Counterfactual replay** (E12) — `belay counterfactual <session> --at-step
+  N --override '{"verdict":"deny"}'` answers "what would have happened if a
+  human had decided differently here" entirely offline, from the ledger
+  alone — never calling the real upstream, never touching the real
+  session's chain. Honest by construction: it only ever reports
+  `unchanged`, `diverged` (with the real basis), or `unknown` — never a
+  fabricated concrete outcome. `examples/demo_counterfactual.py`.
+- **Signed, offline-verifiable evidence** (E13) — `belay verify-export` +
+  `belay verify-evidence` produce and check an Ed25519-signed bundle that
+  needs nothing but the file itself and a public key: no `belay.db`, no
+  network. Tamper detection is precise (chain vs. signature vs. summary
+  mismatch), not a single opaque pass/fail. `examples/demo_signed_evidence.py`.
+- **Identity attribution** (E14) — every session is bound to an explicit
+  `--initiated-by` (and optional `--on-behalf-of`) identity, folded into
+  E13's signature so forging *who* triggered a session is caught exactly
+  like tampering with the ledger. `examples/demo_attribution.py`.
+- **Per-identity irreversible-action quota** (E15) — beyond E4's per-call
+  caps, a rolling window limits how many irreversible actions one identity
+  can accumulate, so "I approved this once" can't silently become "the
+  agent did it 200 times." `examples/demo_quota.py`.
+- **Blast-radius self-explanation** (E16) — the governed response back to
+  the *agent itself* (not just the human's CLI) carries a structured,
+  template-filled explanation of why a call paused/was denied, with a
+  deterministic `suggested_action` when one mechanically applies. In
+  `examples/demo_self_explain.py` the agent reads its own explanation,
+  narrows its request, and gets `allow` — with zero human approval step.
+
+### Adoption/DX (not spec-numbered — onboarding, not lifecycle)
+
+- **Any stdio MCP server, not just Python** — `belay wrap --command/--arg`
+  launches anything (`npx`, a compiled binary, ...); previously hardcoded to
+  `python server.py`. Found and fixed while wrapping the real
+  `@modelcontextprotocol/server-filesystem`.
+- **Fixed: strict `outputSchema` upstreams** — the self-explain payload
+  (E16) moved from `structuredContent` to MCP's `meta` field; putting it in
+  `structuredContent` broke any real upstream whose tool declares
+  `additionalProperties: false`, which the example servers never did.
+- **`belay init --client ...`** registers Belay in Claude Desktop/Code/
+  Cursor/Codex/OpenCode's MCP config in one command (E17), merged
+  non-destructively alongside whatever other MCP servers are already
+  configured — see "Registering with an MCP client" below.
+  **`belay uninstall`/`belay doctor`** (E17) use a `.belay-manifest.json`
+  written alongside each config as the one source of truth for whether the
+  file changed since install, rather than guessing from content. E17.1
+  hardened the lifecycle after review found it wasn't reinstall-safe:
+  running `init` twice no longer overwrites the pre-install backup with
+  already-belay content (so `uninstall` still restores the *true* original,
+  byte-for-byte, atomically); `uninstall` uses the name actually recorded in
+  the manifest, not a CLI default, so `init --name foo` is always fully
+  removable; `init`'s dry-run preview and its real write can no longer
+  diverge (a config changed in that window aborts the write instead of being
+  silently clobbered); a config uninstalled back to a state that never
+  existed before install is deleted, not left as an empty stub; a failed
+  manifest write rolls the config back instead of leaving belay
+  installed-but-unmanaged; and `doctor` reports **BROKEN** rather than
+  "registered" when the manifest exists but the entry itself doesn't.
+- **`belay draft-contracts`** proposes a starting contract per upstream tool
+  from its live MCP schema/annotations — see "Drafting contracts from a
+  live server" below.
+- **`belay dashboard`** renders a static HTML snapshot of a ledger's
+  sessions/steps/approvals — see "Dashboard" below.
+- **`belay approvals list --triage`** sorts the pending queue highest-risk
+  first with a deterministic reason (reversibility, plan confidence,
+  unknown effects, how many policy dimensions fired) — a pure label/sort
+  over data the plan/policy stages already computed, no LLM, no new
+  decision authority. It never approves or rejects anything; that stays
+  CLI-only and human-typed (spec §12 no-self-approval) — this just cuts
+  through a long queue to what actually needs eyes first.
+- **Intent contract** (`belay run --intent-contract <file>`) turns a task's
+  brief into an execution boundary, not just documentation. Deliberately
+  narrower than "no refactoring auth" as free English -- only what's
+  mechanically checkable is enforced: `allowed_scope`/`forbidden_scope`
+  (glob patterns against a call's `path`), `forbidden_tools` (exact
+  denylist), and `budgets.files_changed` (a cap on distinct paths touched).
+  A violating call is denied (`policy_denied`) before it ever reaches the
+  upstream. `acceptance` criteria stay plain informational text for a human
+  (or `belay export-pr`'s PR body) to judge — claiming to machine-verify
+  "the public API wasn't touched" without real static analysis would be
+  worse than not checking it. See `examples/contracts/intent-timezone.yaml`.
+  Its canonical hash (`belay/canonical.py`, same mechanism as contracts'
+  `set_hash`) is folded into `session_started`'s payload the moment the
+  session begins — part of the hash chain and the signed evidence bundle
+  (E13) from the start, not a fact asserted after the fact. `belay
+  export-pr --intent-contract` compares the file it's given against that
+  recorded hash and labels its "What was asked?" section: **verified**
+  (hashes match), **⚠ UNVERIFIED** (flagged loudly, never silently
+  trusted), or **not verified** (the session recorded no hash at all).
 
 ```bash
-belay wrap examples/fs-server --contracts examples/contracts/fs.yaml
-belay run &
-# any standard MCP client now talks to Belay instead of fs-server directly:
-# tools with a contract or readOnlyHint pass through, everything else is
-# refused with contract_missing (spec §4.6) — logged to belay.db either way.
-belay verify belay.db
+belay run --config belay.wrap.json --intent-contract intent.yaml
+# agent tries: fs.write_file(path="src/auth/login.py", ...)
+# -> denied before the upstream ever sees it:
+# {"code": "policy_denied", "detail": {"reason": "intent_contract:forbidden_scope", ...}}
 ```
-
-Every command above was re-run against a clean checkout while writing this
-README; `belay verify belay.db` prints `chain: OK` / `coherence: OK` on an
-empty, freshly-wrapped ledger.
-
-## Demo
-
-The 3-minute portfolio demo (spec-driven scenario in `docs/plan.md` §10) is
-a real, runnable script — not a mock:
+- **`belay verify-test`** closes the gap in `_belay_test_ref` (a bare
+  string the agent itself supplies, never independently checked —
+  `tests/fake.py::test_ok` would show up as "proven" whether or not it
+  exists or passes). `--runner pytest|jest|go` reads the step's own
+  `_belay_test_ref` from the ledger and builds the command mechanically
+  from a fixed template — **not** typed in free-form, so an agent or
+  operator cannot substitute an easier-to-pass command under a false test
+  label (`_belay_test_ref="tests/fake.py::test_ok"` plus a `--cmd` that
+  merely happens to exit 0 is caught: it's recorded as `mode: "command"`
+  and never shown as a verified *test*). Real git context (HEAD, tree
+  hash, dirty flag) and who ran it are recorded too. `belay causal`/`belay
+  export-pr` distinguish three tiers per step: **VERIFIED** (`--runner`
+  ran the step's own declared test, exit 0), **claimed, never run** (a
+  `_belay_test_ref` label with no matching verification), or **test
+  FAILED** (ran, non-zero exit) — never a single "proven: yes/no" that
+  trusts the agent's word, and never confusing "some command passed" with
+  "this specific test passed." The runner's command is built as an **argv
+  list executed with `shell=False`** — `test_ref` (agent-supplied,
+  untrusted) is passed as a single argument, never interpolated into or
+  parsed as a shell string, so `; rm -rf`, `&& true`, backticks, `$()`, or
+  a newline inside it have no shell to be interpreted by (an earlier
+  version built a shell string and was exploitable this way — caught in
+  review, fixed, and covered by injection tests before this shipped). A
+  step verified while the tree was dirty is labeled **VERIFIED ON DIRTY
+  TREE**, not a plain VERIFIED — the recorded `tree_hash` reflects HEAD,
+  not the modified working tree, so it isn't fully reproducible from that
+  hash alone.
 
 ```bash
-python examples/demo.py         # bulk delete -> pause -> narrow -> approve -> execute -> rewind
-python examples/demo.py --oops  # same, plus a wrong-filter mistake that rewind then undoes
+belay verify-test s_abc123 --step 1 --runner pytest
+# -> running declared test: 'tests/test_auth.py::test_login' via pytest
+# -> TEST PASSED (exit_code=0, 340ms, output_hash=sha256:..., git_head=...)
+belay causal s_abc123
+#   step 1: fs.write_file (auth.py)
+#     VERIFIED by test: tests/test_auth.py::test_login (exit_code=0, output_hash=sha256:...)
 ```
+- **`belay causal <session>`** answers "what requirement caused this, what
+  did it read before deciding, what test proves it was necessary, what
+  would undo it" straight from the ledger — not a new subsystem, just
+  everything already recorded (`state_captured`, `plan_created`'s
+  `intent_id`/new `test_ref` tag, `policy_evaluated`,
+  `compensation_registered`) assembled into one graph instead of left for
+  a human to grep by hand. `--format mermaid` renders a real flowchart;
+  `depends_on` is one inferred (same-`path`) edge, documented as a
+  heuristic, not real data/control-flow analysis.
 
-It shells out to the real `belay` CLI (`wrap`, `approvals list/approve`,
-`rewind --dry-run`, `rewind --by`) and drives a real MCP session against
-`examples/crm-mock`, ending in `chain: OK` / `coherence: OK` and "session
-fully compensated" — genuine output, generated live each run.
+```bash
+# agent calls: fs.write_file(..., _belay_intent="auth-fix",
+#              _belay_test_ref="tests/test_auth.py::test_login_bug")
+belay causal s_abc123 --format mermaid
+```
+- **`belay rewind --intent/--keep`** undoes exactly one declared subgoal,
+  keeping another, instead of a whole session or an arbitrary step cutoff.
+  An agent tags a call by adding a reserved `_belay_intent` key to its
+  arguments (stripped before the upstream ever sees it, recorded on that
+  step's `plan_created` ledger event); `belay rewind --intent
+  cache-refactor --keep auth-fix` then resolves to the exact `--to-step`
+  cutoff that undoes only the `cache-refactor`-tagged steps. This only
+  works when those steps are a safe contiguous trailing run — anything
+  interleaved (an untagged step, a third subgoal after the one being kept)
+  is refused outright (`rewind_intent_not_suffix`) rather than guessed at
+  with a fabricated semantic merge; no LLM is involved in the decision,
+  only in whatever agent chose the tag in the first place.
 
-`belay approvals approve --narrow <filter>` does not exist as CLI surface
-(documented gap, see [ADR 0007](docs/adr/0007-e7-rewind.md) and
-[ADR 0009](docs/adr/0009-e9-demo-docs-polish.md)); the demo's "narrowing"
-step is the equivalent E7 actually built and tested — the agent retries with
-a different, narrower filter, which is a new plan the human approves
-instead of the original one.
+```bash
+# agent calls: fs.write_file(path=auth.py, ..., _belay_intent="auth-fix")
+#              fs.write_file(path=cache.py, ..., _belay_intent="cache-refactor")
+belay rewind s_abc123 --intent cache-refactor --keep auth-fix --by jairo
+# -> --intent 'cache-refactor' resolved to --to-step 1
+# -> only cache.py's write is compensated; auth.py is untouched
+```
+- **`belay learn <approval_id>`** compiles a human's rejection into a
+  durable, enforced rule — not agent memory, a real addition to an
+  `IntentContract` (`forbidden_tools`/`forbidden_scope`) that every future
+  session loading it (`belay run --intent-contract`) actually can't
+  violate. Only two proposals are generated, both mechanical (no LLM
+  interpreting the free-text rejection reason): forbid the rejected tool,
+  or forbid its file scope. Printed by default; nothing is written until
+  `--apply <kind> --intent-contract <file>` says so explicitly.
 
-**Recording:** a VHS tape script (`examples/demo.tape`) is checked in for
-whoever has the `vhs` binary to render a GIF from — `asciinema` and `vhs`
-were not available in the sandbox this entrega was built in, so no
-recording is embedded here yet. This is an honest gap, not a placeholder
-GIF; see ADR 0009.
+```bash
+belay approvals reject ap_91f9f9b9f2 --by jairo \
+  --reason "bulk_delete with unknown before_year is too risky"
+belay learn ap_91f9f9b9f2 --db belay.db
+# -> candidate rule(s): [forbidden_tools] crm.bulk_delete
+belay learn ap_91f9f9b9f2 --db belay.db \
+  --apply forbidden_tools --intent-contract learned.yaml
+# -> every session with --intent-contract learned.yaml now denies
+#    crm.bulk_delete outright, before the upstream ever sees it
+```
+- **`belay explore <session_id>...`** compares already-run session
+  variants side by side — steps, distinct files touched, tools used, steps
+  proven by a test vs not, unknown effects, and (with `--config`)
+  irreversible/indeterminate step count via a real rewind dry-run per
+  variant. Belay has no agent of its own to generate variants, so this
+  doesn't run anything new — it assembles a comparison table from what
+  each variant's session already produced (reusing `belay causal`'s graph
+  and `belay rewind`'s dry-run). No LLM ranks the results; it's a table,
+  not a verdict — a human picks.
+- **`belay export-pr`** packages a committed session's file changes
+  (the `path`/`content` shape `examples/contracts/fs.yaml` already uses) as
+  a real git branch + commit, with Belay's own signed evidence (E13)
+  attached under `.belay-evidence/`, and opens a PR via `gh` if it's on
+  `PATH` (otherwise prints the exact `git push`/`gh pr create` to run).
+  Post-hoc, not a pre-execution gate: the session already ran the full
+  governed pipeline (contract → plan → policy → approval → saga commit);
+  this turns that into a paper trail reviewable the way a human's change
+  would be, backed by evidence rather than a trust-me summary. With
+  `--intent-contract` and `--config`, the PR body becomes **proof-carrying**
+  — it answers a reviewer's real questions instead of just listing files:
+  What was asked? (the contract's `intent`) What changed without being
+  asked? (files outside `allowed_scope`) What new behavior exists? (causal
+  graph, per file) What was verified / what couldn't be proven?
+  (`_belay_test_ref` present or not, per step) What external effects
+  occurred? (each step's declared effects) How is this undone? (a real
+  `belay rewind --dry-run` plan). Any section without enough data says so
+  explicitly (`_not declared_`, `_not computed_`) instead of guessing.
+
+```bash
+belay export-pr s_ed182c2544f8 --repo ./infra-repo --db belay.db \
+  --base main --key signing.pem
+# -> 1 file change(s) found:  step 1: write configs/app.conf (fs.write_file)
+# -> branch belay/s_ed182c2544f8 created (2 file(s) committed)
+# -> gh CLI not found -- prints git push + gh pr create to run yourself
+```
+- **`belay replay`** re-executes a real session against the live upstream
+  with one step's args overridden, producing a brand-new, fully real,
+  ledgered session — not a simulation. Unlike `belay counterfactual` (E12,
+  purely offline, never touches a real upstream), this is genuine
+  "do it again, but differently starting here" debugging: every step from
+  the original session's `plan_created` events replays in order, through
+  the real `Lifecycle` (resolve → plan → policy → approval → execute); if a
+  step pauses for approval, replay stops honestly and reports it —
+  `--resume <replay_session_id>` continues after you resolve the pause via
+  `belay approvals`.
+
+```bash
+belay replay s_5a814ae53684 --at-step 3 --override '{"before_year": 2021}' \
+  --by jairo --config belay.wrap.json
+# -> new session: replay_9b37580f2501 (replay of s_5a814ae53684)
+#      step 1: crm.import_records
+#        -> pending_approval (approval=ap_...) -- replay stops here
+belay approvals approve ap_... --by jairo --db belay.db
+belay replay s_5a814ae53684 --at-step 3 --override '{"before_year": 2021}' \
+  --by jairo --config belay.wrap.json --resume replay_9b37580f2501
+# -> resumes at step 2, applies the override at step 3, pauses/commits for real
+```
 
 ## Roadmap
 
@@ -1022,8 +1037,8 @@ slice of [`docs/spec.md`](docs/spec.md):
 | E15 | Per-identity irreversible-action quota | §6 (extended) | done |
 | E16 | Blast-radius self-explanation | §6, §7 (extended) | done |
 | E17 | Safe installer lifecycle — manifest, `belay init --dry-run/--yes`, `belay uninstall`, `belay doctor`, reinstall-idempotent and crash-safe (E17.1 hardening) — plus `docs/traceability.md` generator, CI-enforced | §8 (plan.md), adoption/DX | done |
-| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone. E18.7: `tests/hooks/test_live_conformance.py`, spec §7.2's pinned-version end-to-end bypass suite, opt-in only (spends real Anthropic API usage) — spawns the real installed `claude` CLI with belay's hooks actually installed, confirms a denied Bash command's side effect genuinely never happens on disk (not just "the model said so") while a safe one still works normally; `claude_code_adapter._VERIFIED_TRUST_TIER` is now `"T1"` for Claude Code's Bash surface specifically, because this suite exists and passed, not asserted ahead of the evidence | §7 (extended), §9.2 (FILE-001–008), §12.1, ARCH-001–008 (adoption/DX) | **first slice** — Claude Code Bash surface is T1-verified; Edit/Write/MCP surfaces and Codex/OpenCode adapters remain UNKNOWN; Cursor not attempted |
-| E19 | One-command lifecycle and exclusive routing. E19.1: `belay detect`/`belay init --client auto` — real binary-presence + version detection (`shutil.which`, best-effort `--version`) instead of blindly registering every client type regardless of whether it's installed; caught and fixed a real P0 during manual verification (a loop variable shadowing the `--name` parameter, which briefly mis-registered a real machine's Claude Desktop config under the wrong key before being caught and reverted from its own backup). E19.2: `belay disable-bypass` — the write half of E18.4's bypass detection, atomically removing one named non-belay MCP server entry from a client config, without attempting to auto-rewrap the removed server. E19.3: `belay hooks doctor --deep` — real reachability checks (interpreter exists and can import belay, supervisor genuinely reachable) instead of only comparing config-file hashes; opt-in since it's not purely read-only. E19.4: `belay repair` — detects every belay-managed registration gone BROKEN (MCP clients and hooks) and restores all of them in one command, reusing `init`'s/`hooks install`'s own atomic-write machinery. E19.5: standalone `belay`(`.exe`) binaries via PyInstaller (`scripts/build_binary.py`), built and smoke-tested on real Linux/macOS/Windows CI runners — ~500 MB, said plainly (heavy transitive deps via `--collect-all`, size-reduction is real follow-up work, not done here). E19.6: `belay release sign`/`verify` — Ed25519 authenticity signing of a release bundle (SHA256SUMS.txt + signature + public key), reusing E13's `SigningKey`/`verify_signature`; explicitly NOT OS-level code-signing/notarization (Authenticode/Apple notarization need a paid, identity-verified certificate this project doesn't have — Windows SmartScreen/macOS Gatekeeper will still warn regardless of this signature). E19.7: `cross-platform-clean-room` CI job — the fast suite on real ubuntu-latest/macos-latest/windows-latest runners, verified by CI actually passing there, not asserted from one dev machine | §14.3, adoption/DX | done |
+| E18 | Native Agent Gate: authenticated local supervisor (`multiprocessing.connection`, named pipe/Unix socket, fail-closed, bounded concurrency), `belay hooks install`, deterministic Bash risk classifier, context-bound approvals routed through the same `ApprovalQueue` as the MCP path. E18.1 hardening closed 8 P0s found in independent review: JSON wire format (not pickle), private off-project approvals storage, durable idempotency, full-context approval binding, belay-internal-path protection, honest `trust_tier`, Slowloris resistance, hard-kill recovery. E18.2: `PostToolUse` recording (exit code, duration, output digest) into a durable, hash-chained ledger — the *same* `LedgerStore`/`belay verify` as the MCP path, no new evidence format. E18.3: native `Edit`/`Write`/`NotebookEdit` capture-on-allow + content-addressed snapshot store + `belay hooks rewind`/`list-edits`, conflict-safe restore-or-delete compensation, oversized files pause instead of silently going uncaptured. E18.4: native `mcp__server__tool` calls pause and queue through the same `ApprovalQueue` (no free pass for a server merely named "belay" — this layer can't confirm a call actually reached belay's own proxy), reviewed via the new `belay hooks approvals` (hook-queued approvals live in the private belay home, not a literal `--db` file the top-level `belay approvals` opens); `belay doctor` now flags other MCP servers configured alongside belay as an ungated bypass route, belay-managed or not. E18.5: Codex adapter, normalize/render only (verified against the real installed `codex-cli` binary's own app-server JSON schema) — deliberately not wired to a live session, since Codex's approval mechanism is a bidirectional JSON-RPC protocol, not a one-shot hook subprocess; a real integration needs session proxy infrastructure this slice doesn't build, said plainly rather than claimed. E18.6: OpenCode adapter, normalize/render only, verified two ways against the real installed `opencode-ai` binary (an actually-installed third-party plugin's production usage, plus locating the literal `tool.execute.before`/`.after` trigger call sites inside the compiled bundle) — not wired live because OpenCode's hooks are in-process TS/JS plugin calls with no Python-reachable seam, a new language/packaging surface this slice doesn't build. Cursor: skipped outright — the installed `cursor` binary is only the GUI launcher CLI, with no way found to headlessly verify its actual agent hook payload shape, so no adapter was written against docs alone. E18.7: `tests/hooks/test_live_conformance.py`, TRUTH-004's pinned-version end-to-end bypass suite, opt-in only (spends real Anthropic API usage) — spawns the real installed `claude` CLI with belay's hooks actually installed, confirms a denied Bash command's side effect genuinely never happens on disk (not just "the model said so") while a safe one still works normally; `claude_code_adapter._VERIFIED_TRUST_TIER` is now `"T1"` for Claude Code's Bash surface specifically, because this suite exists and passed, not asserted ahead of the evidence | §7 (extended); FILE-001–008, ARCH-001–008, TRUTH-004/010 ([ADR 0020](docs/adr/0020-extended-requirement-catalog.md), not `docs/spec.md`) (adoption/DX) | **first slice** — Claude Code Bash surface is T1-verified; Edit/Write/MCP surfaces and Codex/OpenCode adapters remain UNKNOWN; Cursor not attempted |
+| E19 | One-command lifecycle and exclusive routing. E19.1: `belay detect`/`belay init --client auto` — real binary-presence + version detection (`shutil.which`, best-effort `--version`) instead of blindly registering every client type regardless of whether it's installed; caught and fixed a real P0 during manual verification (a loop variable shadowing the `--name` parameter, which briefly mis-registered a real machine's Claude Desktop config under the wrong key before being caught and reverted from its own backup). E19.2: `belay disable-bypass` — the write half of E18.4's bypass detection, atomically removing one named non-belay MCP server entry from a client config, without attempting to auto-rewrap the removed server. E19.3: `belay hooks doctor --deep` — real reachability checks (interpreter exists and can import belay, supervisor genuinely reachable) instead of only comparing config-file hashes; opt-in since it's not purely read-only. E19.4: `belay repair` — detects every belay-managed registration gone BROKEN (MCP clients and hooks) and restores all of them in one command, reusing `init`'s/`hooks install`'s own atomic-write machinery. E19.5: standalone `belay`(`.exe`) binaries via PyInstaller (`scripts/build_binary.py`), built and smoke-tested on real Linux/macOS/Windows CI runners — ~500 MB, said plainly (heavy transitive deps via `--collect-all`, size-reduction is real follow-up work, not done here). E19.6: `belay release sign`/`verify` — Ed25519 authenticity signing of a release bundle (SHA256SUMS.txt + signature + public key), reusing E13's `SigningKey`/`verify_signature`; explicitly NOT OS-level code-signing/notarization (Authenticode/Apple notarization need a paid, identity-verified certificate this project doesn't have — Windows SmartScreen/macOS Gatekeeper will still warn regardless of this signature). E19.7: `cross-platform-clean-room` CI job — the fast suite on real ubuntu-latest/macos-latest/windows-latest runners, verified by CI actually passing there, not asserted from one dev machine | ARCH-007/008 ([ADR 0020](docs/adr/0020-extended-requirement-catalog.md), not `docs/spec.md` §14, which has no subsections), adoption/DX | done |
 | E20 | Verified action packs — real, useful transactions, not just a framework. Scoped to Filesystem + Git (user's choice — GitHub/Odoo need real API credentials/an instance this environment doesn't have, and the spec's own exit criterion requires a real disposable service, not mocks). `packs/filesystem/` and `packs/git/` — real `Contract` sets (loaded via the existing `belay/contracts/loader.py`, no new loader) targeting the actual official `@modelcontextprotocol/server-filesystem` (npm) and `mcp-server-git` (PyPI) servers, hand-corrected past `belay draft-contracts`'s naive heuristic (`edit_file`/`move_file` made properly reversible; `create_directory` fixed from a nonsensical draft undo to honestly `irreversible`, since the real server has no delete tool at all; `write_file` is `conditional` — reversible only if the file already existed). Git pack is smaller by real necessity, not by choice: `mcp-server-git` returns plain text only, and the contract expression grammar deliberately has no string-parsing capability, so most of its mutations (`git_commit`/`git_create_branch`/`git_checkout`) are honestly `irreversible` — only `git_add` (undone via the argument-free `git_reset`) is reversible. `tests/packs/test_filesystem_pack.py`/`test_git_pack.py`: E20's own exit criterion applied literally — a real multi-step saga against the real server, a real injected mid-saga failure, `auto_compensate` verified against real on-disk/on-repo state, plus a drift check that the pack's tool list matches what the real server actually advertises. `pack.yaml` per pack is metadata only — the full spec §11 packaging infrastructure (signed registry index, trust states, revocation, a pack-install CLI, an authoring SDK) is real, separate infrastructure work with its own hosting/trust-root decisions, not built here; both packs honestly declare `trust_state: unverified`. See [ADR 0019](docs/adr/0019-e20-verified-packs-scope.md) | §11, adoption/DX | **partial** — Filesystem + Git packs done and tested against real servers; GitHub/Odoo packs and the full packaging/registry infrastructure not attempted |
 
 ## Conformance
@@ -1075,7 +1090,7 @@ replacement for any:
 Done, §0) but **not published to PyPI yet** — that's a manual step for the
 maintainer (PyPI trusted publishing must be configured on the PyPI project
 first; an agent cannot do that). `main` is currently ahead of the `v0.1.0`
-tag with E10-E18 (see "What's new since v0.1.0" above); no new tag has been
+tag with E10-E20 (see "What's new since v0.1.0" above); no new tag has been
 cut for those yet. See
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
 [`CHANGELOG.md`](CHANGELOG.md).
@@ -1088,6 +1103,12 @@ same reason.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md) (rules
 for any human or AI agent working on this repo).
+
+## Security
+
+See [`SECURITY.md`](SECURITY.md) for how to report a vulnerability and
+[`docs/security/threat-model.md`](docs/security/threat-model.md) for what
+Belay's Native Agent Gate and MCP proxy actually protect against.
 
 ## License
 
