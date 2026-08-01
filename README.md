@@ -215,11 +215,14 @@ this gate does and does not protect against.
 belay supervisor status --db belay-hooks.db   # running -- listening on ...
 ```
 
-**Opt-in contract check** (R1 first slice, [ADR 0021](docs/adr/0021-r1-native-gate-contract-check.md)):
+**Opt-in contract check** (R1 first slices, [ADR 0021](docs/adr/0021-r1-native-gate-contract-check.md)):
 `--contracts <file>` makes native file edits resolve against a real
 `ContractSet`, the same way `belay run`'s MCP proxy resolves a tool -- a
 tool with no matching contract denies (`contract_missing`) instead of the
-default allow. Off unless you opt in:
+default allow. The same file also lets a declared, all-read native MCP
+tool (`mcp__server__tool`) auto-allow instead of always pausing --
+anything not explicitly declared read-only still pauses exactly as
+before. Off unless you opt in:
 
 ```bash
 belay hooks install --contracts packs/filesystem/contracts.yaml --yes

@@ -183,7 +183,7 @@ class Supervisor:
                 event, self._queue, self._snapshots, contract_set=self._contract_set
             )
         if event.surface == "mcp":
-            return gate.evaluate_mcp_call(event, self._queue)
+            return gate.evaluate_mcp_call(event, self._queue, contract_set=self._contract_set)
         return gate.evaluate(event, self._queue)  # its own guard denies unrecognized surfaces
 
     def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:

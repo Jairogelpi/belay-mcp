@@ -1,4 +1,4 @@
-# ADR 0021: Native Agent Gate contract check (R1, first slice)
+# ADR 0021: Native Agent Gate contract check (R1, first slices)
 
 ## Status
 
@@ -74,21 +74,47 @@ effects:
     resource: native.file
 ```
 
+### Second slice: native MCP calls narrow, never widen, the default pause
+
+The same `--contracts` file also reaches `belay/hooks/gate.py::evaluate_mcp_call`.
+Unlike the file-edit case, native MCP calls' existing default (pause,
+unconditionally) is already the *safe* direction -- there is no unsafe
+default to fix here. The opportunity is accuracy, not safety: when the
+exact `mcp__server__tool` identity resolves to a declared contract whose
+every effect is `type: "read"`, it is auto-allowed without ever touching
+the approval queue -- the same provable-safe-read case
+`belay/proxy/lifecycle.py::resolve()` already auto-allows via
+`readOnlyHint`. Anything else (no contract, or a contract with any
+non-read effect) still pauses exactly as before this slice existed --
+`contract_set` only ever narrows the pause-everything default, it never
+turns a pause into an allow without positive, declared evidence.
+
+```yaml
+belay_contract: "0.1"
+tool: mcp__github__list_issues
+reversibility: irreversible
+effects:
+  - type: read
+    resource: github.issues
+```
+
 ## Consequences
 
-- Closes the single worst-audited divergence, opt-in, with zero risk to
-  any existing install that doesn't pass `--contracts`.
+- Closes the single worst-audited divergence (file edits), opt-in, with
+  zero risk to any existing install that doesn't pass `--contracts`.
 - Native file edits can now be made to share the MCP proxy's own
   `contract_missing` honesty, at the cost of the operator maintaining a
   second, small contract file for host tool names.
+- Native MCP calls gain a narrow, evidence-only auto-allow for provably
+  read-only tools, without weakening the pause-everything default for
+  anything not explicitly declared read-only.
 - Does **not** touch Bash (still a static classifier, no `PolicyEngine`)
-  or native MCP calls (still always pause unconditionally) -- those
-  remain open R1 work.
+  -- remains open R1 work.
 - Does **not** wire quotas, anomaly baselines, intent-contract
   enforcement, or session fencing into the hook path -- still absent,
   still tracked as open R1 scope.
 - `docs/security/threat-model.md`'s "MCP proxy vs. Native Agent Gate:
-  known divergence" section is updated to reflect this one closed gap
+  known divergence" section is updated to reflect these two closed gaps
   while the rest of the divergence stands.
 
 ## Testing
@@ -97,11 +123,15 @@ effects:
 cases: no contract_set configured stays unchanged, a configured set with
 no matching contract denies before ever capturing a snapshot, a matching
 contract falls through to allow, and contract_missing takes priority over
-an unrelated "no path argument" error). `tests/supervisor/
-test_contract_set_loading.py` (the pointer-file load path: absent, valid,
-missing target, invalid content, empty). `tests/cli/
-test_hooks_lifecycle.py::TestInstallWithContracts` and
-`TestFileEditContractCheckEndToEnd` (the real CLI, install-time validation
-failures, and a genuine spawned-supervisor round trip proving the pointer
+an unrelated "no path argument" error) and `TestMcpCallContractCheck`
+(five cases: unchanged default, all-read contract auto-allows without
+touching the queue, a contract with a non-read effect still pauses, no
+matching contract still pauses, and a server literally named "belay" gets
+no free pass). `tests/supervisor/test_contract_set_loading.py` (the
+pointer-file load path: absent, valid, missing target, invalid content,
+empty). `tests/cli/test_hooks_lifecycle.py::TestInstallWithContracts`,
+`TestFileEditContractCheckEndToEnd`, and
+`TestMcpCallContractCheckEndToEnd` (the real CLI, install-time validation
+failures, and genuine spawned-supervisor round trips proving the pointer
 file written at install time is actually read by the process that later
 spawns).

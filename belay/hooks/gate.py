@@ -358,7 +358,9 @@ def evaluate_file_edit(
     )
 
 
-def evaluate_mcp_call(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
+def evaluate_mcp_call(
+    event: HookEvent, queue: ApprovalQueue, *, contract_set: ContractSet | None = None
+) -> GateDecision:
     """Claude Code's native `mcp__<server>__<tool>` calls reach whatever MCP
     server is configured directly through the agent's own client -- a
     different code path from belay's own proxy (`belay wrap`/`belay run`),
@@ -371,17 +373,42 @@ def evaluate_mcp_call(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
     client-config-file parsing (`belay/cli/client_configs.py`, a CLI-layer
     concern), and a wrong guess here would mean silently allowing an
     unaudited call. So every native MCP call gets the same treatment as an
-    unrecognized Bash command: PAUSE, queued through the identical
-    `ApprovalQueue`, bound to the full context (host, session, the specific
-    `mcp__server__tool` identity, a canonical dump of its arguments, cwd,
-    repo HEAD, ruleset version) the same way Bash's PAUSE path is -- a
-    different argument set for the same tool is a different approval, not
-    an automatic pass just because the tool name matched a prior one.
+    unrecognized Bash command by default: PAUSE, queued through the
+    identical `ApprovalQueue`, bound to the full context (host, session,
+    the specific `mcp__server__tool` identity, a canonical dump of its
+    arguments, cwd, repo HEAD, ruleset version) the same way Bash's PAUSE
+    path is -- a different argument set for the same tool is a different
+    approval, not an automatic pass just because the tool name matched a
+    prior one.
+
+    `contract_set` (R1, ADR 0021's second slice) only ever narrows this
+    default, never widens it: when the exact tool name resolves to a
+    declared contract whose every effect is `type: "read"`, this is the
+    same provable-safe-read case `belay/proxy/lifecycle.py::resolve()`
+    auto-allows via `readOnlyHint` -- allowed without ever touching the
+    approval queue, no exceptions weakened. Any other contract (or no
+    contract at all, the default) still pauses exactly as before; this
+    never turns a pause into an allow without positive, declared evidence
+    the call is read-only.
     """
     if event.phase != "pre":
         return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
     if not event.event_id:
         return GateDecision("deny", "belay: missing event id -- ambiguous identity, denying")
+
+    if contract_set is not None:
+        contract = contract_set.resolve(event.tool_name)
+        if (
+            contract is not None
+            and contract.effects
+            and all(effect.type == "read" for effect in contract.effects)
+        ):
+            return GateDecision(
+                "allow",
+                f"belay: {event.tool_name} is declared read-only in the configured "
+                "ContractSet (all effects are type=read) -- allowed without approval, "
+                "same as the MCP proxy's own readOnlyHint default rule",
+            )
 
     plan_id = _plan_id_for_mcp(event)
     existing = queue.for_plan(plan_id)

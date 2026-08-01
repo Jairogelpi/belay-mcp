@@ -468,6 +468,64 @@ class TestFileEditContractCheckEndToEnd:
         assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+class TestMcpCallContractCheckEndToEnd:
+    """R1, ADR 0021's second slice, end to end through the real CLI and a
+    real spawned supervisor: a native `mcp__server__tool` call declared
+    all-read in the configured contracts file auto-allows; anything else
+    (no contract, or a contract with a non-read effect) still pauses,
+    exactly like before this slice existed."""
+
+    def _install_with_read_only_mcp_contract(self, tmp_path: Path) -> None:
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: mcp__github__list_issues\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: read\n"
+            "    resource: github.issues\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app, ["hooks", "install", "--contracts", str(contracts), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+
+    def _run_pre_mcp(self, tool_name: str, args: dict, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "tool_input": args,
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "belay-hooks.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+
+    def test_declared_read_only_mcp_tool_auto_allows(self, tmp_path: Path) -> None:
+        self._install_with_read_only_mcp_contract(tmp_path)
+        out = self._run_pre_mcp("mcp__github__list_issues", {}, "toolu_mcp_read")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_mcp_tool_not_in_the_contract_set_still_pauses(self, tmp_path: Path) -> None:
+        self._install_with_read_only_mcp_contract(tmp_path)  # only declares list_issues
+        out = self._run_pre_mcp(
+            "mcp__github__create_issue", {"title": "x"}, "toolu_mcp_undeclared"
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_without_contracts_configured_mcp_call_still_pauses(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["hooks", "install", "--yes"])  # no --contracts
+        assert result.exit_code == 0, result.output
+        out = self._run_pre_mcp("mcp__github__list_issues", {}, "toolu_mcp_legacy")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 class TestFileEditRewind:
     """E18.3: native Edit/Write calls are captured for rewind, end-to-end
     through the real CLI, two separate `belay hooks run` invocations (pre

@@ -423,6 +423,78 @@ class TestMcpCall:
         assert queue.list() == []
 
 
+class TestMcpCallContractCheck:
+    """R1, ADR 0021's second slice: `contract_set` only ever narrows the
+    default PAUSE-everything behavior, never widens it -- a declared,
+    all-read contract auto-allows (matching the MCP proxy's own
+    readOnlyHint default rule), anything else still pauses exactly as
+    before."""
+
+    def test_no_contract_set_is_unchanged_always_pauses(self, queue: ApprovalQueue) -> None:
+        event = _mcp_event("mcp__github__list_issues", {})
+        result = evaluate_mcp_call(event, queue)
+        assert result.verdict == "deny"
+
+    def test_declared_all_read_contract_auto_allows_without_touching_the_queue(
+        self, queue: ApprovalQueue
+    ) -> None:
+        from belay.contracts.model import Contract, ContractSet, Effect
+
+        read_contract = Contract(
+            belay_contract="0.1",
+            tool="mcp__github__list_issues",
+            reversibility="irreversible",
+            effects=[Effect(type="read", resource="github.issues")],
+        )
+        contract_set = ContractSet(
+            contracts={"mcp__github__list_issues": read_contract}, set_hash="sha256:read-only"
+        )
+        event = _mcp_event("mcp__github__list_issues", {})
+        result = evaluate_mcp_call(event, queue, contract_set=contract_set)
+        assert result.verdict == "allow"
+        assert queue.list() == []
+
+    def test_declared_contract_with_a_write_effect_still_pauses(
+        self, queue: ApprovalQueue
+    ) -> None:
+        from belay.contracts.model import Contract, ContractSet, Effect
+
+        write_contract = Contract(
+            belay_contract="0.1",
+            tool="mcp__github__create_issue",
+            reversibility="irreversible",
+            effects=[Effect(type="create", resource="github.issues")],
+        )
+        contract_set = ContractSet(
+            contracts={"mcp__github__create_issue": write_contract},
+            set_hash="sha256:has-write",
+        )
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        result = evaluate_mcp_call(event, queue, contract_set=contract_set)
+        assert result.verdict == "deny"
+        assert len(queue.list()) == 1
+
+    def test_contract_set_configured_but_no_matching_contract_still_pauses(
+        self, queue: ApprovalQueue
+    ) -> None:
+        from belay.contracts.model import ContractSet
+
+        empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
+        event = _mcp_event("mcp__github__list_issues", {})
+        result = evaluate_mcp_call(event, queue, contract_set=empty_set)
+        assert result.verdict == "deny"
+
+    def test_a_server_named_belay_with_no_contract_still_gets_no_free_pass(
+        self, queue: ApprovalQueue
+    ) -> None:
+        from belay.contracts.model import ContractSet
+
+        empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
+        event = _mcp_event("mcp__belay__run_step", {"tool": "whatever"})
+        result = evaluate_mcp_call(event, queue, contract_set=empty_set)
+        assert result.verdict == "deny"
+
+
 def _file_event(tool_name: str, path: str, session_id: str = "sess-1") -> HookEvent:
     raw = {
         "session_id": session_id,

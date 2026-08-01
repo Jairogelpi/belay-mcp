@@ -21,9 +21,16 @@ once it reaches 1.0.
   hard `deny` (not queued for approval, matching spec §4.6's treatment of
   a missing contract as a configuration problem). Recorded via a new
   per-install pointer file (`SupervisorIdentity.contracts_pointer_path`)
-  the supervisor best-effort loads at construction. Bash and native MCP
-  calls are untouched by this slice -- still fully divergent from the
-  proxy path, tracked as open R1 scope in
+  the supervisor best-effort loads at construction. The same
+  `--contracts` file also reaches native `mcp__server__tool` calls
+  (`belay/hooks/gate.py::evaluate_mcp_call`): a declared contract whose
+  every effect is `type: "read"` now auto-allows without touching the
+  approval queue, the same provable-safe-read case the MCP proxy already
+  auto-allows via `readOnlyHint` -- this only ever narrows the
+  pause-everything default, never widens it (no contract, or any
+  non-read effect, still pauses exactly as before). Bash is untouched by
+  this slice -- still a static classifier, no `PolicyEngine`, tracked as
+  open R1 scope in
   [`docs/security/threat-model.md`](docs/security/threat-model.md).
 
 - **Fix: `trust_tier` overclaimed `T1` for every Claude Code surface, not
