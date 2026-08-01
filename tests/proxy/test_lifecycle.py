@@ -300,6 +300,72 @@ async def test_paused_then_approved_via_queue_lets_execution_continue() -> None:
     assert second == {"ok": True, "tool": "mail.send"}
 
 
+async def test_a_third_call_with_the_same_args_after_execution_is_idempotency_conflict() -> None:
+    """R1.7.1 (ADR 0025): the MCP proxy now shares the same single-use
+    Capability Lease (`ApprovalQueue.consume`) R1.6 built for the Native
+    Agent Gate -- an approved plan_id must not silently allow an unbounded
+    number of separate future calls, only the one instance a human
+    actually approved. `test_paused_then_approved_via_queue_lets_execution_continue`
+    above proves the legitimate two-call flow (pause -> approve -> the
+    SAME retry executes) is unaffected; this proves a genuinely NEW third
+    call with the identical (tool, args) -- which used to execute again
+    silently -- now denies instead."""
+    ledger = LedgerStore()
+    session_id = "s_replay_flow"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    lifecycle = Lifecycle(
+        contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
+    )
+    lifecycle.start_session("test-fixture")
+
+    first = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert lifecycle.approval_stage is not None
+    lifecycle.approval_stage.queue.approve(first["approval_id"], approved_by="jairo")
+
+    second = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert second == {"ok": True, "tool": "mail.send"}
+
+    with pytest.raises(BelayError) as excinfo:
+        await lifecycle.govern_and_execute(
+            "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+        )
+    assert excinfo.value.code == "idempotency_conflict"
+
+
+async def test_consuming_an_approval_records_host_and_policy_hash() -> None:
+    """Mirrors `tests/hooks/test_gate.py`'s R1.6 follow-up test -- the same
+    `ApprovalQueue.consume()` audit fields must actually be populated via
+    the real proxy call path, not just at the queue level in isolation."""
+    ledger = LedgerStore()
+    session_id = "s_lease_audit"
+    cs = ContractSet(contracts={"mail.send": _irreversible_send_contract()}, set_hash="sha256:x")
+    lifecycle = Lifecycle(
+        contract_set=cs, unsafe_passthrough_tools=frozenset(), ledger=ledger, session_id=session_id
+    )
+    lifecycle.start_session("test-fixture")
+
+    first = await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+    assert lifecycle.approval_stage is not None
+    approval_stage = lifecycle.approval_stage
+    approval_stage.queue.approve(first["approval_id"], approved_by="jairo")
+
+    await lifecycle.govern_and_execute(
+        "mail.send", {"to": "a@example.com"}, read_only_hint=False, executor=_noop_executor
+    )
+
+    consumed = approval_stage.queue.get(first["approval_id"])
+    assert consumed is not None
+    assert consumed.consumed_by_host == "mcp"
+    assert consumed.consumed_policy_hash is not None
+    assert "contracts=" in consumed.consumed_policy_hash
+
+
 async def test_paused_then_rejected_raises_approval_rejected_with_reason() -> None:
     ledger = LedgerStore()
     session_id = "s_reject_flow"

@@ -10,6 +10,26 @@ once it reaches 1.0.
 
 ### Added
 
+- **R1.7.1 -- MCP proxy adopts the same Capability Lease as the Native
+  Agent Gate ([ADR 0025](docs/adr/0025-r1-canonical-protocol.md)):**
+  `belay/proxy/lifecycle.py::ApprovalStage.check()` used to treat
+  `state == "approved"` as an unconditional, unlimited-reuse pass -- the
+  exact same replay gap R1.6 closed for hooks. Now calls the same
+  `ApprovalQueue.consume()` compare-and-swap lease (no changes needed to
+  `queue.py` itself), keyed by `f"{session_id}:{step_seq}"` -- a
+  genuinely new call with the identical `(tool, args)` now denies with
+  `idempotency_conflict` instead of silently re-executing; the legitimate
+  pause -> approve -> retry-executes two-call flow is unaffected.
+  `consumed_by_host="mcp"` and a real `policy_hash`
+  (`contracts=<set_hash>;policy=<canonical_hash(PolicyDoc)>`) are now
+  recorded for every MCP-side consumption too. ADR 0025 also documents
+  the full canonical-protocol design (`ActionEnvelope`/`ActionPlan`/
+  `CapabilityLease`/`OutcomeEvidence`/`TransactionReceipt`) and maps each
+  piece onto what already exists in the codebase (`Plan`, `PolicyResult`,
+  `SagaExecutor`'s stages, `SignedEvidence`) -- this slice is the first
+  concrete step, not the whole thing; R1.7.2-R1.7.4 are sequenced, not
+  built yet.
+
 - **R1.6 correctness lock -- six concrete gaps closed before any further
   parallel hook-specific tracking is added on top of R1's five slices:**
   - **Fail-closed configured policy:** `Supervisor._load_contract_set`/

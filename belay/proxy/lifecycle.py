@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from belay.approvals.queue import ApprovalQueue
+from belay.approvals.queue import ApprovalAlreadyConsumed, ApprovalQueue
 from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
@@ -132,10 +132,23 @@ class ApprovalStage:
     `reject` call sites -- those live only in `belay/cli/main.py`'s
     `approvals` subcommands, so the agent-facing proxy has no code path that
     can approve or reject anything (spec §12 no-self-approval).
+
+    R1.7.1 (ADR 0025): an `approved` item is single-use, via the same
+    `ApprovalQueue.consume()` compare-and-swap lease R1.6 built for the
+    Native Agent Gate -- before this, `state == "approved"` allowed an
+    unbounded number of separate future calls with the identical
+    `(tool, args)`, not just the one situation a human actually approved.
+    `f"{session_id}:{step_seq}"` (a fresh, monotonically-incrementing
+    identity for every distinct `govern_and_execute` invocation) is the
+    lease's `event_id` -- unlike the hooks path, approval-check and
+    execution happen inside the same call here, so there is no
+    legitimate "redeliver the identical dispatch" case to accommodate;
+    every genuinely new call gets its own claim.
     """
 
-    def __init__(self, queue: ApprovalQueue | None = None) -> None:
+    def __init__(self, queue: ApprovalQueue | None = None, *, policy_hash: str = "unknown") -> None:
         self.queue = queue or ApprovalQueue()
+        self._policy_hash = policy_hash
 
     def check(self, verdict: str, plan: Plan, session_id: str, step_seq: int) -> ApprovalCheck:
         if verdict != "pause":
@@ -151,6 +164,23 @@ class ApprovalStage:
             )
 
         if existing.state == "approved":
+            try:
+                self.queue.consume(
+                    existing.approval_id,
+                    f"{session_id}:{step_seq}",
+                    host="mcp",
+                    policy_hash=self._policy_hash,
+                )
+            except ApprovalAlreadyConsumed as exc:
+                raise BelayError(
+                    "idempotency_conflict",
+                    {
+                        "approval_id": existing.approval_id,
+                        "reason": "this approval was already consumed by a different call "
+                        "instance -- a granted approval is single-use, not a standing "
+                        "permission for every future occurrence of the identical call",
+                    },
+                ) from exc
             return ApprovalCheck(proceed=True, created=False)
         if existing.state == "rejected":
             raise BelayError(
@@ -251,8 +281,15 @@ class Lifecycle:
             # Share the ledger's SQLite file (spec §7): the CLI's `belay
             # approvals` subcommands run as a separate process and must see
             # the same queue.
+            from belay.canonical import canonical_hash
+
+            policy_hash = (
+                f"contracts={self.contract_set.set_hash};"
+                f"policy={canonical_hash(self.policy.model_dump(mode='json'))}"
+            )
             self.approval_stage = ApprovalStage(
-                ApprovalQueue(engine=self.ledger.engine, clock=self.clock)
+                ApprovalQueue(engine=self.ledger.engine, clock=self.clock),
+                policy_hash=policy_hash,
             )
         if self.execute_stage is None:
             self.execute_stage = ExecuteStage(
