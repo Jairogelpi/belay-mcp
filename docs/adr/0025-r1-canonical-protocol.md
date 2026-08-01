@@ -2,10 +2,12 @@
 
 ## Status
 
-Proposed (design). Three concrete slices implemented alongside this ADR:
-R1.7.1, R1.7.2, and R1.7.3 (all below, each narrower or differently
-scoped than first sketched -- see each one's own note). R1.7.4 remains
-sequenced, not built yet.
+Proposed (design). Four concrete slices implemented alongside this ADR:
+R1.7.1, R1.7.2, R1.7.3, and R1.7.4 (all below, each narrower or
+differently scoped than first sketched -- see each one's own note).
+`TransactionReceipt`'s poststate-capture half specifically was found to
+need new `SagaExecutor` instrumentation that doesn't exist today, and
+remains unbuilt -- see R1.7.4's own section.
 
 ## Context
 
@@ -112,12 +114,12 @@ no equivalent to any of these three today) remains separately scoped,
 larger follow-up work -- not attempted here, and not the same task as
 "remove the string-literal duplication."
 
-**`TransactionReceipt`** (not built this slice) -- extend
-`belay/ledger/signing.py::SignedEvidence` with a `policy_hash` field
-(reusing `belay/canonical.py::canonical_hash` over the `PolicyDoc` -- the
-exact mechanism R1.7.1 introduces below for approval consumption, not a
-new hashing scheme) and a poststate capture, rather than inventing a
-parallel receipt format. Sequenced as R1.7.4.
+**`TransactionReceipt`** -- **`policy_hash` half built, R1.7.4** (extends
+`belay/ledger/signing.py::SignedEvidence` rather than inventing a
+parallel receipt format, as sketched). The poststate-capture half was
+investigated and found to need genuinely new `SagaExecutor`
+instrumentation, not a field addition -- see R1.7.4's own section below
+for why, and what's still open.
 
 ### State machine
 
@@ -266,6 +268,45 @@ quota), is deferred until **after R1.10** gives hooks a real
 `plan_created`/`session_started`-shaped ledger presence to evaluate that
 question against -- not assumed now, in either direction.
 
+### R1.7.4 (this slice, split scope): `policy_hash` on `SignedEvidence`, poststate deferred
+
+`SignedEvidence`'s existing fields (`set_hash`, `initiated_by`,
+`on_behalf_of`) are each derived from ledger events and cross-checked at
+verify time -- not passed in from outside and trusted. `policy_hash`
+follows the identical pattern rather than being bolted on differently:
+
+- `belay/proxy/lifecycle.py::Lifecycle` now computes `self._policy_hash`
+  once in `__post_init__` (previously computed inline, only for
+  `ApprovalStage`'s R1.7.1 use) and folds it into `session_started`'s
+  payload in `start_session()` -- inside the payload dict, not a
+  dedicated `Event` field, matching how `tool_count`/`intent_contract_hash`
+  already ride there (events are `extra="allow"`, spec §14, so this
+  needs no schema change to `Event`/`EventRow` at all).
+- `belay/ledger/signing.py` gains `_policy_hash_from_events()` (mirrors
+  `_identity_from_events`), a `policy_hash` field on `SignedEvidence`,
+  and the same signed-summary + verify-time cross-check treatment
+  `initiated_by`/`on_behalf_of` already get -- editing a bundle's stated
+  `policy_hash` without re-signing now fails at the `signature` stage,
+  proven by `test_tamper_e_policy_hash_edited_without_resigning_fails_signature`.
+- Bundles signed before this change (or any session not started via
+  `Lifecycle`) simply have `policy_hash=None` throughout -- same
+  established precedent as `initiated_by`/`on_behalf_of`'s own addition
+  (E14): no `schema_version` bump, no special-casing old bundles, since
+  none of the prior fields did either.
+
+**Poststate capture was investigated and deferred, not built.** Today's
+closest thing -- `state_captured` (a contract's `capture` block) --
+only ever runs *before* the tool call, and `result_recorded` holds
+whatever the tool itself returned, which is not the same claim as "the
+resource's state afterward, captured the same way `capture` captures
+the before-state." Adding a real poststate capture would mean
+`SagaExecutor.run_step` gaining a genuinely new stage (re-running the
+contract's `capture` tool *after* execution too, mirroring the existing
+before-capture mechanism) -- a real behavioral addition to the six-stage
+saga lifecycle, not a field added to a bundling type. That's
+separately-scoped work, sequenced after this slice, not assumed to be
+small.
+
 ## Consequences
 
 - Both engines now share one real piece of the eventual canonical
@@ -286,13 +327,19 @@ question against -- not assumed now, in either direction.
   was investigated and explicitly retired as sketched, not built in a
   different shape -- see R1.7.3's own section above for the four reasons
   and the ADR-0023-aligned re-sequencing.
-- Does **not** yet produce a real cross-engine `OutcomeEvidence` type or
-  a `TransactionReceipt` -- those remain real, separately scoped
-  follow-up work (R1.7.4), not silently implied done by this slice's
-  title. R1.7.2 specifically turned out to be narrower than first
-  sketched (see its own section above) -- the three step-outcome status
-  types (`RecoveryOutcome`/`StepStatus`/`OutcomeStatus`) remain three
-  distinct types on purpose, not merged.
+- `belay/ledger/signing.py::SignedEvidence.policy_hash` now lets a
+  verifier confirm, offline and cryptographically, which policy config
+  actually governed a session -- the same tamper-evidence guarantee
+  `initiated_by`/`on_behalf_of` already had, extended to policy.
+- Does **not** yet produce a real cross-engine `OutcomeEvidence` type, or
+  a poststate-capturing `TransactionReceipt` -- both remain real,
+  separately scoped follow-up work, not silently implied done by this
+  slice's title. R1.7.2 specifically turned out to be narrower than
+  first sketched (see its own section above) -- the three step-outcome
+  status types (`RecoveryOutcome`/`StepStatus`/`OutcomeStatus`) remain
+  three distinct types on purpose, not merged. R1.7.4's poststate half
+  needs a genuinely new `SagaExecutor` stage, not a field addition (see
+  its own section above).
 - `idempotency_conflict` is now used for two related-but-distinct things
   (the saga executor's upstream-call idempotency keys, and approval
   consumption) -- both mean "a resource that must be used at most once
@@ -327,3 +374,17 @@ string, proving the two engines' call-identity concept is already one
 shape; a frozen-dataclass immutability check; and an explicit assertion
 that `repo_prestate_digest`/`os_identity` stay `None` for the MCP side
 rather than being papered over.
+
+`tests/ledger/test_signing.py` (extended, R1.7.4): a session with a
+`policy_hash` signs and verifies cleanly and the value round-trips into
+`SignedEvidence.policy_hash`; a session with none stays honestly `None`
+throughout (no crash, no false mismatch); a new tamper test
+(`test_tamper_e_...`) mirrors the existing `event_count` tamper test --
+editing `policy_hash` on an already-signed bundle without re-signing
+fails at the `signature` stage. `tests/proxy/test_lifecycle.py`'s
+existing `set_hash`-pinning test gained an assertion that
+`session_started.payload["policy_hash"]` equals `lifecycle._policy_hash`
+(the same value `ApprovalStage` already records per R1.7.1), tying the
+two slices together rather than testing them in isolation. Full suite
+green throughout (830 fast tests after this slice), `ruff`/`mypy` clean
+repo-wide.

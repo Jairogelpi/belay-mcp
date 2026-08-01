@@ -92,6 +92,71 @@ def test_tamper_c_summary_field_edited_without_resigning_fails_signature() -> No
     assert report.stage == "signature"
 
 
+def test_session_with_a_policy_hash_signs_and_verifies_cleanly() -> None:
+    """R1.7.4 (ADR 0025): `session_started.payload["policy_hash"]`
+    (`belay/proxy/lifecycle.py::Lifecycle.start_session`) is signed and
+    verified exactly like `initiated_by`/`on_behalf_of` (E14)."""
+    store = LedgerStore()
+    session_id = "s_policy"
+    store.append(
+        session_id,
+        "session_started",
+        {"agent": "demo", "policy_hash": "contracts=sha256:x;policy=sha256:y"},
+    )
+    store.append(session_id, "step_journaled", {"tool": "crm.delete"}, step_seq=1)
+    store.append(session_id, "result_recorded", {"ok": True}, step_seq=1)
+    store.append(session_id, "compensation_registered", {"undo": "crm.restore"}, step_seq=1)
+    store.append(session_id, "step_committed", {}, step_seq=1)
+    events = store.read(session_id)
+    key = SigningKey.generate()
+
+    bundle = sign_session(events, key)
+    assert bundle.policy_hash == "contracts=sha256:x;policy=sha256:y"
+
+    report = verify_evidence(bundle)
+    assert report.ok
+    assert report.stage is None
+
+
+def test_session_with_no_policy_hash_still_signs_and_verifies_cleanly() -> None:
+    """A session never started via `Lifecycle` (or started before R1.7.4)
+    has no `policy_hash` at all -- must stay `None` throughout, not crash
+    or be treated as a mismatch against itself."""
+    store = LedgerStore()
+    events = _seed_session(store)
+    key = SigningKey.generate()
+
+    bundle = sign_session(events, key)
+    assert bundle.policy_hash is None
+
+    report = verify_evidence(bundle)
+    assert report.ok
+
+
+def test_tamper_e_policy_hash_edited_without_resigning_fails_signature() -> None:
+    store = LedgerStore()
+    session_id = "s_policy_tamper"
+    store.append(
+        session_id, "session_started", {"agent": "demo", "policy_hash": "contracts=sha256:x"}
+    )
+    store.append(session_id, "step_journaled", {"tool": "crm.delete"}, step_seq=1)
+    store.append(session_id, "result_recorded", {"ok": True}, step_seq=1)
+    store.append(session_id, "compensation_registered", {"undo": "crm.restore"}, step_seq=1)
+    store.append(session_id, "step_committed", {}, step_seq=1)
+    events = store.read(session_id)
+    key = SigningKey.generate()
+    bundle = sign_session(events, key)
+
+    tampered = json.loads(bundle.model_dump_json())
+    tampered["policy_hash"] = "contracts=sha256:FORGED"  # edited, signature left as-is
+    tampered_bundle = SignedEvidence.model_validate(tampered)
+
+    report = verify_evidence(tampered_bundle)
+
+    assert not report.ok
+    assert report.stage == "signature"
+
+
 def test_tamper_d_events_appended_after_signing_fails_summary_mismatch() -> None:
     store = LedgerStore()
     events = _seed_session(store)

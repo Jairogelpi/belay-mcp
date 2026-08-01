@@ -260,6 +260,13 @@ class Lifecycle:
     intent_contract: IntentContract | None = None
     _step_seq: int = field(default=0, init=False, repr=False)
     _files_touched: frozenset[str] = field(default=frozenset(), init=False, repr=False)
+    _policy_hash: str = field(default="", init=False, repr=False)
+    """Computed once in `__post_init__` (R1.7.1/R1.7.4, ADR 0025):
+    `f"contracts={set_hash};policy={canonical_hash(PolicyDoc)}"`. Shared
+    by `ApprovalStage` (its `CapabilityLease` consumption audit field) and
+    `start_session()` (folded into `session_started`'s payload, so
+    `belay/ledger/signing.py::SignedEvidence` can sign/verify it as part
+    of the session's evidence -- see R1.7.4)."""
     last_explanation: dict[str, Any] | None = field(default=None, init=False, repr=False)
     """The most recent call's E16 `Explanation`, as a plain dict (or `None`
     before any policy evaluation has happened, e.g. a `contract_missing`
@@ -278,19 +285,19 @@ class Lifecycle:
             self.policy_stage = PolicyStage(
                 PolicyEngine(clock=self.clock, ledger=self.ledger), self.policy
             )
+        from belay.canonical import canonical_hash
+
+        self._policy_hash = (
+            f"contracts={self.contract_set.set_hash};"
+            f"policy={canonical_hash(self.policy.model_dump(mode='json'))}"
+        )
         if self.approval_stage is None:
             # Share the ledger's SQLite file (spec §7): the CLI's `belay
             # approvals` subcommands run as a separate process and must see
             # the same queue.
-            from belay.canonical import canonical_hash
-
-            policy_hash = (
-                f"contracts={self.contract_set.set_hash};"
-                f"policy={canonical_hash(self.policy.model_dump(mode='json'))}"
-            )
             self.approval_stage = ApprovalStage(
                 ApprovalQueue(engine=self.ledger.engine, clock=self.clock),
-                policy_hash=policy_hash,
+                policy_hash=self._policy_hash,
             )
         if self.execute_stage is None:
             self.execute_stage = ExecuteStage(
@@ -314,8 +321,19 @@ class Lifecycle:
         bundle (E13) from the moment the session starts, not a fact asserted
         after the fact by whatever `--intent-contract` file `belay export-pr`
         happens to be pointed at later (adoption/DX, not spec-numbered).
+
+        `policy_hash` (R1.7.4, ADR 0025) is folded in unconditionally --
+        the same value `ApprovalStage` records against every
+        `CapabilityLease` consumption (R1.7.1) -- so
+        `belay/ledger/signing.py::SignedEvidence` can sign and later
+        verify which policy configuration actually governed this session,
+        the same way it already does for `initiated_by`/`on_behalf_of`
+        (E14) and `set_hash`.
         """
-        payload: dict[str, Any] = {"tool_count": len(self.contract_set.contracts)}
+        payload: dict[str, Any] = {
+            "tool_count": len(self.contract_set.contracts),
+            "policy_hash": self._policy_hash,
+        }
         if self.intent_contract is not None:
             from belay.canonical import canonical_hash
 

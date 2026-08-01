@@ -67,6 +67,18 @@ once it reaches 1.0.
   behavior change. ADR 0025 updated to record the retirement and
   re-sequence "hooks reuse `PolicyEngine`" to after R1.10.
 
+- **R1.7.4 -- `policy_hash` on `SignedEvidence`, poststate deferred:**
+  `belay/proxy/lifecycle.py::Lifecycle` now folds its `policy_hash`
+  (the same fingerprint `ApprovalStage` already records per R1.7.1) into
+  `session_started`'s payload, and `belay/ledger/signing.py::SignedEvidence`
+  signs/verifies it exactly like `initiated_by`/`on_behalf_of` (E14) --
+  editing a bundle's stated `policy_hash` without re-signing now fails at
+  the signature stage. Investigated and explicitly deferred: a real
+  poststate capture, which would need `SagaExecutor` to gain a genuinely
+  new post-execution capture stage (mirroring the existing before-capture
+  mechanism), not just a field on the bundle -- separately scoped
+  follow-up work, not built this slice.
+
 - **R1.6 correctness lock -- six concrete gaps closed before any further
   parallel hook-specific tracking is added on top of R1's five slices:**
   - **Fail-closed configured policy:** `Supervisor._load_contract_set`/

@@ -104,6 +104,11 @@ def _signed_summary(bundle_like: Any) -> dict[str, Any]:
         # tampering with the chain/event_count.
         "initiated_by": bundle_like.initiated_by,
         "on_behalf_of": bundle_like.on_behalf_of,
+        # R1.7.4 (ADR 0025): the policy config actually in effect for this
+        # session -- same signed/cross-checked treatment as identity above,
+        # so tampering with which policy governed a session is detected
+        # exactly like tampering with who authorized it.
+        "policy_hash": bundle_like.policy_hash,
     }
 
 
@@ -140,6 +145,15 @@ class SignedEvidence(BaseModel):
     # `_signed_summary`).
     initiated_by: str | None = None
     on_behalf_of: str | None = None
+    # R1.7.4 (ADR 0025): the policy config fingerprint
+    # (`f"contracts={set_hash};policy={canonical_hash(PolicyDoc)}"`,
+    # `belay/proxy/lifecycle.py::Lifecycle.__post_init__`) in effect for
+    # this session, derived from `session_started.payload["policy_hash"]`
+    # and covered by the signature (see `_signed_summary`). `None` for
+    # sessions signed before this field existed, or any session whose
+    # `session_started` event doesn't carry it (e.g. constructed directly
+    # in a test, bypassing `Lifecycle`).
+    policy_hash: str | None = None
 
 
 class VerificationResult(BaseModel):
@@ -179,6 +193,7 @@ def sign_session(events: list[Event], key: SigningKey) -> SignedEvidence:
     chain_head_hash = events[-1].hash
     signed_at = datetime.now(UTC).isoformat()
     initiated_by, on_behalf_of = _identity_from_events(events)
+    policy_hash = _policy_hash_from_events(events)
     summary: dict[str, Any] = {
         "session_id": session_id,
         "set_hash": set_hash,
@@ -187,6 +202,7 @@ def sign_session(events: list[Event], key: SigningKey) -> SignedEvidence:
         "signed_at": signed_at,
         "initiated_by": initiated_by,
         "on_behalf_of": on_behalf_of,
+        "policy_hash": policy_hash,
     }
     signature = key.sign(canonical_bytes(summary)).hex()
 
@@ -201,6 +217,7 @@ def sign_session(events: list[Event], key: SigningKey) -> SignedEvidence:
         events=events,
         initiated_by=initiated_by,
         on_behalf_of=on_behalf_of,
+        policy_hash=policy_hash,
     )
 
 
@@ -210,6 +227,22 @@ def _identity_from_events(events: list[Event]) -> tuple[str | None, str | None]:
     if started is None:
         return None, None
     return started.initiated_by, started.on_behalf_of
+
+
+def _policy_hash_from_events(events: list[Event]) -> str | None:
+    """R1.7.4: the policy fingerprint is bound once, in `session_started`'s
+    `payload["policy_hash"]` (`belay/proxy/lifecycle.py::Lifecycle.start_session`)
+    -- unlike `initiated_by`/`on_behalf_of`, which are dedicated `Event`
+    fields, this rides in the payload alongside `tool_count`/
+    `intent_contract_hash`, since events are `extra="allow"` (spec §14)
+    and there's no dedicated schema field for it. `None` if absent
+    (a session started before this field existed, or not via `Lifecycle`
+    at all -- e.g. a hand-built test session)."""
+    started = next((e for e in events if e.type == "session_started"), None)
+    if started is None:
+        return None
+    value = started.payload.get("policy_hash")
+    return value if isinstance(value, str) else None
 
 
 def verify_evidence(
@@ -263,6 +296,7 @@ def verify_evidence(
     actual_event_count = len(bundle.events)
     actual_chain_head = bundle.events[-1].hash if bundle.events else None
     actual_initiated_by, actual_on_behalf_of = _identity_from_events(bundle.events)
+    actual_policy_hash = _policy_hash_from_events(bundle.events)
     mismatches: list[str] = []
     if actual_event_count != bundle.event_count:
         mismatches.append(
@@ -283,6 +317,11 @@ def verify_evidence(
         mismatches.append(
             f"on_behalf_of mismatch: signed summary says {bundle.on_behalf_of!r}, "
             f"embedded session_started event says {actual_on_behalf_of!r}"
+        )
+    if actual_policy_hash != bundle.policy_hash:
+        mismatches.append(
+            f"policy_hash mismatch: signed summary says {bundle.policy_hash!r}, "
+            f"embedded session_started event says {actual_policy_hash!r}"
         )
     if mismatches:
         return VerificationResult(

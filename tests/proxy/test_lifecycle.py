@@ -145,6 +145,13 @@ async def test_session_fixes_set_hash_and_later_contract_changes_do_not_apply() 
     assert started.type == "session_started"
     assert started.set_hash == cs_v1.set_hash
 
+    # R1.7.4 (ADR 0025): the same policy_hash ApprovalStage records against
+    # every CapabilityLease consumption (R1.7.1) is folded into
+    # session_started's own payload, so belay/ledger/signing.py::SignedEvidence
+    # can sign/verify which policy governed this session.
+    assert started.payload["policy_hash"] == lifecycle._policy_hash
+    assert "contracts=" in started.payload["policy_hash"]
+
     # A call still resolves against the pinned contract set, even though a
     # hypothetical "new" set (e.g. one with a contract removed) exists
     # elsewhere -- the Lifecycle object never re-reads or re-resolves it.
