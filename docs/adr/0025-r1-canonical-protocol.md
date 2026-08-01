@@ -2,9 +2,10 @@
 
 ## Status
 
-Proposed (design). Two concrete slices implemented alongside this ADR:
-R1.7.1 (below) and R1.7.2 (below, narrower in scope than first sketched
--- see its own note). R1.7.3-R1.7.4 remain sequenced, not built yet.
+Proposed (design). Three concrete slices implemented alongside this ADR:
+R1.7.1, R1.7.2, and R1.7.3 (all below, each narrower or differently
+scoped than first sketched -- see each one's own note). R1.7.4 remains
+sequenced, not built yet.
 
 ## Context
 
@@ -59,22 +60,25 @@ sequenced, not attempted yet.
 
 ### Canonical types (target shape, not all built yet)
 
-**`ActionEnvelope`** (not built this slice) -- proposed shape: `{surface,
-host, tool, args, session_id, cwd, repo_prestate_digest, os_identity,
-event_id | step_seq, monotonic_ns, wall_clock}`, a superset `HookEvent`
-and the MCP proxy's per-call inputs both normalize into. Follow-up work
-(R1.7.3) converts `HookEvent` into, or alongside, this shape without
-changing the hooks path's existing wire behavior or breaking its tests.
+**`ActionEnvelope`** -- **built, R1.7.3** (`belay/action_envelope.py`):
+`{surface, host, tool, args, session_id, cwd, repo_prestate_digest,
+os_identity, event_id, monotonic_ns, wall_clock}`, plus
+`from_hook_event(HookEvent) -> ActionEnvelope` and `from_mcp_call(...) ->
+ActionEnvelope`, proving both engines' per-call inputs already normalize
+into one shape. Deliberately not wired into any production decision
+path in this slice -- see R1.7.3's own section below for why the
+originally-sketched next step (`ActionPlan`/`PolicyEngine` reuse) was
+retired instead of built alongside it.
 
 **`ActionPlan`** -- reuse `belay/planner/model.py::Plan` as-is; no new
-type. Follow-up work (R1.7.3) is making the hooks path's
+type. The originally-sketched follow-up (making the hooks path's
 `evaluate_file_edit`/`evaluate_mcp_call` call the real
-`Planner.plan()`/`PolicyEngine.evaluate()` instead of `gate.py`'s own
-bespoke contract-presence check, so both engines produce the same
-`Plan`/`PolicyResult` shape. Bash stays a deliberately separate problem
-(no stable tool identity to resolve a `Contract` against at all) --
-already flagged in R1.6's own review as needing a `ShellEffectPlanner`,
-sequenced as R1.9 in the broader roadmap, out of scope for R1.7.
+`Planner.plan()`/`PolicyEngine.evaluate()`) was investigated as part of
+R1.7.3 and found to be the wrong direction as sketched -- see R1.7.3's
+own section below. Bash stays a deliberately separate problem (no stable
+tool identity to resolve a `Contract` against at all) -- already flagged
+in R1.6's own review as needing a `ShellEffectPlanner`, sequenced as
+R1.9 in the broader roadmap, out of scope for R1.7 regardless.
 
 **`CapabilityLease`** -- reuse `ApprovalQueue`/`ApprovalItem`'s
 `consumed_by_event_id`/`consumed_at`/`consumed_by_host`/
@@ -208,6 +212,60 @@ any one site would silently break the connection. Fixed:
   sanity tests (`tests/ledger/test_model.py`) asserting the constants'
   string values and that each is a real member of `EVENT_TYPES`.
 
+### R1.7.3 (this slice, revised scope): `ActionEnvelope` only, `ActionPlan` sketch retired
+
+A focused investigation into the originally-sketched follow-up (make
+`belay/hooks/gate.py`'s `evaluate_file_edit`/`evaluate_mcp_call` build a
+real `Plan` via `Planner.plan()` and evaluate it through
+`PolicyEngine.evaluate()`, replacing `gate.py`'s bespoke contract-presence
+check) found four concrete reasons this specific idea does not hold up,
+before any code was written:
+
+1. `Planner.plan()` treats `contract is None` as "the caller already
+   applied the default rule" and returns a *permissive* `Plan`
+   (`reversibility="reversible"`, `effects=[]`) -- the real
+   `contract_missing` deny logic lives entirely in
+   `belay/proxy/lifecycle.py::resolve()`, before a `PlanningSession` is
+   ever built. Swapping in a bare `Planner.plan()` call would make hooks
+   **more permissive** than today for "ContractSet configured, tool
+   unresolved," unless `gate.py` keeps re-implementing `resolve()`'s
+   exact branching in front of it anyway -- which means the bespoke
+   check doesn't disappear, it just duplicates a different function.
+2. `Planner.plan()` is `async def`; the entire hooks call path
+   (`Supervisor._decide_pre`/`_decide`/`handle_hook_event`/
+   `_handle_request`, `belay/supervisor/server.py`) is deliberately
+   synchronous with no event loop underneath it anywhere. Bridging via
+   `asyncio.run(...)` is mechanically possible but a genuinely new
+   pattern for this call path.
+3. `PolicyEngine.evaluate()`'s anomaly and quota dimensions would go
+   **permanently inert** on the hooks surface (not just slow to warm
+   up): quota keys on a `session_started.initiated_by` event hooks never
+   writes; anomaly keys on `plan_created` events
+   (`belay/policy/baseline.py::BaselineStore.stats()`) hooks also never
+   writes. Making them real is a separate piece of work -- mirroring
+   `plan_created`/`session_started`-shaped events into the hooks ledger
+   -- which is actually **R1.10's job** ("shared quota/anomaly store"),
+   not something this slice gets for free.
+4. This directly contradicts the project's own prior, deliberate
+   architecture decision: **ADR 0023** already examined this exact
+   identity/ledger-shape mismatch for quota, chose a parallel,
+   hooks-native tracker (`HookQuotaTracker`, keyed on OS user) over
+   reusing `PolicyEngine`/`belay.policy.quota.QuotaTracker` directly, and
+   explicitly named anomaly baselines as facing "the exact same two
+   blockers" and a candidate for the **same parallel-tracker pattern** in
+   a future slice -- the opposite direction from what this sketch
+   proposed.
+
+**Decision**: only `ActionEnvelope` (see the "Canonical types" section
+above) was built this slice -- a pure additive type + two conversion
+functions (`belay/action_envelope.py::from_hook_event`/`from_mcp_call`),
+called from no production decision path, zero behavior change. Whether
+hooks should ever reuse `PolicyEngine` directly, or instead get its own
+parallel anomaly tracker (matching ADR 0023's already-chosen pattern for
+quota), is deferred until **after R1.10** gives hooks a real
+`plan_created`/`session_started`-shaped ledger presence to evaluate that
+question against -- not assumed now, in either direction.
+
 ## Consequences
 
 - Both engines now share one real piece of the eventual canonical
@@ -221,13 +279,20 @@ any one site would silently break the connection. Fixed:
   are now the one place every step-outcome event type is spelled --
   future code should reference these rather than reintroducing bare
   string literals.
-- Does **not** yet unify `ActionEnvelope`, `ActionPlan` production, or
-  produce a real cross-engine `OutcomeEvidence` type -- those remain real,
-  separately scoped follow-up work (R1.7.3-R1.7.4), not silently implied
-  done by this slice's title. R1.7.2 specifically turned out to be
-  narrower than first sketched (see its own section above) -- the three
-  step-outcome status types (`RecoveryOutcome`/`StepStatus`/
-  `OutcomeStatus`) remain three distinct types on purpose, not merged.
+- `belay/action_envelope.py::ActionEnvelope` now exists as a real,
+  tested type both engines' per-call inputs provably normalize into --
+  but it is not wired into any production decision path, and
+  `ActionPlan` production (making hooks build a real `Plan`/`PolicyResult`)
+  was investigated and explicitly retired as sketched, not built in a
+  different shape -- see R1.7.3's own section above for the four reasons
+  and the ADR-0023-aligned re-sequencing.
+- Does **not** yet produce a real cross-engine `OutcomeEvidence` type or
+  a `TransactionReceipt` -- those remain real, separately scoped
+  follow-up work (R1.7.4), not silently implied done by this slice's
+  title. R1.7.2 specifically turned out to be narrower than first
+  sketched (see its own section above) -- the three step-outcome status
+  types (`RecoveryOutcome`/`StepStatus`/`OutcomeStatus`) remain three
+  distinct types on purpose, not merged.
 - `idempotency_conflict` is now used for two related-but-distinct things
   (the saga executor's upstream-call idempotency keys, and approval
   consumption) -- both mean "a resource that must be used at most once
@@ -252,3 +317,13 @@ values, and that each is a real member of `EVENT_TYPES`. Full existing
 suite re-run unchanged (821 fast tests) to confirm the constant swap is
 a pure refactor -- no test needed updating, since the actual event-type
 strings written/read never changed.
+
+`tests/test_action_envelope.py` (new, R1.7.3): `from_hook_event` against
+a real `normalize()`-produced `HookEvent` asserts every field maps
+correctly; `from_mcp_call`'s `event_id` is asserted to exactly match the
+`f"{session_id}:{step_seq}"` string `ApprovalStage.check()` already
+builds (R1.7.1) -- not just a similar-looking format, the literal same
+string, proving the two engines' call-identity concept is already one
+shape; a frozen-dataclass immutability check; and an explicit assertion
+that `repo_prestate_digest`/`os_identity` stay `None` for the MCP side
+rather than being papered over.

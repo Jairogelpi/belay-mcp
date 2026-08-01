@@ -27,8 +27,8 @@ once it reaches 1.0.
   `CapabilityLease`/`OutcomeEvidence`/`TransactionReceipt`) and maps each
   piece onto what already exists in the codebase (`Plan`, `PolicyResult`,
   `SagaExecutor`'s stages, `SignedEvidence`) -- this slice is the first
-  concrete step, not the whole thing; R1.7.2-R1.7.4 are sequenced, not
-  built yet.
+  concrete step, not the whole thing; R1.7.2-R1.7.3 (below) landed in the
+  same session, R1.7.4 remains sequenced, not built yet.
 
 - **R1.7.2 -- named step-outcome event-type constants:** implementing the
   `OutcomeEvidence` unification ADR 0025 sketched found the three
@@ -45,6 +45,27 @@ once it reaches 1.0.
   `belay/proxy/lifecycle.py`) and reader (`belay/rewind/service.py`,
   `belay/cli/causal.py`) instead of bare strings. Pure refactor -- the
   full test suite passed unchanged, confirming no behavior moved.
+
+- **R1.7.3 -- `ActionEnvelope`, and the `ActionPlan`/`PolicyEngine` sketch
+  retired:** a focused investigation into "make the hooks path call the
+  real `Planner.plan()`/`PolicyEngine.evaluate()`" (ADR 0025's original
+  R1.7.3 sketch) found four reasons this specific idea doesn't hold up:
+  `Planner.plan()` treats a missing contract as *permissive* (the actual
+  `contract_missing` deny logic lives entirely in
+  `belay/proxy/lifecycle.py::resolve()`), it's `async` against an
+  otherwise fully synchronous hooks call path, `PolicyEngine`'s
+  anomaly/quota dimensions would go permanently inert on the hooks
+  surface (no `plan_created`/`session_started` events there -- that's
+  R1.10's job), and it contradicts ADR 0023's own already-chosen
+  parallel-tracker pattern for exactly this identity/ledger-shape
+  mismatch. Built instead: `belay/action_envelope.py::ActionEnvelope`, a
+  pure additive type + `from_hook_event`/`from_mcp_call` conversion
+  functions proving both engines' per-call inputs already normalize into
+  one shape -- `from_mcp_call`'s `event_id` is the *exact* string
+  `ApprovalStage.check()` already builds for its R1.7.1 lease, not a
+  similar-looking one. Called from no production decision path; zero
+  behavior change. ADR 0025 updated to record the retirement and
+  re-sequence "hooks reuse `PolicyEngine`" to after R1.10.
 
 - **R1.6 correctness lock -- six concrete gaps closed before any further
   parallel hook-specific tracking is added on top of R1's five slices:**
