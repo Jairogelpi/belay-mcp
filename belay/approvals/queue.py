@@ -90,6 +90,12 @@ class ApprovalItem:
     #: separately from `state`.
     consumed_by_event_id: str | None = None
     consumed_at: datetime | None = None
+    #: Recorded at first consumption alongside `consumed_by_event_id` --
+    #: see `ApprovalRow.consumed_by_host`/`consumed_policy_hash`'s
+    #: docstring (`belay/db/models.py`) for what these mean and their
+    #: current (audit-only, not yet enforced) scope.
+    consumed_by_host: str | None = None
+    consumed_policy_hash: str | None = None
 
 
 def _parse(text: str) -> datetime:
@@ -111,6 +117,8 @@ def _row_to_item(row: ApprovalRow) -> ApprovalItem:
         reason=row.reason,
         consumed_by_event_id=row.consumed_by_event_id,
         consumed_at=_parse(row.consumed_at) if row.consumed_at else None,
+        consumed_by_host=row.consumed_by_host,
+        consumed_policy_hash=row.consumed_policy_hash,
     )
 
 
@@ -231,7 +239,14 @@ class ApprovalQueue:
             db.commit()
             return _row_to_item(row)
 
-    def consume(self, approval_id: str, event_id: str) -> ApprovalItem:
+    def consume(
+        self,
+        approval_id: str,
+        event_id: str,
+        *,
+        host: str | None = None,
+        policy_hash: str | None = None,
+    ) -> ApprovalItem:
         """R1.6: claim single-use consumption of an `approved` item for a
         specific hook `event_id` -- closes the gap where the same approved
         `plan_id` allowed an unlimited number of separate future action
@@ -247,11 +262,17 @@ class ApprovalQueue:
           `_LEGAL_TRANSITIONS`), kept as a defensive check rather than an
           assumption.
         - `consumed_by_event_id is None` (first use): claims it for
-          `event_id`, records `consumed_at`, returns the updated item.
+          `event_id`, recording `consumed_at` plus `host`/`policy_hash` if
+          given (post-R1.6 review: a step toward a fuller Capability
+          Lease -- see `ApprovalRow.consumed_by_host`/`consumed_policy_hash`'s
+          docstring in `belay/db/models.py` for their current audit-only
+          scope). Returns the updated item.
         - `consumed_by_event_id == event_id` (the host redelivered the
           exact same PreToolUse dispatch -- a real, expected occurrence,
-          not a reuse attempt): no-op, returns the item unchanged.
-          Idempotent by design, matching
+          not a reuse attempt): no-op, returns the item unchanged as
+          FIRST recorded -- `host`/`policy_hash` on a retry are never
+          compared or overwritten; the record reflects the original
+          consumption, not the retry. Idempotent by design, matching
           `belay/supervisor/idempotency.py`'s own duplicate-event
           tolerance for the surrounding hook protocol.
         - `consumed_by_event_id` set to something ELSE: this approval was
@@ -300,7 +321,12 @@ class ApprovalQueue:
                     ApprovalRow.approval_id == approval_id,
                     ApprovalRow.consumed_by_event_id.is_(None),
                 )
-                .values(consumed_by_event_id=event_id, consumed_at=self._clock.now().isoformat())
+                .values(
+                    consumed_by_event_id=event_id,
+                    consumed_at=self._clock.now().isoformat(),
+                    consumed_by_host=host,
+                    consumed_policy_hash=policy_hash,
+                )
             )
             db.commit()  # also expires the session's cached `row`/`fresh` below
 

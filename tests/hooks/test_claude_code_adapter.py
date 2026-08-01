@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from belay.hooks.claude_code_adapter import _repo_identity, normalize
+from belay.hooks.claude_code_adapter import _prestate_digest, _repo_identity, normalize
 
 
 def _init_repo(path: Path) -> str:
@@ -22,9 +22,9 @@ def _init_repo(path: Path) -> str:
     return result.stdout.strip()
 
 
-def test_repo_identity_returns_real_head_sha(tmp_path: Path) -> None:
+def test_repo_identity_returns_real_head_sha_and_a_prestate_digest(tmp_path: Path) -> None:
     head = _init_repo(tmp_path)
-    assert _repo_identity(str(tmp_path)) == f"{head}:clean"
+    assert _repo_identity(str(tmp_path)) == f"{head}:{_prestate_digest(str(tmp_path))}"
     assert len(head) == 40  # a real git SHA-1, not a placeholder
 
 
@@ -38,33 +38,91 @@ def test_repo_identity_changes_after_a_new_commit(tmp_path: Path) -> None:
     assert second_head != first_head
 
 
-def test_repo_identity_reports_dirty_after_an_uncommitted_change_to_a_tracked_file(
+def test_repo_identity_changes_after_an_uncommitted_change_to_a_tracked_file(
     tmp_path: Path,
 ) -> None:
     """R1.6: the concrete gap being closed -- an approval bound to
     `repo_identity` while the tree was clean must not silently cover a
     later call made after an uncommitted edit to the same repo."""
-    head = _init_repo(tmp_path)
+    _init_repo(tmp_path)
     clean_identity = _repo_identity(str(tmp_path))
-    assert clean_identity == f"{head}:clean"
 
     (tmp_path / "f.txt").write_text("modified, not committed\n", encoding="utf-8")
 
     dirty_identity = _repo_identity(str(tmp_path))
-    assert dirty_identity == f"{head}:dirty"
     assert dirty_identity != clean_identity
+
+
+def test_two_different_uncommitted_edits_produce_two_different_identities(
+    tmp_path: Path,
+) -> None:
+    """Post-R1.6 review finding: a bare dirty/clean boolean collapsed
+    every dirty state into the same identity, so an approval granted
+    against one uncommitted edit could in principle still resolve for a
+    completely different one. The content-based prestate digest
+    (`_prestate_digest`) fixes this: two distinct edits must hash
+    differently, not just "any edit at all vs none"."""
+    _init_repo(tmp_path)
+
+    (tmp_path / "f.txt").write_text("edit A\n", encoding="utf-8")
+    identity_a = _repo_identity(str(tmp_path))
+
+    (tmp_path / "f.txt").write_text("edit B, completely different content\n", encoding="utf-8")
+    identity_b = _repo_identity(str(tmp_path))
+
+    assert identity_a != identity_b
+
+
+def test_a_new_untracked_file_now_changes_the_identity(tmp_path: Path) -> None:
+    """The known gap `_prestate_digest` narrows (does not fully close): a
+    brand-new uncommitted file previously didn't change `repo_identity`
+    at all (`git diff-index` only considers tracked content). Folding in
+    `git status --porcelain`'s untracked-file listing means adding one
+    now changes the identity -- not perfect (the new file's own content
+    isn't hashed, only its path), but a real improvement over "not
+    detected at all"."""
+    _init_repo(tmp_path)
+    before = _repo_identity(str(tmp_path))
+
+    (tmp_path / "new_untracked.txt").write_text("brand new\n", encoding="utf-8")
+    after = _repo_identity(str(tmp_path))
+
+    assert after != before
+
+
+def test_clean_tree_prestate_digest_is_the_same_across_independent_repos(
+    tmp_path: Path,
+) -> None:
+    """The digest depends only on there being no diff from HEAD and no
+    untracked files -- not on HEAD's value or the repo's committed
+    content -- so two independently-initialized, both-clean repos share
+    the same digest half of `repo_identity` (their full `repo_identity`
+    still differs, via HEAD)."""
+    repo_a, repo_b = tmp_path / "a", tmp_path / "b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+
+    assert _prestate_digest(str(repo_a)) == _prestate_digest(str(repo_b))
 
 
 def test_repo_identity_is_clean_again_after_committing_the_change(tmp_path: Path) -> None:
     _init_repo(tmp_path)
+    clean_before = _repo_identity(str(tmp_path))
     (tmp_path / "f.txt").write_text("modified\n", encoding="utf-8")
-    assert _repo_identity(str(tmp_path)) is not None
-    assert _repo_identity(str(tmp_path)).endswith(":dirty")  # type: ignore[union-attr]
+    dirty = _repo_identity(str(tmp_path))
+    assert dirty != clean_before
 
     subprocess.run(["git", "commit", "-aq", "-m", "second"], cwd=tmp_path, check=True)
-    new_identity = _repo_identity(str(tmp_path))
-    assert new_identity is not None
-    assert new_identity.endswith(":clean")
+    clean_after = _repo_identity(str(tmp_path))
+    assert clean_after != dirty
+    # Different HEAD now (a new commit), but genuinely clean again --
+    # confirmed by the digest half matching the earlier clean state's,
+    # not just "some new value that happens to differ from dirty".
+    assert clean_after is not None
+    assert clean_before is not None
+    assert clean_after.rsplit(":", 1)[1] == clean_before.rsplit(":", 1)[1]
 
 
 def test_repo_identity_is_none_outside_a_git_repo(tmp_path: Path) -> None:
@@ -93,7 +151,7 @@ def test_normalize_uses_real_repo_identity(tmp_path: Path) -> None:
         "cwd": str(tmp_path),
     }
     event = normalize(raw, installation_id="install1")
-    assert event.repo_identity == f"{head}:clean"
+    assert event.repo_identity == f"{head}:{_prestate_digest(str(tmp_path))}"
 
 
 @pytest.mark.parametrize(

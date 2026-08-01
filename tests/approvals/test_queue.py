@@ -149,6 +149,42 @@ class TestConsume:
         second = queue.consume(item.approval_id, "event_1")
         assert first.consumed_by_event_id == second.consumed_by_event_id == "event_1"
 
+    def test_host_and_policy_hash_are_recorded_on_first_consumption(self) -> None:
+        """Post-R1.6 review: a step toward a fuller Capability Lease --
+        which adapter/audience actually consumed the grant, and under
+        what policy config, recorded for audit."""
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.approve(item.approval_id, approved_by="jairo")
+
+        consumed = queue.consume(
+            item.approval_id, "event_1", host="claude-code", policy_hash="decision_logic=1"
+        )
+        assert consumed.consumed_by_host == "claude-code"
+        assert consumed.consumed_policy_hash == "decision_logic=1"
+
+    def test_host_and_policy_hash_are_not_overwritten_by_a_same_event_id_retry(self) -> None:
+        """A retry of the same event_id returns the ORIGINAL recorded
+        host/policy_hash, not whatever the retry happened to pass --
+        the record reflects first consumption, not the latest call."""
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.approve(item.approval_id, approved_by="jairo")
+
+        queue.consume(item.approval_id, "event_1", host="claude-code", policy_hash="v1")
+        retried = queue.consume(item.approval_id, "event_1", host="codex", policy_hash="v2")
+        assert retried.consumed_by_host == "claude-code"
+        assert retried.consumed_policy_hash == "v1"
+
+    def test_host_and_policy_hash_default_to_none(self) -> None:
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.approve(item.approval_id, approved_by="jairo")
+
+        consumed = queue.consume(item.approval_id, "event_1")
+        assert consumed.consumed_by_host is None
+        assert consumed.consumed_policy_hash is None
+
     def test_a_different_event_id_is_refused(self) -> None:
         from belay.approvals.queue import ApprovalAlreadyConsumed
 

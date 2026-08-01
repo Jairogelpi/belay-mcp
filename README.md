@@ -10,9 +10,14 @@
 
 **Safe, reversible tool execution for AI agents.**
 
-Belay is an MCP proxy that sits between an agent and its tool servers. It
-turns "the agent can call anything" into "every tool call is declared,
-previewable, gated, and — when it goes wrong — reversible."
+Belay is a transactional safety layer for AI agent tool calls, in two
+complementary modes: an **MCP proxy** that sits between an agent and its
+tool servers (mediated — Belay itself makes the call), and a **Native
+Agent Gate** (`belay hooks install`) that gates an agent's own native
+tool calls in place (observed — Claude Code makes the call, Belay decides
+whether it's allowed to). Either way, the goal is the same: turn "the
+agent can call anything" into "every tool call is declared, previewable,
+gated, and — when it goes wrong — reversible."
 
 > Status: **`v0.1.0` tagged, L3 conformance.** E0-E9 (`docs/plan.md`) shipped
 > the full lifecycle — contracts (§4), ledger (§9), the L1 proxy (§3, §4.6,
@@ -21,7 +26,8 @@ previewable, gated, and — when it goes wrong — reversible."
 > [`docs/architecture.md`](docs/architecture.md). Eleven further entregas
 > (E10-E20, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code only,
-> said plainly in its own section below). 704 tests, passing on real
+> said plainly in its own section below; R1.6, see [`CHANGELOG.md`](CHANGELOG.md),
+> closed six correctness gaps in that gate). 834 tests, passing on real
 > Linux/macOS/Windows CI (not just one dev machine — see E19.7 below), plus
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is

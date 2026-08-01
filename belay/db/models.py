@@ -66,6 +66,18 @@ class ApprovalRow(Base):
     #: action instances against the identical `plan_id`.
     consumed_by_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     consumed_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Post-R1.6 review: a single-use consumption is not yet a full
+    #: Capability Lease (still missing: outcome/final-state tracking --
+    #: real R1.7 protocol work). These two fields move it a step closer
+    #: for audit purposes -- recorded at first consumption, alongside
+    #: `consumed_by_event_id`, never overwritten by a later idempotent
+    #: retry of the same event_id. `consumed_by_host` is the adapter/
+    #: audience that actually claimed it (`HookEvent.host`); `consumed_
+    #: policy_hash` is a caller-supplied fingerprint of the policy config
+    #: in effect at that moment (decision-logic version, contract set
+    #: hash) -- recorded, not yet enforced against a mismatch on retry.
+    consumed_by_host: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    consumed_policy_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class IdempotencyRow(Base):

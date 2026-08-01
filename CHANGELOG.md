@@ -41,13 +41,20 @@ once it reaches 1.0.
     name (`Write`/`Edit`/`NotebookEdit`), so that pack could never match
     and made every native file edit deny with `contract_missing`. The new
     pack declares the three native tool names directly.
-  - **Working-tree dirty state folded into `repo_identity`:** each host
-    adapter's `_repo_identity()` now also runs a cheap
-    `git diff-index --quiet HEAD --` check and folds a `:dirty`/`:clean`
-    suffix into the identity string `_plan_id` hashes -- an approval
+  - **Working-tree prestate folded into `repo_identity`:** each host
+    adapter's `_repo_identity()` now folds a real content-based prestate
+    digest into the identity string `_plan_id` hashes -- an approval
     granted while the tree was clean no longer silently covers the same
-    command/call after an uncommitted edit to a tracked file (known gap:
-    untracked new files aren't detected by this cheap check).
+    command/call after an uncommitted edit. *Revised post-merge:* first
+    shipped as a bare dirty/clean boolean (`git diff-index --quiet`),
+    which a post-merge review correctly flagged -- two DIFFERENT dirty
+    edits both collapsed to the same identity. `_prestate_digest` now
+    hashes the actual `git diff HEAD` content plus the untracked-file
+    listing (`git status --porcelain`) instead, so two distinct edits
+    hash differently; a brand-new untracked file also now changes the
+    identity (previously undetected at all). Still not a fully exact
+    prestate digest -- an untracked file's own content isn't hashed, only
+    its path -- real follow-up work for R1.7's canonical protocol.
   - **Single-use approval consumption:** `ApprovalQueue.consume()` claims
     an `approved` item for a specific hook `event_id`, via a real
     conditional SQL `UPDATE ... WHERE consumed_by_event_id IS NULL`
@@ -58,7 +65,13 @@ once it reaches 1.0.
     happens to hash to the same `plan_id` now denies
     (`approval_already_consumed`) and must request a fresh approval,
     closing the gap where one human decision covered an unbounded number
-    of separate future executions.
+    of separate future executions. *Extended post-merge:* `consume()`
+    also records which adapter/host claimed the grant and a fingerprint
+    of the policy config in effect (`consumed_by_host`/
+    `consumed_policy_hash`) -- a step toward a fuller Capability Lease,
+    audit-only for now (not yet enforced against a mismatch). Full
+    outcome/final-state tracking (committed/failed/indeterminate) remains
+    R1.7 protocol work.
 
 - **Operator-configurable extra Bash allowlist, R1 fifth slice ([ADR 0024](docs/adr/0024-r1-native-gate-configurable-allowlist.md)):**
   Bash's remaining gap (still a static classifier, no `PolicyEngine`) was

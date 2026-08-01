@@ -121,6 +121,24 @@ def test_approved_command_denies_a_different_event_id_reusing_it(queue: Approval
     assert "approval_already_consumed" in result.reason
 
 
+def test_consuming_an_approval_records_host_and_policy_hash(queue: ApprovalQueue) -> None:
+    """Post-R1.6 review: `evaluate()` must actually pass `event.host` and
+    a real policy fingerprint through to `ApprovalQueue.consume`, not just
+    the queue-level plumbing existing in isolation."""
+    event = _event_with_id("rm -rf /tmp/x", "toolu_1")
+    evaluate(event, queue)
+    approval_id = queue.list()[0].approval_id
+    queue.approve(approval_id, approved_by="jairo")
+
+    evaluate(event, queue)  # consumes it
+
+    consumed = queue.get(approval_id)
+    assert consumed is not None
+    assert consumed.consumed_by_host == event.host
+    assert consumed.consumed_policy_hash is not None
+    assert "decision_logic=" in consumed.consumed_policy_hash
+
+
 def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)

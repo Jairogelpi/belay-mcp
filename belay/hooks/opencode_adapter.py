@@ -57,6 +57,7 @@ the hook shape was.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from typing import Any
 
@@ -100,10 +101,11 @@ def _surface_for(tool_id: str) -> Surface:
 def _repo_identity(cwd: str | None) -> str | None:
     """Same logic as `claude_code_adapter._repo_identity`/
     `codex_adapter._repo_identity` -- duplicated per-adapter deliberately,
-    see either of those for why. R1.6: also folds in a cheap tracked-file
-    dirty/clean signal (`_working_tree_is_dirty` below) -- see
-    `claude_code_adapter._repo_identity`'s docstring for the full
-    rationale and its known untracked-file limitation."""
+    see either of those for why. R1.6 (revised post-review): folds in a
+    real content-based prestate digest (`_prestate_digest` below), not a
+    bare dirty/clean boolean -- see `claude_code_adapter._repo_identity`'s
+    docstring for the full rationale and its known remaining gap
+    (untracked file content isn't hashed, only its path)."""
     if not cwd:
         return None
     try:
@@ -119,21 +121,32 @@ def _repo_identity(cwd: str | None) -> str | None:
     if result.returncode != 0:
         return None
     head = result.stdout.strip()
-    return f"{head}:dirty" if _working_tree_is_dirty(cwd) else f"{head}:clean"
+    return f"{head}:{_prestate_digest(cwd)}"
 
 
-def _working_tree_is_dirty(cwd: str) -> bool:
-    """Same logic as `claude_code_adapter._working_tree_is_dirty`."""
+def _prestate_digest(cwd: str) -> str:
+    """Same logic as `claude_code_adapter._prestate_digest`."""
     try:
-        result = subprocess.run(
-            ["git", "diff-index", "--quiet", "HEAD", "--"],
+        diff = subprocess.run(
+            ["git", "diff", "HEAD", "--"],
             cwd=cwd,
             capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return True
-    return result.returncode != 0
+        return "unknown"
+    if diff.returncode != 0 or status.returncode != 0:
+        return "unknown"
+    material = diff.stdout + "\x00" + status.stdout
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
 def normalize_tool_execute_before(

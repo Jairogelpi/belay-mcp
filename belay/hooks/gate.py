@@ -119,6 +119,19 @@ def _touches_belay_home(command: str, cwd: str | None) -> bool:
     return False
 
 
+def _policy_hash(contract_set: ContractSet | None) -> str:
+    """Fingerprint of the policy config in effect for this decision,
+    passed to `ApprovalQueue.consume`'s `policy_hash` (post-R1.6 review,
+    toward a fuller Capability Lease -- audit only for now, not yet
+    enforced against a mismatch on retry). `decision_logic` is already
+    folded into `plan_id` itself (see `_plan_id` below), so a ruleset
+    change already forces a fresh approval on its own; this exists as an
+    explicit, human-readable record alongside the approval (visible via
+    `belay approvals list`), not a second enforcement mechanism."""
+    contracts_part = contract_set.set_hash if contract_set is not None else "none"
+    return f"decision_logic={DECISION_LOGIC_VERSION};contracts={contracts_part}"
+
+
 def _plan_id(kind: str, event: HookEvent, detail: str) -> str:
     """Binds an approval to the full context it was granted in, not just the
     proposed action's own text: host, session, tool, `detail` (the command
@@ -155,16 +168,30 @@ def _plan_id_for_mcp(event: HookEvent) -> str:
 
 
 def _allow_via_consumed_approval(
-    queue: ApprovalQueue, existing: ApprovalItem, event: HookEvent, allow_reason: str
+    queue: ApprovalQueue,
+    existing: ApprovalItem,
+    event: HookEvent,
+    allow_reason: str,
+    *,
+    policy_hash: str,
 ) -> GateDecision:
     """R1.6: an `approved` item only actually allows once this specific
     hook event claims (or already holds) its single-use consumption --
     see `ApprovalQueue.consume`. Shared by all three `evaluate_*`
     functions' `existing.state == "approved"` branch, so Bash/file-edit/
     MCP calls all get the identical one-time-use guarantee, not three
-    independently-drifting copies of it."""
+    independently-drifting copies of it.
+
+    `policy_hash` (post-R1.6 review, toward a fuller Capability Lease):
+    each caller passes a fingerprint of the policy config actually in
+    effect for its surface (see `_bash_policy_hash`/`_file_edit_policy_
+    hash`/`_mcp_policy_hash` below) -- recorded on the consumption for
+    audit (`belay approvals list` can show under what policy a grant was
+    actually used), not yet enforced against a mismatch on retry."""
     try:
-        queue.consume(existing.approval_id, event.event_id)
+        queue.consume(
+            existing.approval_id, event.event_id, host=event.host, policy_hash=policy_hash
+        )
     except ApprovalAlreadyConsumed:
         return GateDecision(
             "deny",
@@ -247,6 +274,7 @@ def evaluate(
             event,
             f"belay: this exact command was already approved "
             f"(approval {existing.approval_id}, by {existing.approved_by})",
+            policy_hash=_policy_hash(None),
         )
     if existing is not None and existing.state == "pending":
         return GateDecision(
@@ -386,6 +414,7 @@ def evaluate_file_edit(
             event,
             f"belay: oversized file edit approved by a human (approval {existing.approval_id}) "
             "-- NOT reversible, no snapshot was captured",
+            policy_hash=_policy_hash(contract_set),
         )
     if existing is not None and existing.state == "pending":
         return GateDecision(
@@ -494,6 +523,7 @@ def evaluate_mcp_call(
             event,
             f"belay: this exact MCP call ({event.tool_name}) was already approved "
             f"(approval {existing.approval_id}, by {existing.approved_by})",
+            policy_hash=_policy_hash(contract_set),
         )
     if existing is not None and existing.state == "pending":
         return GateDecision(

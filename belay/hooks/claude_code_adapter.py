@@ -97,26 +97,33 @@ def _surface_for(tool_name: str) -> Surface:
 
 
 def _repo_identity(cwd: str | None) -> str | None:
-    """The real git HEAD commit, plus a cheap tracked-file dirty/clean
-    signal (R1.6) -- not merely "a `.git` directory exists here" (an
-    earlier version returned the cwd path itself in that case, which
-    identifies *a* repo but not *what commit it's at*; a P0 review
+    """The real git HEAD commit, plus a real content-based prestate digest
+    (R1.6, revised post-review) -- not merely "a `.git` directory exists
+    here" (an earlier version returned the cwd path itself in that case,
+    which identifies *a* repo but not *what commit it's at*; a P0 review
     correctly pointed out that binding an approval to the repository
     without its state lets the same approval silently cover a different
     commit/branch than the one it was actually granted for). `git
-    rev-parse HEAD` plus `git diff-index --quiet HEAD --`
-    (`_working_tree_is_dirty` below) -- not the fuller
-    `belay/ledger/test_evidence.py` `git_context()` (tree hash + a full
-    `git status --porcelain` scan), since that can be slow on a large repo
-    and this runs on every single hook decision (a latency budget for
-    every hook decision -- there is no `docs/spec.md` §16, the spec ends
-    at §14), not once per verified test. `diff-index` is a single process
-    with no output to parse -- far cheaper than a porcelain status scan --
-    at the cost of a known gap: it only considers tracked content, so an
-    uncommitted NEW (untracked) file does not change this signal, and an
-    approval granted before that file existed still binds to the same
-    `repo_identity` after. R1.6 closes the more common case (an existing
-    tracked file was modified between approval and reuse), not that one."""
+    rev-parse HEAD` plus `_prestate_digest` below -- not the fuller
+    `belay/ledger/test_evidence.py` `git_context()`'s exact machinery, but
+    covering the same ground: a hash of the actual tracked-file diff
+    content plus the untracked-file listing, not just a dirty/clean
+    boolean.
+
+    R1.6 first shipped this as a bare boolean (`git diff-index --quiet
+    HEAD --`), which a post-merge review correctly flagged: two DIFFERENT
+    uncommitted edits both collapse to the same `:dirty` suffix, so an
+    approval granted against one dirty state could in principle still
+    resolve for a different one. `_prestate_digest` fixes that by hashing
+    the actual diff text and untracked-file listing instead of a bool --
+    two different edits now produce two different identities. Still not
+    a perfect prestate hash: an untracked file's own *content* isn't
+    read (only its path, via `git status --porcelain`), so two different
+    untracked files with the same name but different content still
+    collide -- a real, acknowledged remaining gap, not silently claimed
+    fixed. A fully exact prestate digest (every byte that could affect
+    the decision) is real follow-up work for R1.7's canonical protocol,
+    not attempted here."""
     if not cwd:
         return None
     try:
@@ -132,25 +139,50 @@ def _repo_identity(cwd: str | None) -> str | None:
     if result.returncode != 0:
         return None
     head = result.stdout.strip()
-    return f"{head}:dirty" if _working_tree_is_dirty(cwd) else f"{head}:clean"
+    return f"{head}:{_prestate_digest(cwd)}"
 
 
-def _working_tree_is_dirty(cwd: str) -> bool:
-    """`True` if any tracked file differs from `HEAD` (`git diff-index
-    --quiet HEAD --`: exit 0 clean, non-zero dirty-or-error). Treats a
-    git invocation failure as dirty -- fail toward requiring a fresh
-    approval rather than silently trusting a worktree state that
-    couldn't actually be checked."""
+def _prestate_digest(cwd: str) -> str:
+    """Hash of the actual working-tree content that differs from `HEAD`:
+    `git diff HEAD --` (line-level content of every tracked-file change)
+    plus `git status --porcelain=v1 --untracked-files=normal` (which
+    files are untracked, by path -- not their content, see
+    `_repo_identity`'s docstring for that residual gap).
+    `--untracked-files=normal` (not `=all`) deliberately: for an entirely
+    untracked directory it reports the directory itself rather than
+    recursing into every file inside it, keeping this cheaper than a
+    full recursive scan on a large repo with e.g. an untracked build
+    output directory. Two `git` calls, not one -- `status --porcelain`
+    alone reports M/A/D status codes but never a change's actual line
+    content, so it can't tell two different edits to the same file
+    apart; `diff HEAD` supplies that. A clean tree hashes the same fixed
+    value regardless of HEAD (both commands produce empty output),
+    which is correct: nothing to distinguish. Any git invocation failure
+    returns a fixed `"unknown"` digest -- distinct from a real hash, and
+    guaranteed to differ between two calls only by coincidence, so it
+    fails toward requiring a fresh approval rather than silently trusting
+    an unchecked worktree state."""
     try:
-        result = subprocess.run(
-            ["git", "diff-index", "--quiet", "HEAD", "--"],
+        diff = subprocess.run(
+            ["git", "diff", "HEAD", "--"],
             cwd=cwd,
             capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return True
-    return result.returncode != 0
+        return "unknown"
+    if diff.returncode != 0 or status.returncode != 0:
+        return "unknown"
+    material = diff.stdout + "\x00" + status.stdout
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
 #: Field name Claude Code actually uses for a PostToolUse result object.
