@@ -402,6 +402,116 @@ class TestInstallWithContracts:
         assert not identity.contracts_pointer_path.is_file()
 
 
+class TestHooksUninstallCleansUpPointerFiles:
+    """R1.6: `hooks_uninstall` used to only touch settings.json, leaving
+    the contracts/quota/allowlist pointer files under `belay_home()`
+    permanently on disk -- a bare reinstall (no flags) would then silently
+    reactivate the old config. Closed via `Manifest.extra_files`
+    (belay/cli/client_configs.py): `hooks install` records exactly which
+    pointer files it wrote, and `hooks uninstall` removes each one."""
+
+    def _identity(self, tmp_path: Path):
+        from belay.supervisor.addressing import supervisor_identity
+
+        return supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+
+    def test_uninstall_removes_all_three_pointer_files(self, tmp_path: Path) -> None:
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: Write\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: update\n"
+            "    resource: native.file\n",
+            encoding="utf-8",
+        )
+        allowlist = tmp_path / "extra.txt"
+        allowlist.write_text("npm run lint!\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "hooks", "install",
+                "--contracts", str(contracts),
+                "--quota-max", "5", "--quota-window", "1d",
+                "--allowlist-extra", str(allowlist),
+                "--yes",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        identity = self._identity(tmp_path)
+        assert identity.contracts_pointer_path.is_file()
+        assert identity.quota_config_path.is_file()
+        assert identity.extra_allowlist_pointer_path.is_file()
+
+        result = runner.invoke(app, ["hooks", "uninstall", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        assert not identity.contracts_pointer_path.is_file()
+        assert not identity.quota_config_path.is_file()
+        assert not identity.extra_allowlist_pointer_path.is_file()
+
+    def test_bare_reinstall_after_uninstall_starts_with_no_config(self, tmp_path: Path) -> None:
+        """The end-to-end regression this closes: install with --contracts,
+        uninstall, reinstall with NO flags at all -- a fresh supervisor for
+        this identity must load with no contract set, not silently recover
+        the old one from a leftover pointer file."""
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: Write\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: update\n"
+            "    resource: native.file\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app, ["hooks", "install", "--contracts", str(contracts), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+
+        result = runner.invoke(app, ["hooks", "uninstall", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        result = runner.invoke(app, ["hooks", "install", "--yes"])  # no --contracts
+        assert result.exit_code == 0, result.output
+
+        from belay.supervisor.server import Supervisor
+
+        supervisor = Supervisor(self._identity(tmp_path))
+        assert supervisor._contract_set is None
+
+    def test_reinstall_without_contracts_flag_clears_the_stale_pointer(
+        self, tmp_path: Path
+    ) -> None:
+        """Self-heals even without an explicit uninstall in between: a
+        reinstall that simply omits a previously-given flag must not leave
+        that flag's old pointer file in place."""
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: Write\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: update\n"
+            "    resource: native.file\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app, ["hooks", "install", "--contracts", str(contracts), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        identity = self._identity(tmp_path)
+        assert identity.contracts_pointer_path.is_file()
+
+        result = runner.invoke(app, ["hooks", "install", "--yes"])  # no --contracts this time
+        assert result.exit_code == 0, result.output
+        assert not identity.contracts_pointer_path.is_file()
+
+
 class TestFileEditContractCheckEndToEnd:
     """R1 first slice, exercised through the real CLI end to end: `belay
     hooks install --contracts <file>` followed by a real `belay hooks run`
@@ -466,6 +576,46 @@ class TestFileEditContractCheckEndToEnd:
         target = tmp_path / "f.txt"
         out = self._run_pre("Edit", target, "toolu_legacy_default")
         assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_contracts_file_corrupted_after_install_fails_closed(self, tmp_path: Path) -> None:
+        """R1.6: once `--contracts` is configured for this install, its
+        target becoming unreadable/invalid must deny every native call --
+        not silently revert to unconfigured (permissive) behavior. The
+        supervisor only loads its config at construction, so this
+        shuts it down (`send_shutdown`, same helper the module's own
+        teardown fixture uses) to force a respawn that picks up the now-
+        corrupted file."""
+        self._install_with_contracts(tmp_path)
+        target = tmp_path / "f.txt"
+        out = self._run_pre("Write", target, "toolu_before_corruption")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text("not: valid: yaml: [", encoding="utf-8")
+
+        import time
+
+        from belay.supervisor.addressing import supervisor_identity
+        from belay.supervisor.client import send_shutdown
+        from belay.supervisor.lifecycle import is_listening
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        send_shutdown(identity)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                still_up = is_listening(identity)
+            except EOFError:
+                # Windows named pipe mid-teardown -- not confirmed down yet.
+                still_up = True
+            if not still_up:
+                break
+            time.sleep(0.05)
+
+        out = self._run_pre("Write", target, "toolu_after_corruption")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "configured_policy_unavailable" in reason
 
 
 class TestMcpCallContractCheckEndToEnd:

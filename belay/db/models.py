@@ -57,6 +57,15 @@ class ApprovalRow(Base):
     approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     rejected_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    #: R1.6 (Native Agent Gate single-use consumption, see
+    #: `belay/approvals/queue.py::ApprovalQueue.consume`): the `event_id`
+    #: of the first hook event that actually acted on this `approved`
+    #: item, and when. `None` means "approved but never yet consumed" --
+    #: distinct from `state == "approved"` alone, which previously let the
+    #: same approval keep allowing an unlimited number of separate future
+    #: action instances against the identical `plan_id`.
+    consumed_by_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    consumed_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class IdempotencyRow(Base):

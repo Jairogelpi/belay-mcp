@@ -32,6 +32,7 @@ import queue
 import sys
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 
 # `AuthenticationError` is defined in `multiprocessing.context` and re-exported
 # by `multiprocessing.connection` at runtime, but typeshed's stub for
@@ -107,6 +108,27 @@ def _collision_response(hook_event_name: str) -> dict[str, Any]:
 _STOP = object()
 
 
+@dataclass(frozen=True)
+class ConfigUnavailable:
+    """R1.6: returned by `_load_contract_set`/`_load_quota_config`/
+    `_load_extra_allowlist` when a pointer file exists (this install
+    opted into that config via `belay hooks install`) but its target is
+    now missing, unreadable, or invalid -- distinct from `None`/`()`,
+    which mean "never configured" and stay permissive by design.
+
+    Before R1.6, both cases collapsed to the same permissive fallback:
+    a corrupted or deleted contracts/quota/allowlist file silently
+    reverted the gate to pre-opt-in behavior with no signal to the
+    operator. Once a security opt-in has been activated, that must be an
+    invariant this process enforces, not a best-effort nicety that
+    quietly degrades -- `_decide_pre` denies every event outright
+    (`configured_policy_unavailable`) while any of the three is in this
+    state, rather than trusting an agent's call against a policy nobody
+    can currently confirm is actually loaded."""
+
+    reason: str
+
+
 class Supervisor:
     #: How many *accepting* threads and how many *handling* threads run at
     #: once (2x this many daemon threads total). Bounds how many stalled
@@ -161,33 +183,38 @@ class Supervisor:
         self._quota = self._load_quota_config()
         self._extra_allowlist = self._load_extra_allowlist()
 
-    def _load_contract_set(self) -> ContractSet | None:
-        """`None` (the default) is unchanged legacy behavior -- this only
-        returns a real `ContractSet` when `belay hooks install --contracts
-        <file>` wrote `identity.contracts_pointer_path` for this install.
-        Best-effort: a missing or now-invalid pointed-to file falls back
-        to `None` rather than crashing the supervisor or fail-closed
-        denying every file edit -- this is opt-in extra strictness, not a
-        security invariant this process must enforce or refuse to start.
-        Revisiting this fail-open choice (e.g. surfacing it via `belay
-        hooks doctor`) is real follow-up work, not done in this slice."""
+    def _load_contract_set(self) -> ContractSet | ConfigUnavailable | None:
+        """`None` (the default) is unchanged legacy behavior -- no
+        `belay hooks install --contracts <file>` ever wrote
+        `identity.contracts_pointer_path` for this install, so there was
+        never anything to fail closed over. Once that pointer file exists,
+        though, a missing/unreadable/invalid target is no longer treated
+        as "unconfigured" -- it returns `ConfigUnavailable` (R1.6) so
+        `_decide_pre` denies everything instead of silently reverting to
+        the pre-opt-in unconditional-allow behavior."""
         pointer = self._identity.contracts_pointer_path
         if not pointer.is_file():
             return None
         try:
             contracts_path = pointer.read_text(encoding="utf-8").strip()
-            if not contracts_path:
-                return None
+        except OSError as exc:
+            return ConfigUnavailable(f"could not read contracts pointer file: {exc}")
+        if not contracts_path:
+            return ConfigUnavailable("contracts pointer file is empty")
+        try:
             return load_contract_set([contracts_path])
-        except (OSError, BelayError):
-            return None
+        except (OSError, BelayError) as exc:
+            return ConfigUnavailable(
+                f"configured contracts file {contracts_path!r} is unreadable/invalid: {exc}"
+            )
 
-    def _load_quota_config(self) -> QuotaConfig | None:
+    def _load_quota_config(self) -> QuotaConfig | ConfigUnavailable | None:
         """`None` (the default) means no quota check at all -- only set when
         `belay hooks install --quota-max` wrote `identity.quota_config_path`
-        for this install. Same best-effort, fail-open-to-no-check posture as
-        `_load_contract_set`: a missing or corrupt config file must not
-        crash the supervisor or fail-closed deny everything."""
+        for this install. Same R1.6 posture as `_load_contract_set`: once
+        that pointer file exists, a corrupt/invalid target returns
+        `ConfigUnavailable` rather than silently falling back to "no quota
+        check"."""
         pointer = self._identity.quota_config_path
         if not pointer.is_file():
             return None
@@ -195,29 +222,61 @@ class Supervisor:
             raw = json.loads(pointer.read_text(encoding="utf-8"))
             max_actions = raw["max_actions"]
             window = parse_window(raw["window"])
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            return None
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            return ConfigUnavailable(f"quota config file is unreadable/invalid: {exc}")
         return QuotaConfig(ledger=self._ledger, max_actions=max_actions, window=window)
 
-    def _load_extra_allowlist(self) -> ExtraAllowlist:
+    def _load_extra_allowlist(self) -> ExtraAllowlist | ConfigUnavailable:
         """`()` (the default) means no operator-configured entries --
         exactly `belay/hooks/decision.py::classify_bash`'s own default.
-        Same best-effort, fail-open-to-no-extra-entries posture as
-        `_load_contract_set`/`_load_quota_config`: a missing or invalid
-        pointed-to file falls back to nothing extra allowed, never to a
-        crash or a fail-closed deny of Bash entirely."""
+        Same R1.6 posture as `_load_contract_set`/`_load_quota_config`:
+        once `identity.extra_allowlist_pointer_path` exists, a corrupt/
+        invalid target returns `ConfigUnavailable` rather than silently
+        falling back to no extra entries."""
         pointer = self._identity.extra_allowlist_pointer_path
         if not pointer.is_file():
             return ()
         try:
             allowlist_path = pointer.read_text(encoding="utf-8").strip()
-            if not allowlist_path:
-                return ()
+        except OSError as exc:
+            return ConfigUnavailable(f"could not read allowlist pointer file: {exc}")
+        if not allowlist_path:
+            return ConfigUnavailable("allowlist pointer file is empty")
+        try:
             return load_extra_allowlist(allowlist_path)
-        except (OSError, ValueError):
-            return ()
+        except (OSError, ValueError) as exc:
+            return ConfigUnavailable(
+                f"configured allowlist file {allowlist_path!r} is unreadable/invalid: {exc}"
+            )
 
     def _decide_pre(self, event: HookEvent) -> GateDecision:
+        # R1.6: once a security opt-in has been activated for this install
+        # (a pointer file exists), its target becoming unreadable/invalid
+        # must deny everything, not silently revert to unconfigured
+        # (permissive) behavior -- checked first, before fencing or any
+        # per-surface gate, since a broken configured policy makes every
+        # decision below untrustworthy regardless of surface.
+        contract_set = self._contract_set
+        quota = self._quota
+        extra_allowlist = self._extra_allowlist
+        broken: list[str] = []
+        if isinstance(contract_set, ConfigUnavailable):
+            broken.append(f"contracts ({contract_set.reason})")
+            contract_set = None
+        if isinstance(quota, ConfigUnavailable):
+            broken.append(f"quota ({quota.reason})")
+            quota = None
+        if isinstance(extra_allowlist, ConfigUnavailable):
+            broken.append(f"extra Bash allowlist ({extra_allowlist.reason})")
+            extra_allowlist = ()
+        if broken:
+            return GateDecision(
+                "deny",
+                "belay: configured_policy_unavailable -- this install opted into "
+                f"stricter config that is now unreadable/invalid: {'; '.join(broken)} -- "
+                "fix or remove the affected pointer file(s) and restart the supervisor; "
+                "denying rather than silently reverting to unconfigured behavior",
+            )
         # R1 third slice (ADR 0021): a session fenced via `belay hooks
         # fence` is closed to every surface, checked once here rather than
         # duplicated in each evaluate_*() -- fencing is a ledger fact,
@@ -232,24 +291,22 @@ class Supervisor:
             )
         if event.surface == "shell" and event.tool_name == "Bash":
             return gate.evaluate(
-                event, self._queue, quota=self._quota, extra_allowlist=self._extra_allowlist
+                event, self._queue, quota=quota, extra_allowlist=extra_allowlist
             )
         if event.surface == "file":
             return gate.evaluate_file_edit(
                 event,
                 self._queue,
                 self._snapshots,
-                contract_set=self._contract_set,
-                quota=self._quota,
+                contract_set=contract_set,
+                quota=quota,
             )
         if event.surface == "mcp":
             return gate.evaluate_mcp_call(
-                event, self._queue, contract_set=self._contract_set, quota=self._quota
+                event, self._queue, contract_set=contract_set, quota=quota
             )
         # its own guard denies unrecognized surfaces
-        return gate.evaluate(
-            event, self._queue, quota=self._quota, extra_allowlist=self._extra_allowlist
-        )
+        return gate.evaluate(event, self._queue, quota=quota, extra_allowlist=extra_allowlist)
 
     def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:
         if event.phase == "pre":

@@ -324,6 +324,45 @@ def test_manifest_round_trips(tmp_path) -> None:
     assert loaded.name == "belay"
     assert loaded.before_hash == before_hash
     assert loaded.backup_path is None
+    assert loaded.extra_files == []
+
+
+def test_manifest_round_trips_with_extra_files(tmp_path) -> None:
+    """R1.6: `extra_files` (pointer files an install wrote alongside
+    `target`) must survive the JSON round-trip -- `hooks uninstall` reads
+    this back to know what else to remove."""
+    from belay.cli.client_configs import load_manifest, sha256_of, write_manifest
+
+    target = tmp_path / "config.json"
+    target.write_text("after content", encoding="utf-8")
+    extra = [str(tmp_path / "contracts-pointer.txt"), str(tmp_path / "quota-pointer.json")]
+    write_manifest(
+        "claude-code-hooks", target, "belay-hooks", sha256_of("before"), "after content", None,
+        extra_files=extra,
+    )
+    loaded = load_manifest(target)
+    assert loaded is not None
+    assert loaded.extra_files == extra
+
+
+def test_load_manifest_without_extra_files_key_defaults_to_empty_list(tmp_path) -> None:
+    """A manifest written before R1.6 has no `extra_files` key at all --
+    must load as `[]`, not raise `KeyError`."""
+    from belay.cli.client_configs import Manifest, manifest_path
+
+    target = tmp_path / "config.json"
+    old_style = {
+        "client": "claude-code-hooks",
+        "target": str(target),
+        "name": "belay-hooks",
+        "before_hash": None,
+        "after_hash": "sha256:whatever",
+        "backup_path": None,
+        "installed_at": "2025-01-01T00:00:00+00:00",
+    }
+    manifest_path(target).write_text(json.dumps(old_style), encoding="utf-8")
+    loaded = Manifest.from_dict(old_style)
+    assert loaded.extra_files == []
 
 
 def test_load_manifest_returns_none_when_absent(tmp_path) -> None:

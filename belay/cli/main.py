@@ -295,7 +295,8 @@ def _render_client_config(client: str, target: Path, wrap_path: Path, name: str)
 
 
 def _write_client_config(client: str, target: Path, name: str, new_text: str,
-                          before_text: str | None) -> None:
+                          before_text: str | None,
+                          extra_files: list[str] | None = None) -> None:
     """Write `new_text` to `target` and record a manifest for it. `before_text`
     must be the *actual current content* of `target` (or `None` if it doesn't
     exist) -- callers that previewed `new_text`/`before_text` earlier are
@@ -362,7 +363,10 @@ def _write_client_config(client: str, target: Path, name: str, new_text: str,
         record_backup_path = atomic_write_with_backup(target, new_text)
 
     try:
-        write_manifest(client, target, name, record_before_hash, new_text, record_backup_path)
+        write_manifest(
+            client, target, name, record_before_hash, new_text, record_backup_path,
+            extra_files=extra_files,
+        )
     except BaseException:
         # Never leave belay "installed" (config written) without the manifest
         # that makes it manageable -- put the config back exactly as it was.
@@ -1240,12 +1244,29 @@ def hooks_install(
         )
         raise typer.Exit(code=1)
 
-    _write_client_config("claude-code-hooks", target, "belay-hooks", new_text, before_text)
-    typer.echo(f"installed {'/'.join(_HOOKS_EVENTS)} hooks in {target}")
-
     from belay.supervisor.addressing import supervisor_identity
 
     identity = supervisor_identity(Path(db).resolve())
+    # R1.6: `extra_files` always reflects exactly this call's flags -- a
+    # reinstall that omits a flag it was previously given must record an
+    # empty list here (see `write_manifest`'s docstring), and this
+    # invocation itself deletes any stale pointer the omitted flag left
+    # behind (below), rather than leaving it in place to silently keep
+    # affecting a freshly (re)installed supervisor.
+    extra_files: list[str] = []
+    if contracts_path is not None:
+        extra_files.append(str(identity.contracts_pointer_path))
+    if quota_max is not None:
+        extra_files.append(str(identity.quota_config_path))
+    if allowlist_extra_path is not None:
+        extra_files.append(str(identity.extra_allowlist_pointer_path))
+
+    _write_client_config(
+        "claude-code-hooks", target, "belay-hooks", new_text, before_text,
+        extra_files=extra_files,
+    )
+    typer.echo(f"installed {'/'.join(_HOOKS_EVENTS)} hooks in {target}")
+
     typer.echo(
         f"approvals queued by this hook land in {identity.data_path} (private -- outside this "
         f"project, so the agent this gates can't reach it directly) -- review with "
@@ -1261,6 +1282,13 @@ def hooks_install(
             f"allowing by default. A running supervisor for this install must be restarted "
             f"(`belay supervisor stop --db {db}`) to pick this up."
         )
+    else:
+        # R1.6: a reinstall that no longer passes --contracts must not
+        # leave a stale prior pointer file in place -- that would keep
+        # gating native edits against a config this invocation never
+        # asked for, indistinguishable from it still being intentionally
+        # configured.
+        identity.contracts_pointer_path.unlink(missing_ok=True)
     if quota_max is not None:
         import json
 
@@ -1274,6 +1302,8 @@ def hooks_install(
             f"supervisor for this install must be restarted (`belay supervisor stop --db "
             f"{db}`) to pick this up."
         )
+    else:
+        identity.quota_config_path.unlink(missing_ok=True)
     if allowlist_extra_path is not None:
         identity.extra_allowlist_pointer_path.parent.mkdir(parents=True, exist_ok=True)
         identity.extra_allowlist_pointer_path.write_text(
@@ -1284,6 +1314,8 @@ def hooks_install(
             f"instead of pausing. A running supervisor for this install must be restarted "
             f"(`belay supervisor stop --db {db}`) to pick this up."
         )
+    else:
+        identity.extra_allowlist_pointer_path.unlink(missing_ok=True)
     typer.echo("restart the agent for the hook to take effect")
 
 
@@ -1347,6 +1379,13 @@ def hooks_uninstall(
         for hook_event in _HOOKS_EVENTS:
             new_text = remove_claude_hooks_entry(new_text, event=hook_event)
         atomic_write_with_backup(target, new_text)
+    # R1.6: remove the contracts/quota/allowlist pointer files this install
+    # wrote (belay/supervisor/addressing.py, under belay_home() -- outside
+    # `target`, so none of the settings.json actions above touch them).
+    # Without this, they used to survive uninstall entirely and a later
+    # bare reinstall (no flags) would silently pick the old ones back up.
+    for extra_file in manifest.extra_files:
+        Path(extra_file).unlink(missing_ok=True)
     manifest_path(target).unlink(missing_ok=True)
     typer.echo(f"removed belay's hooks from {target}")
 

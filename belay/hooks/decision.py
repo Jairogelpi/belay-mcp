@@ -79,19 +79,35 @@ _SAFE_READ_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 ExtraAllowlist = tuple[tuple[str, "re.Pattern[str]"], ...]
 
 
-def _compile_extra_entry(literal: str) -> re.Pattern[str]:
-    # `literal` alone (nothing after it), or `literal` followed by
-    # whitespace and further arguments -- e.g. "npm run lint" also matches
-    # "npm run lint --fix". `re.escape` because this is a literal string
-    # the operator wrote, never treated as a regex (see
-    # `load_extra_allowlist`'s docstring for why).
+def _compile_extra_entry(literal: str, *, exact: bool) -> re.Pattern[str]:
+    # `exact=False` (bare entry, unchanged R1 fifth-slice behavior):
+    # `literal` alone, or `literal` followed by whitespace and further
+    # arguments -- e.g. "npm run lint" also matches "npm run lint --fix".
+    # `exact=True` (R1.6, trailing "!"): `literal` alone, nothing more --
+    # "npm run lint!" allows "npm run lint" but pauses "npm run lint --fix",
+    # since a trailing argument can flip a read-only command into a
+    # mutating one and the bare form can't express "no arguments, ever".
+    # `re.escape` either way because this is a literal string the operator
+    # wrote, never treated as a regex (see `load_extra_allowlist`'s
+    # docstring for why).
+    if exact:
+        return re.compile(re.escape(literal))
     return re.compile(re.escape(literal) + r"(\s+\S.*)?")
 
 
 def load_extra_allowlist(path: str | Path) -> ExtraAllowlist:
     """Parse an operator-supplied extra-safe-commands file (R1 fifth
-    slice, ADR 0024): one literal command prefix per line, blank lines and
-    `#`-prefixed comment lines ignored.
+    slice, ADR 0024; exact-match suffix added R1.6): one literal command
+    prefix per line, blank lines and `#`-prefixed comment lines ignored.
+
+    A line ending in `!` (after trimming trailing whitespace) is an
+    exact-match entry: only that literal command, with nothing appended,
+    allows -- e.g. `npm run lint!` allows `npm run lint` but still pauses
+    `npm run lint --fix`. A bare line (no trailing `!`) keeps the original
+    behavior: the literal followed by any further arguments also allows.
+    Exact-match is the safer default for anything where an extra argument
+    could change behavior (e.g. `--fix`, `-delete`); use the bare form only
+    for commands genuinely safe with arbitrary trailing arguments.
 
     Deliberately literal strings, never regex: letting an operator author
     a regex here risks an accidental `.*`-shaped hole opening in a
@@ -104,9 +120,11 @@ def load_extra_allowlist(path: str | Path) -> ExtraAllowlist:
     somehow ended up in the file.
 
     Raises `ValueError` if any entry itself contains a shell
-    metacharacter: that entry could never match a real (metacharacter-free)
-    command anyway, so refusing it loudly at load time beats silently
-    shipping dead, confusing configuration.
+    metacharacter, or if a `!`-suffixed line has nothing left after
+    stripping the `!`: either could never match any real command anyway
+    (a metacharacter always pauses before the allowlist is even checked;
+    an empty literal matches nothing), so both are refused loudly at load
+    time rather than silently shipping dead, confusing configuration.
     """
     entries: list[tuple[str, re.Pattern[str]]] = []
     text = Path(path).read_text(encoding="utf-8")
@@ -114,13 +132,20 @@ def load_extra_allowlist(path: str | Path) -> ExtraAllowlist:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if _SHELL_METACHARACTERS.search(line):
+        exact = line.endswith("!")
+        literal = line[:-1].rstrip() if exact else line
+        if not literal:
             raise ValueError(
-                f"line {lineno}: {line!r} contains a shell metacharacter -- it could "
+                f"line {lineno}: {raw_line.strip()!r} has no command left after "
+                "stripping the exact-match '!' suffix -- refused"
+            )
+        if _SHELL_METACHARACTERS.search(literal):
+            raise ValueError(
+                f"line {lineno}: {literal!r} contains a shell metacharacter -- it could "
                 "never match any real command (metacharacters always pause before "
                 "the allowlist is even checked), so this entry is refused"
             )
-        entries.append((line, _compile_extra_entry(line)))
+        entries.append((literal, _compile_extra_entry(literal, exact=exact)))
     return tuple(entries)
 
 

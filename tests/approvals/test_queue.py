@@ -119,3 +119,67 @@ def test_approve_unknown_approval_id_raises() -> None:
     with pytest.raises(BelayError) as excinfo:
         queue.approve("ap_does_not_exist", approved_by="a")
     assert excinfo.value.code == "approval_expired"
+
+
+class TestConsume:
+    """R1.6: `ApprovalQueue.consume()` -- closes the gap where an
+    `approved` item allowed an unbounded number of separate future action
+    instances (a new `event_id`, not merely the host redelivering the
+    exact same PreToolUse dispatch) to reuse one human decision forever.
+    """
+
+    def test_first_consumption_claims_the_approval(self) -> None:
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.approve(item.approval_id, approved_by="jairo")
+
+        consumed = queue.consume(item.approval_id, "event_1")
+        assert consumed.consumed_by_event_id == "event_1"
+        assert consumed.consumed_at is not None
+
+    def test_same_event_id_retried_is_idempotent(self) -> None:
+        """The host redelivering the identical PreToolUse dispatch (a real
+        occurrence in these protocols) must not be treated as a reuse
+        attempt."""
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.approve(item.approval_id, approved_by="jairo")
+
+        first = queue.consume(item.approval_id, "event_1")
+        second = queue.consume(item.approval_id, "event_1")
+        assert first.consumed_by_event_id == second.consumed_by_event_id == "event_1"
+
+    def test_a_different_event_id_is_refused(self) -> None:
+        from belay.approvals.queue import ApprovalAlreadyConsumed
+
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.approve(item.approval_id, approved_by="jairo")
+
+        queue.consume(item.approval_id, "event_1")
+        with pytest.raises(ApprovalAlreadyConsumed):
+            queue.consume(item.approval_id, "event_2")
+
+    def test_consuming_a_still_pending_item_is_refused(self) -> None:
+        from belay.approvals.queue import ApprovalNotConsumable
+
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        with pytest.raises(ApprovalNotConsumable):
+            queue.consume(item.approval_id, "event_1")
+
+    def test_consuming_a_rejected_item_is_refused(self) -> None:
+        from belay.approvals.queue import ApprovalNotConsumable
+
+        queue = ApprovalQueue(clock=_clock())
+        item = queue.request("s1", "plan_1", {"tool": "mail.send"})
+        queue.reject(item.approval_id, rejected_by="jairo")
+        with pytest.raises(ApprovalNotConsumable):
+            queue.consume(item.approval_id, "event_1")
+
+    def test_consuming_an_unknown_approval_id_is_refused(self) -> None:
+        from belay.approvals.queue import ApprovalNotConsumable
+
+        queue = ApprovalQueue(clock=_clock())
+        with pytest.raises(ApprovalNotConsumable):
+            queue.consume("ap_does_not_exist", "event_1")

@@ -91,7 +91,10 @@ def _repo_identity(cwd: str | None) -> str | None:
     rev-parse HEAD`, not merely "a .git directory exists") -- duplicated
     rather than imported across adapters so each host adapter stays
     independently readable and one adapter's change can never accidentally
-    ripple into another's already-verified behavior."""
+    ripple into another's already-verified behavior. R1.6: also folds in
+    a cheap tracked-file dirty/clean signal (`_working_tree_is_dirty`
+    below) -- see `claude_code_adapter._repo_identity`'s docstring for the
+    full rationale and its known untracked-file limitation."""
     if not cwd:
         return None
     try:
@@ -104,7 +107,24 @@ def _repo_identity(cwd: str | None) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode != 0:
+        return None
+    head = result.stdout.strip()
+    return f"{head}:dirty" if _working_tree_is_dirty(cwd) else f"{head}:clean"
+
+
+def _working_tree_is_dirty(cwd: str) -> bool:
+    """Same logic as `claude_code_adapter._working_tree_is_dirty`."""
+    try:
+        result = subprocess.run(
+            ["git", "diff-index", "--quiet", "HEAD", "--"],
+            cwd=cwd,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return result.returncode != 0
 
 
 def normalize_exec_command_approval(

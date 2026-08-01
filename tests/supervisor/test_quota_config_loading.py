@@ -1,9 +1,10 @@
 """belay/supervisor/server.py::Supervisor._load_quota_config -- R1 fourth
 slice (ADR 0023): `belay hooks install --quota-max` writes
 `identity.quota_config_path`; the supervisor best-effort loads it at
-construction. `None` (no pointer file, or a broken one) must always be
-the safe fallback -- opt-in extra strictness, never a reason for the
-supervisor to fail to start.
+construction. `None` (no pointer file at all) is the unchanged, permissive
+default. Once that pointer file exists, R1.6 fails closed instead of
+open: a broken target returns `ConfigUnavailable` rather than silently
+falling back to `None` (no quota check).
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import json
 from pathlib import Path
 
 from belay.supervisor.addressing import SupervisorIdentity, supervisor_identity
-from belay.supervisor.server import Supervisor
+from belay.supervisor.server import ConfigUnavailable, Supervisor
 
 
 def _identity(tmp_path: Path) -> SupervisorIdentity:
@@ -40,16 +41,16 @@ def test_valid_pointer_file_loads_a_real_config(tmp_path: Path) -> None:
     assert supervisor._quota.window == timedelta(hours=12)
 
 
-def test_missing_max_actions_key_falls_back_to_none(tmp_path: Path) -> None:
+def test_missing_max_actions_key_fails_closed(tmp_path: Path) -> None:
     identity = _identity(tmp_path)
     identity.quota_config_path.parent.mkdir(parents=True, exist_ok=True)
     identity.quota_config_path.write_text(json.dumps({"window": "1d"}), encoding="utf-8")
 
     supervisor = Supervisor(identity)
-    assert supervisor._quota is None
+    assert isinstance(supervisor._quota, ConfigUnavailable)
 
 
-def test_invalid_window_string_falls_back_to_none(tmp_path: Path) -> None:
+def test_invalid_window_string_fails_closed(tmp_path: Path) -> None:
     identity = _identity(tmp_path)
     identity.quota_config_path.parent.mkdir(parents=True, exist_ok=True)
     identity.quota_config_path.write_text(
@@ -57,13 +58,13 @@ def test_invalid_window_string_falls_back_to_none(tmp_path: Path) -> None:
     )
 
     supervisor = Supervisor(identity)
-    assert supervisor._quota is None
+    assert isinstance(supervisor._quota, ConfigUnavailable)
 
 
-def test_malformed_json_falls_back_to_none(tmp_path: Path) -> None:
+def test_malformed_json_fails_closed(tmp_path: Path) -> None:
     identity = _identity(tmp_path)
     identity.quota_config_path.parent.mkdir(parents=True, exist_ok=True)
     identity.quota_config_path.write_text("not json at all", encoding="utf-8")
 
     supervisor = Supervisor(identity)
-    assert supervisor._quota is None
+    assert isinstance(supervisor._quota, ConfigUnavailable)

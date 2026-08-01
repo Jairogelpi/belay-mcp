@@ -212,3 +212,45 @@ class TestExtraAllowlist:
         decision = classify_bash("git status", extra_allowlist=extra)
         assert decision.verdict == Verdict.ALLOW
         assert "operator-configured" not in decision.reason
+
+    def test_exact_match_entry_allows_the_bare_command(self, tmp_path: Path) -> None:
+        extra = _write_and_load(tmp_path, "npm run lint!")
+        decision = classify_bash("npm run lint", extra_allowlist=extra)
+        assert decision.verdict == Verdict.ALLOW
+
+    def test_exact_match_entry_denies_trailing_arguments(self, tmp_path: Path) -> None:
+        """R1.6: the concrete gap being closed -- an exact-match ('!')
+        entry must NOT let `--fix` (or any other trailing argument) turn a
+        read-only lint invocation into a mutating one."""
+        extra = _write_and_load(tmp_path, "npm run lint!")
+        decision = classify_bash("npm run lint --fix", extra_allowlist=extra)
+        assert decision.verdict == Verdict.PAUSE
+
+    def test_exact_match_marker_is_stripped_from_the_stored_literal(
+        self, tmp_path: Path
+    ) -> None:
+        entries = _write_and_load(tmp_path, "npm run lint!")
+        names = [name for name, _ in entries]
+        assert names == ["npm run lint"]
+
+    def test_exact_match_entry_with_space_before_bang_still_strips_cleanly(
+        self, tmp_path: Path
+    ) -> None:
+        extra = _write_and_load(tmp_path, "npm run lint !")
+        decision_bare = classify_bash("npm run lint", extra_allowlist=extra)
+        decision_args = classify_bash("npm run lint --fix", extra_allowlist=extra)
+        assert decision_bare.verdict == Verdict.ALLOW
+        assert decision_args.verdict == Verdict.PAUSE
+
+    def test_bang_only_line_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "extra.txt"
+        path.write_text("!\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="no command left"):
+            load_extra_allowlist(path)
+
+    def test_bare_entries_are_unaffected_by_exact_match_support(self, tmp_path: Path) -> None:
+        """Adding '!' support must not change the bare (no-'!') form's
+        existing trailing-arguments-allowed behavior."""
+        extra = _write_and_load(tmp_path, "npm run lint")
+        decision = classify_bash("npm run lint --fix", extra_allowlist=extra)
+        assert decision.verdict == Verdict.ALLOW

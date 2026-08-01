@@ -10,6 +10,56 @@ once it reaches 1.0.
 
 ### Added
 
+- **R1.6 correctness lock -- six concrete gaps closed before any further
+  parallel hook-specific tracking is added on top of R1's five slices:**
+  - **Fail-closed configured policy:** `Supervisor._load_contract_set`/
+    `_load_quota_config`/`_load_extra_allowlist` used to collapse "never
+    configured" and "configured but now broken" into the same permissive
+    fallback. Once a pointer file exists (an operator opted in via `belay
+    hooks install --contracts`/`--quota-max`/`--allowlist-extra`), a
+    missing/unreadable/invalid target now returns a distinct
+    `ConfigUnavailable` sentinel, and `_decide_pre` denies every event
+    outright (`configured_policy_unavailable`) rather than silently
+    reverting to unconfigured behavior.
+  - **`hooks uninstall` actually cleans up:** `Manifest` gained an
+    `extra_files` field recording exactly which contracts/quota/allowlist
+    pointer files an install wrote; `hooks uninstall` now removes them.
+    `hooks install` also self-heals a bare reinstall that omits a
+    previously-given flag -- the stale pointer for that flag is deleted,
+    not left to silently keep affecting a freshly (re)installed
+    supervisor.
+  - **Exact-match Bash allowlist entries:** a bare `--allowlist-extra`
+    entry (`npm run lint`) still allows trailing arguments
+    (`npm run lint --fix`) as before; a new `!`-suffixed exact-match form
+    (`npm run lint!`) does not -- for entries where any extra argument
+    could flip a read-only command into a mutating one.
+  - **`packs/claude-code-native/contracts.yaml`:** the README's
+    `hooks install --contracts` example pointed at
+    `packs/filesystem/contracts.yaml`, which declares MCP-server-side tool
+    names (`read_file`/`write_file`/...) for the *proxy* path -- the
+    Native Agent Gate resolves native calls by their literal Claude Code
+    name (`Write`/`Edit`/`NotebookEdit`), so that pack could never match
+    and made every native file edit deny with `contract_missing`. The new
+    pack declares the three native tool names directly.
+  - **Working-tree dirty state folded into `repo_identity`:** each host
+    adapter's `_repo_identity()` now also runs a cheap
+    `git diff-index --quiet HEAD --` check and folds a `:dirty`/`:clean`
+    suffix into the identity string `_plan_id` hashes -- an approval
+    granted while the tree was clean no longer silently covers the same
+    command/call after an uncommitted edit to a tracked file (known gap:
+    untracked new files aren't detected by this cheap check).
+  - **Single-use approval consumption:** `ApprovalQueue.consume()` claims
+    an `approved` item for a specific hook `event_id`, via a real
+    conditional SQL `UPDATE ... WHERE consumed_by_event_id IS NULL`
+    (compare-and-swap) -- not a Python-side read-then-write, which a real
+    `threading` concurrency test proved was not actually atomic under
+    concurrent callers. The same hook event redelivering the identical
+    dispatch stays idempotently allowed; a genuinely new event that
+    happens to hash to the same `plan_id` now denies
+    (`approval_already_consumed`) and must request a fresh approval,
+    closing the gap where one human decision covered an unbounded number
+    of separate future executions.
+
 - **Operator-configurable extra Bash allowlist, R1 fifth slice ([ADR 0024](docs/adr/0024-r1-native-gate-configurable-allowlist.md)):**
   Bash's remaining gap (still a static classifier, no `PolicyEngine`) was
   explicitly scoped as a genuinely different problem from the

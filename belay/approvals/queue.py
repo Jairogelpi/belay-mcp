@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import create_engine, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session as DBSession
 
@@ -37,6 +38,20 @@ from belay.db.models import ApprovalRow, Base
 from belay.errors import BelayError
 
 ApprovalState = Literal["pending", "approved", "rejected", "expired"]
+
+
+class ApprovalNotConsumable(Exception):
+    """Raised by `ApprovalQueue.consume()` when the target item isn't in
+    `approved` state (R1.6). Not a `BelayError` -- see `consume`'s
+    docstring for why."""
+
+
+class ApprovalAlreadyConsumed(Exception):
+    """Raised by `ApprovalQueue.consume()` when the target item was
+    already claimed by a different `event_id` (R1.6) -- the approval is
+    single-use and this is a genuinely new action instance, not a
+    redelivery of the one that consumed it. Not a `BelayError` -- see
+    `consume`'s docstring for why."""
 
 #: Default expiry (spec §7.1): 30 minutes from `requested_at`.
 DEFAULT_EXPIRY = timedelta(minutes=30)
@@ -69,6 +84,12 @@ class ApprovalItem:
     approved_by: str | None = None
     rejected_by: str | None = None
     reason: str | None = None
+    #: R1.6: which hook event, if any, has actually consumed this
+    #: `approved` item (`ApprovalQueue.consume`) -- `None` means approved
+    #: but not yet acted on. See `consume`'s docstring for why this exists
+    #: separately from `state`.
+    consumed_by_event_id: str | None = None
+    consumed_at: datetime | None = None
 
 
 def _parse(text: str) -> datetime:
@@ -88,6 +109,8 @@ def _row_to_item(row: ApprovalRow) -> ApprovalItem:
         approved_by=row.approved_by,
         rejected_by=row.rejected_by,
         reason=row.reason,
+        consumed_by_event_id=row.consumed_by_event_id,
+        consumed_at=_parse(row.consumed_at) if row.consumed_at else None,
     )
 
 
@@ -207,6 +230,96 @@ class ApprovalQueue:
             row.reason = reason
             db.commit()
             return _row_to_item(row)
+
+    def consume(self, approval_id: str, event_id: str) -> ApprovalItem:
+        """R1.6: claim single-use consumption of an `approved` item for a
+        specific hook `event_id` -- closes the gap where the same approved
+        `plan_id` allowed an unlimited number of separate future action
+        instances (a fresh retry with a NEW `event_id`, not merely the host
+        redelivering the identical PreToolUse call) to reuse one human
+        decision forever.
+
+        - Not `approved` (`pending`/`rejected`/`expired`): raises
+          `ApprovalNotConsumable` -- there is nothing to consume yet, or
+          ever. In practice unreachable from `belay/hooks/gate.py` (it
+          only calls `consume()` right after observing `state ==
+          "approved"`, and `approved` is a terminal state -- see
+          `_LEGAL_TRANSITIONS`), kept as a defensive check rather than an
+          assumption.
+        - `consumed_by_event_id is None` (first use): claims it for
+          `event_id`, records `consumed_at`, returns the updated item.
+        - `consumed_by_event_id == event_id` (the host redelivered the
+          exact same PreToolUse dispatch -- a real, expected occurrence,
+          not a reuse attempt): no-op, returns the item unchanged.
+          Idempotent by design, matching
+          `belay/supervisor/idempotency.py`'s own duplicate-event
+          tolerance for the surrounding hook protocol.
+        - `consumed_by_event_id` set to something ELSE: this approval was
+          already spent on a different action instance. Raises
+          `ApprovalAlreadyConsumed` -- the caller (`belay/hooks/gate.py`)
+          must queue a fresh approval request rather than treat this as
+          still covering the new instance.
+
+        Not a `BelayError`, deliberately: spec §11's `ERROR_CODES` is a
+        fixed, normative registry of 17 codes for the MCP proxy's own
+        protocol surface (`belay/errors.py`) -- this is an internal
+        Native Agent Gate signal `belay/hooks/gate.py` catches directly,
+        not a wire-facing error code any spec section defines.
+
+        Genuinely atomic under real concurrency, not just "one Python
+        function body" -- the claim itself is a single conditional SQL
+        `UPDATE ... WHERE consumed_by_event_id IS NULL` (a compare-and-swap
+        SQLite serializes at the row/statement level), not a Python-side
+        read-then-maybe-write. An earlier version of this method read the
+        row, branched on it in Python, and wrote via the ORM's plain
+        attribute assignment + `commit()` -- reproducibly proven wrong
+        under a real `threading` race (every concurrent caller's read saw
+        `consumed_by_event_id is None` before any of their writes landed,
+        so every one of them "won"). The `db.execute(update(...))` call
+        below is the actual fix: whichever caller's `UPDATE` physically
+        executes first (holding SQLite's write lock) is the only one
+        `WHERE consumed_by_event_id IS NULL` can still match; every
+        caller after that evaluates the same `WHERE` against the
+        now-already-set column and matches zero rows (`rowcount == 0`),
+        so it can never silently overwrite the winner's claim."""
+        with DBSession(self._engine) as db:
+            row = db.get(ApprovalRow, approval_id)
+            if row is None:
+                raise ApprovalNotConsumable(f"approval {approval_id!r} not found")
+            item = self._settle_expiry(_row_to_item(row), persist_with=db, row=row)
+            if item.state != "approved":
+                raise ApprovalNotConsumable(
+                    f"approval {approval_id!r} is {item.state!r}, not 'approved'"
+                )
+            if row.consumed_by_event_id == event_id:
+                return _row_to_item(row)  # already ours -- idempotent, nothing to write
+
+            result = db.execute(
+                sa_update(ApprovalRow)
+                .where(
+                    ApprovalRow.approval_id == approval_id,
+                    ApprovalRow.consumed_by_event_id.is_(None),
+                )
+                .values(consumed_by_event_id=event_id, consumed_at=self._clock.now().isoformat())
+            )
+            db.commit()  # also expires the session's cached `row`/`fresh` below
+
+            if result.rowcount == 1:  # type: ignore[attr-defined]
+                won = db.get(ApprovalRow, approval_id)
+                assert won is not None
+                return _row_to_item(won)
+
+            # Lost the compare-and-swap -- some consume() call (this
+            # event_id, or a different one) already claimed it. Re-fetch
+            # to find out which, rather than assuming.
+            fresh = db.get(ApprovalRow, approval_id)
+            assert fresh is not None
+            if fresh.consumed_by_event_id == event_id:
+                return _row_to_item(fresh)
+            raise ApprovalAlreadyConsumed(
+                f"approval {approval_id!r} was already consumed by event "
+                f"{fresh.consumed_by_event_id!r}, not {event_id!r}"
+            )
 
     def _settle_expiry(
         self,

@@ -14,6 +14,7 @@ shaped like the old raw-payload API.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -76,6 +77,93 @@ def test_unsafe_command_is_denied_and_queued(queue: ApprovalQueue) -> None:
     assert items[0].state == "pending"
     assert items[0].plan["command"] == "rm -rf /tmp/x"
     assert items[0].approval_id == result.approval_id
+
+
+def _event_with_id(command: str, event_id: str, cwd: str = "/repo-a") -> HookEvent:
+    raw = {
+        "session_id": "sess-1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_use_id": event_id,
+        "cwd": cwd,
+    }
+    return normalize(raw, installation_id="test-install")
+
+
+def test_approved_command_stays_allowed_on_the_same_event_id_retry(queue: ApprovalQueue) -> None:
+    """The host redelivering the identical PreToolUse dispatch (same
+    event_id) is a real occurrence in these protocols, not a reuse
+    attempt -- must stay idempotently allowed."""
+    event = _event_with_id("rm -rf /tmp/x", "toolu_1")
+    evaluate(event, queue)
+    queue.approve(queue.list()[0].approval_id, approved_by="jairo")
+
+    first_consume = evaluate(event, queue)
+    second_consume = evaluate(event, queue)
+    assert first_consume.verdict == "allow"
+    assert second_consume.verdict == "allow"
+
+
+def test_approved_command_denies_a_different_event_id_reusing_it(queue: ApprovalQueue) -> None:
+    """R1.6: an approval is single-use -- a genuinely new event (a
+    different event_id) that happens to produce the identical (command,
+    context) plan_id must NOT silently spend someone else's
+    already-consumed grant."""
+    first = _event_with_id("rm -rf /tmp/x", "toolu_1")
+    evaluate(first, queue)
+    queue.approve(queue.list()[0].approval_id, approved_by="jairo")
+    evaluate(first, queue)  # claims single-use consumption for toolu_1
+
+    second = _event_with_id("rm -rf /tmp/x", "toolu_2")
+    result = evaluate(second, queue)
+    assert result.verdict == "deny"
+    assert "approval_already_consumed" in result.reason
+
+
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / "f.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
+
+
+def test_approval_granted_while_clean_does_not_cover_the_same_command_once_dirty(
+    queue: ApprovalQueue, tmp_path: Path
+) -> None:
+    """R1.6: `repo_identity` (belay/hooks/claude_code_adapter.py) now folds
+    in a tracked-file dirty/clean signal, so `_plan_id`'s hash changes the
+    moment an uncommitted edit lands in the same repo, at the same cwd --
+    an approval granted while clean must not silently keep covering the
+    identical command once the tree is dirty."""
+    _init_git_repo(tmp_path)
+
+    def _bash_event(event_id: str) -> HookEvent:
+        raw = {
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "npm run lint"},
+            "tool_use_id": event_id,
+            "cwd": str(tmp_path),
+        }
+        return normalize(raw, installation_id="test-install")
+
+    clean_event = _bash_event("toolu_clean")
+    result = evaluate(clean_event, queue)
+    assert result.verdict == "deny"  # not on any allowlist -- pauses, as expected
+    queue.approve(queue.list()[0].approval_id, approved_by="jairo")
+
+    result_again_clean = evaluate(clean_event, queue)
+    assert result_again_clean.verdict == "allow"
+
+    (tmp_path / "f.txt").write_text("modified, uncommitted\n", encoding="utf-8")
+    dirty_event = _bash_event("toolu_dirty")
+    result_dirty = evaluate(dirty_event, queue)
+    assert result_dirty.verdict == "deny"  # a NEW, still-pending approval, not the old one
+    assert len(queue.list()) == 2
 
 
 def test_retrying_the_same_pending_command_does_not_create_a_second_item(

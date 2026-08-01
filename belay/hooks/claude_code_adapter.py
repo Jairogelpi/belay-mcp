@@ -97,18 +97,26 @@ def _surface_for(tool_name: str) -> Surface:
 
 
 def _repo_identity(cwd: str | None) -> str | None:
-    """The real git HEAD commit -- not merely "a `.git` directory exists
-    here" (an earlier version returned the cwd path itself in that case,
-    which identifies *a* repo but not *what commit it's at*; a P0 review
+    """The real git HEAD commit, plus a cheap tracked-file dirty/clean
+    signal (R1.6) -- not merely "a `.git` directory exists here" (an
+    earlier version returned the cwd path itself in that case, which
+    identifies *a* repo but not *what commit it's at*; a P0 review
     correctly pointed out that binding an approval to the repository
     without its state lets the same approval silently cover a different
     commit/branch than the one it was actually granted for). `git
-    rev-parse HEAD` only -- not the fuller `belay/ledger/test_evidence.py`
-    `git_context()` (tree hash + dirty-worktree scan too), since that runs
-    `git status --porcelain`, which can be slow on a large repo and this
-    runs on every single hook decision (a latency budget for every hook
-    decision -- there is no `docs/spec.md` §16, the spec ends at §14), not
-    once per verified test."""
+    rev-parse HEAD` plus `git diff-index --quiet HEAD --`
+    (`_working_tree_is_dirty` below) -- not the fuller
+    `belay/ledger/test_evidence.py` `git_context()` (tree hash + a full
+    `git status --porcelain` scan), since that can be slow on a large repo
+    and this runs on every single hook decision (a latency budget for
+    every hook decision -- there is no `docs/spec.md` §16, the spec ends
+    at §14), not once per verified test. `diff-index` is a single process
+    with no output to parse -- far cheaper than a porcelain status scan --
+    at the cost of a known gap: it only considers tracked content, so an
+    uncommitted NEW (untracked) file does not change this signal, and an
+    approval granted before that file existed still binds to the same
+    `repo_identity` after. R1.6 closes the more common case (an existing
+    tracked file was modified between approval and reuse), not that one."""
     if not cwd:
         return None
     try:
@@ -121,7 +129,28 @@ def _repo_identity(cwd: str | None) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode != 0:
+        return None
+    head = result.stdout.strip()
+    return f"{head}:dirty" if _working_tree_is_dirty(cwd) else f"{head}:clean"
+
+
+def _working_tree_is_dirty(cwd: str) -> bool:
+    """`True` if any tracked file differs from `HEAD` (`git diff-index
+    --quiet HEAD --`: exit 0 clean, non-zero dirty-or-error). Treats a
+    git invocation failure as dirty -- fail toward requiring a fresh
+    approval rather than silently trusting a worktree state that
+    couldn't actually be checked."""
+    try:
+        result = subprocess.run(
+            ["git", "diff-index", "--quiet", "HEAD", "--"],
+            cwd=cwd,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return result.returncode != 0
 
 
 #: Field name Claude Code actually uses for a PostToolUse result object.

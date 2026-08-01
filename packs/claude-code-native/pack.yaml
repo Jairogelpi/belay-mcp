@@ -1,0 +1,44 @@
+# Claude Code Native -- pack-level metadata (R1.6).
+#
+# Same status as packs/filesystem/pack.yaml: documentation, not (yet)
+# machine-enforced -- see docs/adr/0019-e20-verified-packs-scope.md. The
+# executable artifact `belay hooks install --contracts <file>` loads is
+# contracts.yaml alongside this file, via belay/contracts/loader.py.
+
+name: claude-code-native
+version: "0.1.0"
+schema_version: "0.1"
+license: MIT
+publisher: belay-mcp
+source_repository: https://github.com/Jairogelpi/belay-mcp
+source_path: packs/claude-code-native/contracts.yaml
+
+supported_belay_versions: ">=0.2.0a1"
+
+upstream:
+  identity: "Claude Code native tools (Write/Edit/NotebookEdit)"
+  verified_version: "n/a -- not a versioned external server, these are the
+    agent's own built-in tool names"
+  launch: "n/a -- gated via `belay hooks install`, not `belay wrap`"
+
+trust_state: unverified
+# No signing/release-policy machinery exists yet (same honest state as
+# every other pack in this repo, see packs/filesystem/pack.yaml).
+
+required_credentials: none
+redaction_rules: none
+# File contents captured for rewind (belay/hooks/file_snapshot.py) are NOT
+# redacted in the ledger today -- same known gap as packs/filesystem.
+
+fixtures_and_tests:
+  - tests/packs/test_claude_code_native_pack.py
+
+known_limitations:
+  - "This pack only satisfies the Native Agent Gate's contract_missing
+     presence check (ADR 0021's first slice) -- it does not yet carry
+     effect/reversibility semantics that actually govern the file-edit
+     decision. The real undo mechanism is the snapshot/rewind system, not
+     this contract."
+  - "Does not cover native MCP tool calls (mcp__<server>__<tool>) -- those
+     are install-specific and can't be packaged generically; see the
+     README for how to declare one for your own configured server."

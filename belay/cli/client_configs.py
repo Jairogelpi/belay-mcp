@@ -31,7 +31,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -89,6 +89,18 @@ class Manifest:
     after_hash: str
     backup_path: str | None
     installed_at: str
+    #: R1.6: absolute paths of any auxiliary files this install wrote
+    #: alongside `target` -- e.g. `belay hooks install --contracts`'s
+    #: contracts/quota/allowlist pointer files under `belay_home()`, which
+    #: aren't part of `target` itself and so aren't covered by
+    #: `before_hash`/`backup_path`/`atomic_restore`. `belay hooks
+    #: uninstall` reads this list back and removes each one -- closing the
+    #: gap where those pointer files used to survive uninstall and could
+    #: silently reactivate on a bare reinstall. Defaults to `[]` so a
+    #: manifest written before this field existed still loads (nothing
+    #: extra to clean up for an old install, which is the correct,
+    #: unchanged behavior for it).
+    extra_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -99,10 +111,13 @@ class Manifest:
             "after_hash": self.after_hash,
             "backup_path": self.backup_path,
             "installed_at": self.installed_at,
+            "extra_files": self.extra_files,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> Manifest:
+        raw_extra_files = data.get("extra_files") or []
+        assert isinstance(raw_extra_files, list)
         return cls(
             client=str(data["client"]),
             target=str(data["target"]),
@@ -111,11 +126,12 @@ class Manifest:
             after_hash=str(data["after_hash"]),
             backup_path=data.get("backup_path"),  # type: ignore[arg-type]
             installed_at=str(data["installed_at"]),
+            extra_files=[str(p) for p in raw_extra_files],
         )
 
 
 def write_manifest(client: str, target: Path, name: str, before_hash: str | None, after_text: str,
-                    backup_path: Path | None) -> Path:
+                    backup_path: Path | None, extra_files: list[str] | None = None) -> Path:
     """Record what this install just did -- the one source `belay
     uninstall`/`belay doctor` trust to know whether the file has changed since,
     without guessing from content alone.
@@ -123,7 +139,14 @@ def write_manifest(client: str, target: Path, name: str, before_hash: str | None
     `before_hash` (not raw text) so a reinstall over an unmodified belay-managed
     config can pass through the *original* pre-install hash from the prior
     manifest, rather than hashing the already-belay-containing content that was
-    on disk immediately before this write -- see `_register_client`."""
+    on disk immediately before this write -- see `_register_client`.
+
+    `extra_files` (R1.6) always reflects *this* call's own set of auxiliary
+    files, not a merge with whatever a prior manifest recorded -- a reinstall
+    that omits a flag (e.g. no `--contracts` this time) must record an empty
+    list, not carry the old pointer path forward, since the caller
+    (`hooks install`) is also responsible for clearing any pointer file a
+    now-omitted flag no longer wants."""
     manifest = Manifest(
         client=client,
         target=str(target),
@@ -132,6 +155,7 @@ def write_manifest(client: str, target: Path, name: str, before_hash: str | None
         after_hash=sha256_of(after_text),
         backup_path=str(backup_path) if backup_path else None,
         installed_at=datetime.now(UTC).isoformat(),
+        extra_files=list(extra_files) if extra_files else [],
     )
     path = manifest_path(target)
     path.write_text(json.dumps(manifest.to_dict(), indent=2) + "\n", encoding="utf-8")

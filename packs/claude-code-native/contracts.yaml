@@ -1,0 +1,67 @@
+# Contracts for Claude Code's own *native* file-edit tools -- `Write`,
+# `Edit`, `NotebookEdit` -- as called directly by the agent, outside
+# belay's own MCP proxy (`belay wrap`/`belay run`).
+#
+# This is the pack `belay hooks install --contracts <file>` actually needs
+# (R1.6): the Native Agent Gate's `evaluate_file_edit`
+# (belay/hooks/gate.py) resolves a configured `ContractSet` by the tool's
+# *literal Claude Code name* -- `Write`/`Edit`/`NotebookEdit` -- via an
+# exact dict lookup (`ContractSet.resolve`, belay/contracts/model.py).
+# `packs/filesystem/contracts.yaml` (tool names `read_file`/`write_file`/
+# `edit_file`/...) is for the *proxy* path, where belay itself calls a
+# downstream MCP server by that server's own tool names -- it was never a
+# valid `--contracts` argument for the hooks path, and using it there makes
+# every native file edit deny with `contract_missing`. See README's Native
+# Agent Gate section for how the two paths differ.
+#
+# `reversibility: irreversible` here is honest about what a *contract*
+# alone can promise for these three tools -- it does not mean edits aren't
+# undoable. The real undo mechanism for native edits is the snapshot/rewind
+# system (FILE-001, belay/hooks/file_snapshot.py + `belay hooks rewind
+# <event_id>`), which `evaluate_file_edit` already runs as a side effect of
+# allowing, independent of any contract. This pack's only job is to satisfy
+# the Native Gate's `contract_missing` presence check (ADR 0021's first
+# slice) -- it does not yet carry effect/reversibility semantics that
+# actually govern the decision (see ADR 0021's own noted follow-up: a
+# present contract's reversibility/effects aren't reinterpreted for native
+# edits yet).
+#
+# A native MCP tool call (`mcp__<server>__<tool>`) is a separate,
+# install-specific case this pack cannot cover generically -- see the
+# README for an example of declaring one for your own configured server.
+
+belay_contract: '0.1'
+tool: Write
+summary: Create a new file, or completely overwrite an existing one, with new content (Claude Code's native tool, not a proxied MCP call).
+reversibility: irreversible
+effects:
+  - type: update
+    resource: native.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: '0.1'
+tool: Edit
+summary: Make a string-replacement edit to an existing file (Claude Code's native tool, not a proxied MCP call).
+reversibility: irreversible
+effects:
+  - type: update
+    resource: native.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false
+---
+belay_contract: '0.1'
+tool: NotebookEdit
+summary: Edit a cell in a Jupyter notebook (Claude Code's native tool, not a proxied MCP call).
+reversibility: irreversible
+effects:
+  - type: update
+    resource: native.notebook
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: false

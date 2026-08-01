@@ -24,7 +24,7 @@ def _init_repo(path: Path) -> str:
 
 def test_repo_identity_returns_real_head_sha(tmp_path: Path) -> None:
     head = _init_repo(tmp_path)
-    assert _repo_identity(str(tmp_path)) == head
+    assert _repo_identity(str(tmp_path)) == f"{head}:clean"
     assert len(head) == 40  # a real git SHA-1, not a placeholder
 
 
@@ -36,6 +36,35 @@ def test_repo_identity_changes_after_a_new_commit(tmp_path: Path) -> None:
 
     second_head = _repo_identity(str(tmp_path))
     assert second_head != first_head
+
+
+def test_repo_identity_reports_dirty_after_an_uncommitted_change_to_a_tracked_file(
+    tmp_path: Path,
+) -> None:
+    """R1.6: the concrete gap being closed -- an approval bound to
+    `repo_identity` while the tree was clean must not silently cover a
+    later call made after an uncommitted edit to the same repo."""
+    head = _init_repo(tmp_path)
+    clean_identity = _repo_identity(str(tmp_path))
+    assert clean_identity == f"{head}:clean"
+
+    (tmp_path / "f.txt").write_text("modified, not committed\n", encoding="utf-8")
+
+    dirty_identity = _repo_identity(str(tmp_path))
+    assert dirty_identity == f"{head}:dirty"
+    assert dirty_identity != clean_identity
+
+
+def test_repo_identity_is_clean_again_after_committing_the_change(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "f.txt").write_text("modified\n", encoding="utf-8")
+    assert _repo_identity(str(tmp_path)) is not None
+    assert _repo_identity(str(tmp_path)).endswith(":dirty")  # type: ignore[union-attr]
+
+    subprocess.run(["git", "commit", "-aq", "-m", "second"], cwd=tmp_path, check=True)
+    new_identity = _repo_identity(str(tmp_path))
+    assert new_identity is not None
+    assert new_identity.endswith(":clean")
 
 
 def test_repo_identity_is_none_outside_a_git_repo(tmp_path: Path) -> None:
@@ -64,7 +93,7 @@ def test_normalize_uses_real_repo_identity(tmp_path: Path) -> None:
         "cwd": str(tmp_path),
     }
     event = normalize(raw, installation_id="install1")
-    assert event.repo_identity == head
+    assert event.repo_identity == f"{head}:clean"
 
 
 @pytest.mark.parametrize(

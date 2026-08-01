@@ -222,11 +222,20 @@ tool with no matching contract denies (`contract_missing`) instead of the
 default allow. The same file also lets a declared, all-read native MCP
 tool (`mcp__server__tool`) auto-allow instead of always pausing --
 anything not explicitly declared read-only still pauses exactly as
-before. Off unless you opt in:
+before. Off unless you opt in. Note this resolves by the tool's *literal
+Claude Code name* (`Write`/`Edit`/`NotebookEdit`, or `mcp__<server>__<tool>`
+for native MCP calls) -- not a downstream MCP server's own tool names, so
+`packs/filesystem/contracts.yaml` (which declares `read_file`/`write_file`/
+etc. for the *proxy* path) is not a valid argument here:
 
 ```bash
-belay hooks install --contracts packs/filesystem/contracts.yaml --yes
+belay hooks install --contracts packs/claude-code-native/contracts.yaml --yes
 ```
+
+That pack covers the three native file-edit tools. Auto-allowing a native
+MCP tool call is install-specific -- it needs a contract keyed by *your*
+server's actual name, e.g. a `mcp__github__list_issues` entry with an
+all-`read` effects list, added to the same contracts file.
 
 **Session fencing** (R1 third slice, [ADR 0022](docs/adr/0022-r1-native-gate-session-fencing.md)):
 `belay hooks fence <host_session_id>` closes a hook session to every
@@ -248,15 +257,18 @@ directly. Off unless you opt in:
 belay hooks install --quota-max 20 --quota-window 1d --yes
 ```
 
-**Extra Bash allowlist** (R1 fifth slice, [ADR 0024](docs/adr/0024-r1-native-gate-configurable-allowlist.md)):
-add your own literal, safe commands to the built-in read-only allowlist
--- not a `PolicyEngine` for Bash, just an extensible list of commands your
-project already trusts. Entries are checked after the same
-shell-metacharacter guard everything else is, so they can never become a
-chaining/redirection bypass:
+**Extra Bash allowlist** (R1 fifth slice, [ADR 0024](docs/adr/0024-r1-native-gate-configurable-allowlist.md);
+exact-match syntax added R1.6): add your own literal, safe commands to the
+built-in read-only allowlist -- not a `PolicyEngine` for Bash, just an
+extensible list of commands your project already trusts. Entries are
+checked after the same shell-metacharacter guard everything else is, so
+they can never become a chaining/redirection bypass. A bare entry also
+allows any trailing arguments (`npm run lint` allows `npm run lint --fix`
+too) -- append `!` to require an exact match instead, since a trailing
+argument can turn a read-only command into a mutating one:
 
 ```bash
-echo "npm run lint" > my-safe-commands.txt
+echo "npm run lint!" > my-safe-commands.txt   # exact match only -- `--fix` still pauses
 belay hooks install --allowlist-extra my-safe-commands.txt --yes
 ```
 

@@ -25,10 +25,20 @@ which a P0 review correctly flagged -- it let one approval silently cover
 the identical command string run in a *different* repository, branch,
 directory, or session than the one a human actually approved it for. A
 second attempt at the identical command **in the identical context** finds
-the same approval item instead of opening a new one -- and once a human
-approves it, every future identical (command, context) pair is allowed
-without asking again (deliberate: the human approved *this exact
-situation*, not "trust this agent from now on").
+the same approval item instead of opening a new one.
+
+Once approved, that grant is single-use (R1.6, `ApprovalQueue.consume`):
+the *specific hook event* that first acts on it claims it, and the host
+redelivering that exact same event (a real occurrence in these protocols,
+not a reuse attempt) stays idempotently allowed. But a genuinely new event
+-- a fresh invocation that happens to produce the identical (command,
+context) hash -- does not get to silently spend an already-consumed grant;
+it denies with `approval_already_consumed` and must be queued as its own
+new approval. Before R1.6 every future identical (command, context) pair
+was allowed forever off one human decision -- a deliberate idempotency
+choice at the time, but one that also let a single approval cover an
+unbounded number of separate future executions, not just the one
+situation a human actually looked at.
 """
 
 from __future__ import annotations
@@ -40,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from belay.approvals.queue import ApprovalQueue
+from belay.approvals.queue import ApprovalAlreadyConsumed, ApprovalItem, ApprovalQueue
 from belay.contracts.model import ContractSet
 from belay.hooks.decision import DECISION_LOGIC_VERSION, ExtraAllowlist, Verdict, classify_bash
 from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
@@ -144,6 +154,29 @@ def _plan_id_for_mcp(event: HookEvent) -> str:
     return _plan_id("mcp", event, args_json)
 
 
+def _allow_via_consumed_approval(
+    queue: ApprovalQueue, existing: ApprovalItem, event: HookEvent, allow_reason: str
+) -> GateDecision:
+    """R1.6: an `approved` item only actually allows once this specific
+    hook event claims (or already holds) its single-use consumption --
+    see `ApprovalQueue.consume`. Shared by all three `evaluate_*`
+    functions' `existing.state == "approved"` branch, so Bash/file-edit/
+    MCP calls all get the identical one-time-use guarantee, not three
+    independently-drifting copies of it."""
+    try:
+        queue.consume(existing.approval_id, event.event_id)
+    except ApprovalAlreadyConsumed:
+        return GateDecision(
+            "deny",
+            "belay: approval_already_consumed -- this approval was already used for a "
+            f"different action instance (approval {existing.approval_id}) -- a granted "
+            "approval is single-use, not a standing permission for every future "
+            "occurrence of the identical command/call; request a new one",
+            approval_id=existing.approval_id,
+        )
+    return GateDecision("allow", allow_reason, approval_id=existing.approval_id)
+
+
 def evaluate(
     event: HookEvent,
     queue: ApprovalQueue,
@@ -208,11 +241,12 @@ def evaluate(
     existing = queue.for_plan(plan_id)
 
     if existing is not None and existing.state == "approved":
-        return GateDecision(
-            "allow",
+        return _allow_via_consumed_approval(
+            queue,
+            existing,
+            event,
             f"belay: this exact command was already approved "
             f"(approval {existing.approval_id}, by {existing.approved_by})",
-            approval_id=existing.approval_id,
         )
     if existing is not None and existing.state == "pending":
         return GateDecision(
@@ -346,11 +380,12 @@ def evaluate_file_edit(
     ).hexdigest()[:32]
     existing = queue.for_plan(plan_id)
     if existing is not None and existing.state == "approved":
-        return GateDecision(
-            "allow",
+        return _allow_via_consumed_approval(
+            queue,
+            existing,
+            event,
             f"belay: oversized file edit approved by a human (approval {existing.approval_id}) "
             "-- NOT reversible, no snapshot was captured",
-            approval_id=existing.approval_id,
         )
     if existing is not None and existing.state == "pending":
         return GateDecision(
@@ -453,11 +488,12 @@ def evaluate_mcp_call(
     existing = queue.for_plan(plan_id)
 
     if existing is not None and existing.state == "approved":
-        return GateDecision(
-            "allow",
+        return _allow_via_consumed_approval(
+            queue,
+            existing,
+            event,
             f"belay: this exact MCP call ({event.tool_name}) was already approved "
             f"(approval {existing.approval_id}, by {existing.approved_by})",
-            approval_id=existing.approval_id,
         )
     if existing is not None and existing.state == "pending":
         return GateDecision(
