@@ -238,6 +238,16 @@ new session with the agent instead.
 belay hooks fence s1 --host claude-code --db belay-hooks.db --yes
 ```
 
+**Per-OS-user quota** (R1 fourth slice, [ADR 0023](docs/adr/0023-r1-native-gate-quota.md)):
+once an OS user has this many *approved* hook-gated actions within the
+window, a new pause-worthy action (Bash, native MCP, oversized file edit)
+denies outright instead of being queued -- an operator must intervene
+directly. Off unless you opt in:
+
+```bash
+belay hooks install --quota-max 20 --quota-window 1d --yes
+```
+
 #### Live conformance (E18.7): `trust_tier="T1"` for Claude Code's Bash surface
 
 `tests/hooks/test_live_conformance.py` is a real, opt-in (spends real

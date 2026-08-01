@@ -583,6 +583,93 @@ class TestHooksFence:
         assert "already fenced" in second.output
 
 
+class TestHooksQuota:
+    """R1 fourth slice (ADR 0023): `belay hooks install --quota-max`, end
+    to end through the real CLI, a real spawned supervisor, and real
+    `belay hooks approvals approve` calls."""
+
+    def _run_pre_bash(self, command: str, session_id: str, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "belay-hooks.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+
+    def _approve_the_one_pending_item(self) -> None:
+        listed = runner.invoke(app, ["hooks", "approvals", "list", "--db", "belay-hooks.db"])
+        pending_line = next(
+            line for line in listed.output.splitlines() if "  pending  " in line
+        )
+        approval_id = pending_line.split()[0]
+        approve = runner.invoke(
+            app, ["hooks", "approvals", "approve", approval_id, "--db", "belay-hooks.db"]
+        )
+        assert approve.exit_code == 0, approve.output
+
+    def test_quota_exceeded_hard_denies_a_new_pause_without_queuing_it(
+        self, tmp_path: Path
+    ) -> None:
+        result = runner.invoke(
+            app,
+            ["hooks", "install", "--quota-max", "2", "--quota-window", "1d", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+
+        # Two distinct commands, each paused then approved -- fills the quota.
+        out = self._run_pre_bash("rm -rf /tmp/a", "s1", "toolu_quota_a")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        self._approve_the_one_pending_item()
+
+        out = self._run_pre_bash("rm -rf /tmp/b", "s1", "toolu_quota_b")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        self._approve_the_one_pending_item()
+
+        # A third, brand-new command: quota is now at max -- hard deny,
+        # never queued (a third `hooks approvals list` would still show
+        # only the two already-approved items, not a new pending one).
+        out = self._run_pre_bash("rm -rf /tmp/c", "s1", "toolu_quota_c")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "quota exceeded" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+        listed = runner.invoke(app, ["hooks", "approvals", "list", "--db", "belay-hooks.db"])
+        assert "pending" not in listed.output
+
+    def test_without_quota_configured_repeated_approvals_never_hard_deny(
+        self, tmp_path: Path
+    ) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0  # no --quota-max
+
+        for i in range(3):
+            out = self._run_pre_bash(f"rm -rf /tmp/{i}", "s1", f"toolu_noquota_{i}")
+            assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert "quota exceeded" not in out["hookSpecificOutput"]["permissionDecisionReason"]
+            self._approve_the_one_pending_item()
+
+    def test_invalid_quota_window_is_rejected_at_install_time(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["hooks", "install", "--quota-max", "5", "--quota-window", "not-a-window", "--yes"],
+        )
+        assert result.exit_code != 0
+        assert not _settings_path(tmp_path).is_file()
+
+    def test_quota_max_below_one_is_rejected_at_install_time(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app, ["hooks", "install", "--quota-max", "0", "--yes"]
+        )
+        assert result.exit_code != 0
+        assert not _settings_path(tmp_path).is_file()
+
+
 class TestFileEditRewind:
     """E18.3: native Edit/Write calls are captured for rewind, end-to-end
     through the real CLI, two separate `belay hooks run` invocations (pre

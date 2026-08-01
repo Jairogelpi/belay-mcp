@@ -33,6 +33,7 @@ from belay.hooks.gate import (
     pre_event_evidence,
     session_key,
 )
+from belay.hooks.quota import QuotaConfig
 from belay.supervisor.protocol import HookEvent
 from sqlalchemy import create_engine
 
@@ -591,6 +592,90 @@ class TestFileEditContractCheck:
         result = evaluate_file_edit(event, queue, self._snapshots(tmp_path), contract_set=empty_set)
         assert result.verdict == "deny"
         assert "contract_missing" in result.reason
+
+
+class TestQuotaEnforcement:
+    """R1 fourth slice (ADR 0023): `quota` only ever escalates a *new*
+    pause to a hard deny -- never touches an existing pending/approved/
+    rejected lookup, and never applies when no quota is configured
+    (`quota=None`, the default, is fully unchanged legacy behavior)."""
+
+    def _quota_at_max(self, max_actions: int = 2) -> QuotaConfig:
+        from belay.ledger.store import LedgerStore
+        from belay.supervisor.protocol import local_os_user
+
+        ledger = LedgerStore()
+        os_user = local_os_user()
+        for i in range(max_actions):
+            ledger.append(
+                f"quota-seed-{i}",
+                "hook_pre_tool_use",
+                {"os_user": os_user, "verdict": "deny", "approval_id": f"ap-seed-{i}"},
+            )
+            ledger.append(
+                f"quota-seed-{i}",
+                "approval_resolved",
+                {"approval_id": f"ap-seed-{i}", "state": "approved"},
+            )
+        return QuotaConfig(ledger=ledger, max_actions=max_actions, window=timedelta(days=1))
+
+    def test_bash_new_pause_denies_hard_when_quota_exceeded_no_item_queued(
+        self, queue: ApprovalQueue
+    ) -> None:
+        quota = self._quota_at_max()
+        result = evaluate(_event("rm -rf /tmp/x"), queue, quota=quota)
+        assert result.verdict == "deny"
+        assert "quota exceeded" in result.reason
+        assert queue.list() == []
+
+    def test_bash_below_quota_still_queues_normally(self, queue: ApprovalQueue) -> None:
+        from belay.ledger.store import LedgerStore
+
+        quota = QuotaConfig(ledger=LedgerStore(), max_actions=2, window=timedelta(days=1))
+        result = evaluate(_event("rm -rf /tmp/x"), queue, quota=quota)
+        assert result.verdict == "deny"
+        assert "quota exceeded" not in result.reason
+        assert len(queue.list()) == 1
+
+    def test_no_quota_configured_is_unchanged(self, queue: ApprovalQueue) -> None:
+        result = evaluate(_event("rm -rf /tmp/x"), queue, quota=None)
+        assert result.verdict == "deny"
+        assert "quota exceeded" not in result.reason
+        assert len(queue.list()) == 1
+
+    def test_quota_does_not_touch_an_already_pending_item(self, queue: ApprovalQueue) -> None:
+        event = _event("rm -rf /tmp/x")
+        evaluate(event, queue)  # creates the pending item, no quota involved
+        quota = self._quota_at_max()
+        result = evaluate(event, queue, quota=quota)
+        assert result.verdict == "deny"
+        assert "still pending" in result.reason
+        assert len(queue.list()) == 1  # not a second item, and not a quota denial either
+
+    def test_mcp_call_new_pause_denies_hard_when_quota_exceeded(
+        self, queue: ApprovalQueue
+    ) -> None:
+        quota = self._quota_at_max()
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        result = evaluate_mcp_call(event, queue, quota=quota)
+        assert result.verdict == "deny"
+        assert "quota exceeded" in result.reason
+        assert queue.list() == []
+
+    def test_oversized_file_edit_new_pause_denies_hard_when_quota_exceeded(
+        self, queue: ApprovalQueue, tmp_path: Path
+    ) -> None:
+        engine = create_engine("sqlite:///:memory:", future=True)
+        snapshots = SnapshotStore(engine, tmp_path / "snaps")
+        big_file = tmp_path / "big.bin"
+        big_file.write_bytes(b"x" * (6 * 1024 * 1024))  # over MAX_SNAPSHOT_BYTES (5 MiB)
+        event = _file_event("Write", str(big_file))
+
+        quota = self._quota_at_max()
+        result = evaluate_file_edit(event, queue, snapshots, quota=quota)
+        assert result.verdict == "deny"
+        assert "quota exceeded" in result.reason
+        assert queue.list() == []
 
 
 class TestLedgerEvidenceHelpers:

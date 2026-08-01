@@ -25,6 +25,7 @@ edit its own approval state by hand.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import queue
@@ -50,7 +51,9 @@ from belay.errors import BelayError
 from belay.hooks import claude_code_adapter, gate
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
+from belay.hooks.quota import QuotaConfig
 from belay.ledger.store import LedgerStore
+from belay.policy.quota import parse_window
 from belay.rewind.service import is_fenced
 from belay.supervisor.addressing import SupervisorIdentity, belay_home
 from belay.supervisor.auth import load_or_create_authkey
@@ -154,6 +157,7 @@ class Supervisor:
         self._pre_times: dict[str, int] = {}
         self._pre_times_lock = threading.Lock()
         self._contract_set = self._load_contract_set()
+        self._quota = self._load_quota_config()
 
     def _load_contract_set(self) -> ContractSet | None:
         """`None` (the default) is unchanged legacy behavior -- this only
@@ -176,6 +180,23 @@ class Supervisor:
         except (OSError, BelayError):
             return None
 
+    def _load_quota_config(self) -> QuotaConfig | None:
+        """`None` (the default) means no quota check at all -- only set when
+        `belay hooks install --quota-max` wrote `identity.quota_config_path`
+        for this install. Same best-effort, fail-open-to-no-check posture as
+        `_load_contract_set`: a missing or corrupt config file must not
+        crash the supervisor or fail-closed deny everything."""
+        pointer = self._identity.quota_config_path
+        if not pointer.is_file():
+            return None
+        try:
+            raw = json.loads(pointer.read_text(encoding="utf-8"))
+            max_actions = raw["max_actions"]
+            window = parse_window(raw["window"])
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+        return QuotaConfig(ledger=self._ledger, max_actions=max_actions, window=window)
+
     def _decide_pre(self, event: HookEvent) -> GateDecision:
         # R1 third slice (ADR 0021): a session fenced via `belay hooks
         # fence` is closed to every surface, checked once here rather than
@@ -190,14 +211,21 @@ class Supervisor:
                 "fence`) -- no new tool calls are accepted for it",
             )
         if event.surface == "shell" and event.tool_name == "Bash":
-            return gate.evaluate(event, self._queue)
+            return gate.evaluate(event, self._queue, quota=self._quota)
         if event.surface == "file":
             return gate.evaluate_file_edit(
-                event, self._queue, self._snapshots, contract_set=self._contract_set
+                event,
+                self._queue,
+                self._snapshots,
+                contract_set=self._contract_set,
+                quota=self._quota,
             )
         if event.surface == "mcp":
-            return gate.evaluate_mcp_call(event, self._queue, contract_set=self._contract_set)
-        return gate.evaluate(event, self._queue)  # its own guard denies unrecognized surfaces
+            return gate.evaluate_mcp_call(
+                event, self._queue, contract_set=self._contract_set, quota=self._quota
+            )
+        # its own guard denies unrecognized surfaces
+        return gate.evaluate(event, self._queue, quota=self._quota)
 
     def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:
         if event.phase == "pre":

@@ -10,6 +10,24 @@ once it reaches 1.0.
 
 ### Added
 
+- **Native Agent Gate per-OS-user quota, R1 fourth slice ([ADR 0023](docs/adr/0023-r1-native-gate-quota.md)):**
+  E15 gives the MCP proxy a per-identity rolling cap on approved
+  irreversible actions; the Native Agent Gate had no equivalent because it
+  has no `--initiated-by` identity concept and a completely different
+  ledger event shape. Resolved both: identity is `HookEvent.os_user`
+  (obtained from the OS itself, not agent-supplied), and a parallel
+  `belay/hooks/quota.py::HookQuotaTracker` counts approved hook-gated
+  actions from `hook_pre_tool_use`/`approval_resolved` events (now
+  carrying `os_user`, an additive ledger change). `belay hooks install
+  --quota-max <N> --quota-window <window>` (opt-in, off by default) makes
+  a *new* pause-worthy action (Bash, native MCP, oversized file edit)
+  hard-deny once an OS user hits the cap within the window, instead of
+  being queued -- unlike E15's allow-to-pause escalation, this escalates
+  pause-to-deny, since everything that needs this check already pauses by
+  default in the hooks world. Persisted the same way ADR 0021's
+  `--contracts` is (a small JSON pointer file the supervisor best-effort
+  loads at construction).
+
 - **Native Agent Gate session fencing, R1 third slice ([ADR 0022](docs/adr/0022-r1-native-gate-session-fencing.md)):**
   the MCP proxy fences a session before a real `belay rewind`
   (`is_fenced()` refuses new steps thereafter); the Native Agent Gate had

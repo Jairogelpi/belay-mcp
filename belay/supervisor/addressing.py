@@ -82,6 +82,11 @@ class SupervisorIdentity:
     #: installs. Stored under `belay_home()`, same private-storage rule as
     #: everything else here.
     contracts_pointer_path: Path
+    #: A small JSON pointer file (`{"max_actions": N, "window": "1d"}`)
+    #: written by `belay hooks install --quota-max/--quota-window` (R1
+    #: fourth slice, ADR 0023). Same absence-means-unchanged rule as
+    #: `contracts_pointer_path`: no file means no quota check at all.
+    quota_config_path: Path
 
 
 def supervisor_identity(
@@ -116,4 +121,5 @@ def supervisor_identity(
         lock_path=home / "run" / f"{install_id}.lock",
         data_path=home / "data" / f"{install_id}.db",
         contracts_pointer_path=home / "data" / f"{install_id}.contracts_path.txt",
+        quota_config_path=home / "data" / f"{install_id}.quota.json",
     )

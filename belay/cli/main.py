@@ -1099,6 +1099,20 @@ def hooks_install(
         "MCP proxy resolves a tool -- no matching contract denies (contract_missing) "
         "instead of allowing by default. Omit for today's unchanged behavior.",
     ),
+    quota_max: int | None = typer.Option(
+        None,
+        "--quota-max",
+        help="Opt-in (R1 fourth slice): once this OS user has this many *approved* "
+        "hook-gated actions within --quota-window, a new pause-worthy action is denied "
+        "outright instead of being queued -- an operator must intervene directly. "
+        "Requires --quota-window too. Omit for today's unchanged behavior (no cap).",
+    ),
+    quota_window: str = typer.Option(
+        "1d",
+        "--quota-window",
+        help="Rolling window for --quota-max, e.g. '1d', '12h', '30m'. Ignored if "
+        "--quota-max is not set.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would change, write nothing."
     ),
@@ -1142,6 +1156,21 @@ def hooks_install(
                 err=True,
             )
             raise typer.Exit(code=1) from None
+
+    if quota_max is not None:
+        from belay.policy.quota import parse_window
+
+        try:
+            parse_window(quota_window)
+        except ValueError as exc:
+            typer.echo(f"error: --quota-window: {exc} -- nothing was written", err=True)
+            raise typer.Exit(code=1) from None
+        if quota_max < 1:
+            typer.echo(
+                f"error: --quota-max must be at least 1, got {quota_max} -- nothing was written",
+                err=True,
+            )
+            raise typer.Exit(code=1)
 
     clients = [c.strip() for c in client.split(",")]
     for c in clients:
@@ -1200,6 +1229,19 @@ def hooks_install(
             f"{contracts_path} -- an undeclared tool denies (contract_missing) instead of "
             f"allowing by default. A running supervisor for this install must be restarted "
             f"(`belay supervisor stop --db {db}`) to pick this up."
+        )
+    if quota_max is not None:
+        import json
+
+        identity.quota_config_path.parent.mkdir(parents=True, exist_ok=True)
+        identity.quota_config_path.write_text(
+            json.dumps({"max_actions": quota_max, "window": quota_window}), encoding="utf-8"
+        )
+        typer.echo(
+            f"once an OS user has {quota_max} approved actions within {quota_window}, a new "
+            f"pause-worthy action denies outright instead of being queued. A running "
+            f"supervisor for this install must be restarted (`belay supervisor stop --db "
+            f"{db}`) to pick this up."
         )
     typer.echo("restart the agent for the hook to take effect")
 

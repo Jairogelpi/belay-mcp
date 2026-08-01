@@ -44,6 +44,7 @@ from belay.approvals.queue import ApprovalQueue
 from belay.contracts.model import ContractSet
 from belay.hooks.decision import DECISION_LOGIC_VERSION, Verdict, classify_bash
 from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
+from belay.hooks.quota import QuotaConfig
 from belay.supervisor.addressing import belay_home
 from belay.supervisor.protocol import HookEvent
 
@@ -143,7 +144,9 @@ def _plan_id_for_mcp(event: HookEvent) -> str:
     return _plan_id("mcp", event, args_json)
 
 
-def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
+def evaluate(
+    event: HookEvent, queue: ApprovalQueue, *, quota: QuotaConfig | None = None
+) -> GateDecision:
     """Bash-specific classification -- `belay/supervisor/server.py`'s
     `_decide_pre` dispatches here only for `surface == "shell"`. Edit/Write/
     NotebookEdit go through `evaluate_file_edit`, native MCP calls through
@@ -152,6 +155,11 @@ def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
     an unexamined tool call on a surface nothing yet classifies. See
     `belay/hooks/decision.py` for why Bash itself defaults to PAUSE, not
     allow.
+
+    `quota` (R1 fourth slice, ADR 0023) only ever escalates a *new* pause
+    to a hard deny -- never touches an existing pending/approved/rejected
+    lookup above. Off by default; every install that doesn't configure a
+    quota is unchanged.
     """
     if event.phase != "pre":
         return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
@@ -214,6 +222,14 @@ def evaluate(event: HookEvent, queue: ApprovalQueue) -> GateDecision:
             approval_id=existing.approval_id,
         )
 
+    if quota is not None and quota.exceeded_for(event.os_user):
+        return GateDecision(
+            "deny",
+            f"belay: quota exceeded -- {event.os_user!r} has reached the configured cap on "
+            "approved actions for this window; no new item was queued, an operator must "
+            "intervene directly (raise the quota, or run the command outside the gate)",
+        )
+
     # No open item (never requested, or the previous one expired -- expired
     # items are terminal too, so a fresh request is the only way forward):
     item = queue.request(
@@ -257,6 +273,7 @@ def evaluate_file_edit(
     snapshots: SnapshotStore,
     *,
     contract_set: ContractSet | None = None,
+    quota: QuotaConfig | None = None,
 ) -> GateDecision:
     """Edit/Write/NotebookEdit calls are ALLOWED by default -- unlike Bash,
     where an unrecognized command pauses. Gating every routine file write
@@ -340,6 +357,14 @@ def evaluate_file_edit(
             approval_id=existing.approval_id,
         )
 
+    if quota is not None and quota.exceeded_for(event.os_user):
+        return GateDecision(
+            "deny",
+            f"belay: quota exceeded -- {event.os_user!r} has reached the configured cap on "
+            "approved actions for this window; no new item was queued, an operator must "
+            "intervene directly",
+        )
+
     item = queue.request(
         session_id=event.host_session_id,
         plan_id=plan_id,
@@ -359,7 +384,11 @@ def evaluate_file_edit(
 
 
 def evaluate_mcp_call(
-    event: HookEvent, queue: ApprovalQueue, *, contract_set: ContractSet | None = None
+    event: HookEvent,
+    queue: ApprovalQueue,
+    *,
+    contract_set: ContractSet | None = None,
+    quota: QuotaConfig | None = None,
 ) -> GateDecision:
     """Claude Code's native `mcp__<server>__<tool>` calls reach whatever MCP
     server is configured directly through the agent's own client -- a
@@ -438,6 +467,14 @@ def evaluate_mcp_call(
             approval_id=existing.approval_id,
         )
 
+    if quota is not None and quota.exceeded_for(event.os_user):
+        return GateDecision(
+            "deny",
+            f"belay: quota exceeded -- {event.os_user!r} has reached the configured cap on "
+            "approved actions for this window; no new item was queued, an operator must "
+            "intervene directly",
+        )
+
     item = queue.request(
         session_id=event.host_session_id,
         plan_id=plan_id,
@@ -478,7 +515,13 @@ def pre_event_evidence(event: HookEvent, decision: GateDecision) -> dict[str, An
     verdict -- not a `docs/spec.md` §12.1, which doesn't exist; see
     `docs/adr/0020-extended-requirement-catalog.md`). The caller (the
     supervisor) owns writing this to
-    `LedgerStore`; this function only shapes the payload."""
+    `LedgerStore`; this function only shapes the payload.
+
+    `os_user` (R1 fourth slice, ADR 0023) is recorded here specifically so
+    `belay/hooks/quota.py::HookQuotaTracker` can count one identity's
+    approved actions across the whole ledger without re-deriving it --
+    events are `extra="allow"` (spec §14), so adding this field is a safe,
+    additive change existing readers ignore."""
     return {
         "event_id": event.event_id,
         "host": event.host,
@@ -489,6 +532,7 @@ def pre_event_evidence(event: HookEvent, decision: GateDecision) -> dict[str, An
         "args": event.args,
         "cwd": event.cwd,
         "repo_identity": event.repo_identity,
+        "os_user": event.os_user,
         "verdict": decision.verdict,
         "reason": decision.reason,
         "approval_id": decision.approval_id,
