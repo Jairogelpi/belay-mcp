@@ -228,6 +228,16 @@ before. Off unless you opt in:
 belay hooks install --contracts packs/filesystem/contracts.yaml --yes
 ```
 
+**Session fencing** (R1 third slice, [ADR 0022](docs/adr/0022-r1-native-gate-session-fencing.md)):
+`belay hooks fence <host_session_id>` closes a hook session to every
+surface -- Bash, file edits, native MCP -- the same durable, cross-process
+way `belay rewind` already fences an MCP session. No `unfence`; start a
+new session with the agent instead.
+
+```bash
+belay hooks fence s1 --host claude-code --db belay-hooks.db --yes
+```
+
 #### Live conformance (E18.7): `trust_tier="T1"` for Claude Code's Bash surface
 
 `tests/hooks/test_live_conformance.py` is a real, opt-in (spends real

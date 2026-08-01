@@ -457,12 +457,19 @@ def evaluate_mcp_call(
     )
 
 
-def ledger_session_id(event: HookEvent) -> str:
+def session_key(host: str, host_session_id: str) -> str:
     """Groups every hook event for one host session into its own ledger
     session -- distinct from any `belay run` MCP session_id namespace (the
     `hook-<host>-` prefix), so the two can never collide even if a host
-    happened to mint a session_id shaped like an MCP one."""
-    return f"hook-{event.host}-{event.host_session_id}"
+    happened to mint a session_id shaped like an MCP one. Shared by
+    `ledger_session_id` (below) and `belay hooks fence` (R1 third slice,
+    ADR 0021), which needs to compute the same key from a bare
+    host/host_session_id pair, not a full `HookEvent`."""
+    return f"hook-{host}-{host_session_id}"
+
+
+def ledger_session_id(event: HookEvent) -> str:
+    return session_key(event.host, event.host_session_id)
 
 
 def pre_event_evidence(event: HookEvent, decision: GateDecision) -> dict[str, Any]:

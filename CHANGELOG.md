@@ -10,6 +10,20 @@ once it reaches 1.0.
 
 ### Added
 
+- **Native Agent Gate session fencing, R1 third slice ([ADR 0022](docs/adr/0022-r1-native-gate-session-fencing.md)):**
+  the MCP proxy fences a session before a real `belay rewind`
+  (`is_fenced()` refuses new steps thereafter); the Native Agent Gate had
+  no equivalent at all. `belay hooks fence <host_session_id> --host
+  <host> --db <db>` now writes the same `session_fenced` ledger fact
+  under the identical key `ledger_session_id`/the new shared
+  `session_key()` helper compute, and `Supervisor._decide_pre` checks
+  `is_fenced()` once, before any surface dispatch -- so fencing closes
+  Bash, file edits, and native MCP calls uniformly. No `unfence`; start a
+  new session instead. Found and fixed a real bug while testing this:
+  `_hooks_ledger_for` never created its data directory first (relied on a
+  prior `hooks run`/`hooks install` doing it), which `belay hooks fence`
+  can legitimately be the first command to call.
+
 - **Native Agent Gate contract check, R1 first slice ([ADR 0021](docs/adr/0021-r1-native-gate-contract-check.md)):**
   an audit of `belay/proxy/lifecycle.py` vs. `belay/hooks/gate.py` found the
   MCP proxy denies `contract_missing` for an undeclared tool while the

@@ -526,6 +526,63 @@ class TestMcpCallContractCheckEndToEnd:
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+class TestHooksFence:
+    """R1 third slice (ADR 0021): `belay hooks fence <session>` closes a
+    hook session to every surface, end to end through the real CLI and a
+    real spawned supervisor."""
+
+    def _run_pre(self, tool_name: str, tool_input: dict, session_id: str, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "belay-hooks.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+
+    def test_fence_then_new_bash_call_in_that_session_is_denied(self, tmp_path: Path) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        # Establish the session first (a real Bash call, allowed).
+        out = self._run_pre("Bash", {"command": "git status"}, "s-fence-1", "toolu_pre_fence")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+        fence = runner.invoke(app, ["hooks", "fence", "s-fence-1", "--yes"])
+        assert fence.exit_code == 0, fence.output
+        assert "fenced s-fence-1" in fence.output
+
+        out = self._run_pre("Bash", {"command": "git status"}, "s-fence-1", "toolu_post_fence")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "fenced" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_fencing_one_session_does_not_affect_another(self, tmp_path: Path) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        fence = runner.invoke(app, ["hooks", "fence", "s-fence-2", "--yes"])
+        assert fence.exit_code == 0, fence.output
+
+        out = self._run_pre(
+            "Bash", {"command": "git status"}, "a-different-session", "toolu_unrelated"
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_fencing_an_already_fenced_session_is_a_no_op_not_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        first = runner.invoke(app, ["hooks", "fence", "s-fence-3", "--yes"])
+        assert first.exit_code == 0, first.output
+
+        second = runner.invoke(app, ["hooks", "fence", "s-fence-3", "--yes"])
+        assert second.exit_code == 0, second.output
+        assert "already fenced" in second.output
+
+
 class TestFileEditRewind:
     """E18.3: native Edit/Write calls are captured for rewind, end-to-end
     through the real CLI, two separate `belay hooks run` invocations (pre

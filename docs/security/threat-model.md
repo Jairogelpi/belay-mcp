@@ -143,29 +143,37 @@ where their guarantees actually diverge).
 
 These are **not** the same governance engine. The MCP proxy
 (`belay/proxy/lifecycle.py`) enforces declared `Contract`/`effects` through
-a real `PolicyEngine`, with intent-contract enforcement, per-identity
-quotas, anomaly baselines, and session fencing on every call. The Native
-Agent Gate (`belay/hooks/gate.py`) has none of these: Bash is still
-governed by a static pattern classifier (no `PolicyEngine`). An approval
-granted on one path cannot satisfy the other, even for what a human would
-call the same action.
+a real `PolicyEngine`, with intent-contract enforcement and per-identity
+quotas/anomaly baselines on every call. The Native Agent Gate
+(`belay/hooks/gate.py`) has none of these: Bash is still governed by a
+static pattern classifier (no `PolicyEngine`), and there is still no
+per-identity quota or anomaly-baseline tracking reaching hook-gated
+actions. An approval granted on one path cannot satisfy the other, even
+for what a human would call the same action.
 
-**Two gaps have been closed, opt-in** ([ADR 0021](../adr/0021-r1-native-gate-contract-check.md),
-R1's first slices): `belay hooks install --contracts <file>` makes native
-`Edit`/`Write`/`NotebookEdit` calls resolve against a real `ContractSet`
-the same way the MCP proxy's `resolve()` does -- no matching contract now
-denies (`contract_missing`), instead of the old unconditional allow. The
-same file also reaches native `mcp__server__tool` calls: a declared,
-all-read contract now auto-allows (matching the proxy's own `readOnlyHint`
-rule) instead of pausing unconditionally -- everything else still pauses
-exactly as before, so this only ever narrows the default, never widens
-it. Both are off by default; every install that doesn't pass
-`--contracts` is unchanged. Bash is untouched by these slices and remains
-fully divergent from the proxy path. Until the rest is resolved (tracked
-as open R1 scope), treat the Native Agent Gate as a **materially
-weaker, best-effort** governance layer compared to the MCP proxy —
-appropriate for routine coding-session safety net, not a substitute for
-wrapping a tool server through `belay run` when the stakes are high.
+**Three gaps have been closed** ([ADR 0021](../adr/0021-r1-native-gate-contract-check.md)/
+[ADR 0022](../adr/0022-r1-native-gate-session-fencing.md), R1's first
+slices): `belay hooks install --contracts <file>` (opt-in, off by
+default) makes native `Edit`/`Write`/`NotebookEdit` calls resolve against
+a real `ContractSet` the same way the MCP proxy's `resolve()` does -- no
+matching contract now denies (`contract_missing`), instead of the old
+unconditional allow. The same file also reaches native
+`mcp__server__tool` calls: a declared, all-read contract now auto-allows
+(matching the proxy's own `readOnlyHint` rule) instead of pausing
+unconditionally -- everything else still pauses exactly as before, so
+this only ever narrows the default, never widens it. Separately,
+`belay hooks fence <session>` now closes a hook session to every surface
+(Bash, file edits, native MCP) the same durable, cross-process way
+`belay rewind` already fences an MCP session -- previously there was no
+way to stop a hook session's future actions at all. Bash's governance
+(still a static classifier, no `PolicyEngine`) and quota/anomaly tracking
+are untouched by these slices and remain fully divergent from the proxy
+path -- wiring either in cleanly needs a real design decision about what
+"identity" means for a hook session, tracked as open R1 scope. Until
+that's resolved, treat the Native Agent Gate as a **materially weaker,
+best-effort** governance layer compared to the MCP proxy — appropriate
+for routine coding-session safety net, not a substitute for wrapping a
+tool server through `belay run` when the stakes are high.
 
 ## A note on unformalized invariants
 

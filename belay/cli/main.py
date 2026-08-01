@@ -1463,6 +1463,44 @@ def hooks_rewind(
         raise typer.Exit(code=1)
 
 
+@hooks_app.command("fence")
+def hooks_fence(
+    host_session_id: str = typer.Argument(
+        ..., help="The host session to fence -- see `belay hooks approvals list`'s "
+        "session= column, or a host's own session id."
+    ),
+    host: str = typer.Option(
+        "claude-code", "--host", help="Which host adapter's session this is."
+    ),
+    db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Fence a hook session closed to new actions (R1 third slice, ADR 0021).
+
+    Every surface (Bash, file edits, native MCP calls) is denied for this
+    session from now on -- a ledger fact (`session_fenced`), the same
+    mechanism `belay rewind` already uses to fence an MCP proxy session, so
+    it holds even across a supervisor restart, not just in-process state.
+    There is no `unfence`: start a new session with the agent instead of
+    trying to un-close this one.
+    """
+    from belay.hooks.gate import session_key
+    from belay.rewind.service import is_fenced
+
+    ledger = _hooks_ledger_for(db)
+    session_id = session_key(host, host_session_id)
+    if is_fenced(ledger, session_id):
+        typer.echo(f"{host_session_id} ({host}) is already fenced")
+        return
+
+    typer.echo(f"this will fence {host_session_id} ({host}) -- no new actions will be accepted")
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    ledger.append(session_id, "session_fenced", {})
+    typer.echo(f"fenced {host_session_id} ({host})")
+
+
 hooks_approvals_app = typer.Typer(
     name="approvals",
     help="Review/approve/reject items the Native Agent Gate queued (paused Bash "
@@ -1494,6 +1532,14 @@ def _hooks_ledger_for(db: str) -> LedgerStore:
     from belay.supervisor.addressing import supervisor_identity
 
     data_path = supervisor_identity(Path(db).resolve()).data_path
+    # `Supervisor.__init__` normally creates this directory as a side
+    # effect of a prior `hooks run`/`hooks install` -- but `belay hooks
+    # fence` (R1 third slice) can legitimately be the first hooks command
+    # run for an install (e.g. fencing before an agent ever runs), so this
+    # can't assume the directory already exists (real bug found writing
+    # tests for `hooks fence`: sqlite3.OperationalError, "unable to open
+    # database file").
+    data_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{data_path}", future=True)
     return LedgerStore(engine=engine)
 

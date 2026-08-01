@@ -51,6 +51,7 @@ from belay.hooks import claude_code_adapter, gate
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
 from belay.ledger.store import LedgerStore
+from belay.rewind.service import is_fenced
 from belay.supervisor.addressing import SupervisorIdentity, belay_home
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.idempotency import IdempotencyStore, content_digest, event_key
@@ -176,6 +177,18 @@ class Supervisor:
             return None
 
     def _decide_pre(self, event: HookEvent) -> GateDecision:
+        # R1 third slice (ADR 0021): a session fenced via `belay hooks
+        # fence` is closed to every surface, checked once here rather than
+        # duplicated in each evaluate_*() -- fencing is a ledger fact,
+        # exactly like `belay/rewind/service.py::is_fenced()` already is
+        # for the MCP proxy path, so it holds even across a supervisor
+        # restart, not just in-process state.
+        if is_fenced(self._ledger, gate.session_key(event.host, event.host_session_id)):
+            return GateDecision(
+                "deny",
+                "belay: this session is fenced (closed to new actions by `belay hooks "
+                "fence`) -- no new tool calls are accepted for it",
+            )
         if event.surface == "shell" and event.tool_name == "Bash":
             return gate.evaluate(event, self._queue)
         if event.surface == "file":

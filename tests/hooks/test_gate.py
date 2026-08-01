@@ -31,6 +31,7 @@ from belay.hooks.gate import (
     ledger_session_id,
     post_event_evidence,
     pre_event_evidence,
+    session_key,
 )
 from belay.supervisor.protocol import HookEvent
 from sqlalchemy import create_engine
@@ -600,6 +601,15 @@ class TestLedgerEvidenceHelpers:
     def test_ledger_session_id_is_prefixed_and_namespaced_by_host(self) -> None:
         event = _event("git status", session_id="abc123")
         assert ledger_session_id(event) == "hook-claude-code-abc123"
+
+    def test_session_key_matches_ledger_session_id_for_the_same_event(self) -> None:
+        """`belay hooks fence` (R1 third slice) computes the fencing key from
+        a bare host/host_session_id pair via `session_key`, not a full
+        `HookEvent` -- must match `ledger_session_id`'s own key exactly, or
+        fencing a session by its printed session id would silently fence
+        the wrong ledger key."""
+        event = _event("git status", session_id="abc123")
+        assert session_key(event.host, event.host_session_id) == ledger_session_id(event)
 
     def test_ledger_session_id_never_collides_across_hosts_for_the_same_session_string(
         self,
