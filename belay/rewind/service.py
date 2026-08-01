@@ -57,7 +57,7 @@ from belay.approvals.queue import ApprovalQueue
 from belay.canonical import canonical_bytes, sha256_hex
 from belay.contracts.expressions import evaluate, parse
 from belay.contracts.model import Contract, ContractSet
-from belay.ledger.model import Event
+from belay.ledger.model import STEP_COMMITTED, STEP_FAILED, STEP_INDETERMINATE, Event
 from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
 from belay.planner.model import EffectEstimate, Plan
@@ -325,8 +325,8 @@ class RewindService:
             if to_step is not None and step_seq <= to_step:
                 continue
             types = by_step[step_seq]
-            committed = "step_committed" in types
-            indeterminate = "step_indeterminate" in types
+            committed = STEP_COMMITTED in types
+            indeterminate = STEP_INDETERMINATE in types
             already_done = "compensation_executed" in types or "compensation_failed" in types
             if not committed and not indeterminate:
                 continue  # never reached a reportable state (e.g. plain step_failed)
@@ -600,7 +600,7 @@ class RewindService:
                 if not passed:
                     self.ledger.append(
                         session_id,
-                        "step_failed",
+                        STEP_FAILED,
                         {
                             "step_seq": step.step_seq,
                             "verification": step.verification,

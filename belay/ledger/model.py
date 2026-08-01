@@ -36,6 +36,19 @@ EVENT_TYPES: tuple[str, ...] = (
 # Sentinel prev_hash for the first event of a session (spec §9.1 chain root).
 GENESIS_HASH: str = "0" * 64
 
+# R1.7.2 (ADR 0025): individually-named constants for the three step-outcome
+# event types, so the writers (belay/executor/saga.py,
+# belay/executor/recovery.py) and the readers that classify by them
+# (belay/rewind/service.py, belay/cli/causal.py) share one canonical
+# source instead of each independently typing out the same bare string --
+# a typo in any one of those sites used to silently break the connection
+# with no way for a type checker to catch it. Does NOT restructure
+# `EVENT_TYPES` above (spec §9.1's normative list, left untouched) --
+# these are additive aliases into it, not a replacement.
+STEP_COMMITTED = "step_committed"
+STEP_FAILED = "step_failed"
+STEP_INDETERMINATE = "step_indeterminate"
+
 
 class Event(BaseModel):
     """Ledger event envelope (spec §9.1).

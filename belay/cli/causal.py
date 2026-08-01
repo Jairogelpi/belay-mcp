@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from belay.ledger.model import Event
+from belay.ledger.model import STEP_COMMITTED, STEP_FAILED, STEP_INDETERMINATE, Event
 
 
 @dataclass
@@ -65,7 +65,7 @@ def build_causal_graph(events: list[Event]) -> list[CausalNode]:
             captures[s] = event.payload.get("snapshot") or {}
         elif event.type == "policy_evaluated":
             policies[s] = event.payload
-        elif event.type in ("step_committed", "step_failed", "step_indeterminate"):
+        elif event.type in (STEP_COMMITTED, STEP_FAILED, STEP_INDETERMINATE):
             statuses[s] = event.type
         elif event.type == "compensation_registered":
             compensations[s] = event.payload.get("tool", "")

@@ -36,6 +36,7 @@ from belay.contracts.expressions import Scope, evaluate, parse
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
 from belay.executor.idempotency import IdempotencyStore
+from belay.ledger.model import STEP_COMMITTED, STEP_FAILED
 from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
 
@@ -243,7 +244,7 @@ class SagaExecutor:
 
             # 6. committed
             self.ledger.append(
-                session_id, "step_committed", {"tool": tool}, step_seq=step_seq, set_hash=set_hash
+                session_id, STEP_COMMITTED, {"tool": tool}, step_seq=step_seq, set_hash=set_hash
             )
             _fire(on_stage, "committed")
 
@@ -251,7 +252,7 @@ class SagaExecutor:
         except BelayError as exc:
             self.ledger.append(
                 session_id,
-                "step_failed",
+                STEP_FAILED,
                 {"tool": tool, "error": exc.to_dict()},
                 step_seq=step_seq,
                 set_hash=set_hash,
@@ -260,7 +261,7 @@ class SagaExecutor:
         except Exception as exc:
             self.ledger.append(
                 session_id,
-                "step_failed",
+                STEP_FAILED,
                 {"tool": tool, "error": str(exc)},
                 step_seq=step_seq,
                 set_hash=set_hash,

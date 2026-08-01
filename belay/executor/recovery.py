@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from belay.executor.idempotency import IdempotencyStore
+from belay.ledger.model import STEP_INDETERMINATE
 from belay.ledger.store import LedgerStore
 
 #: Re-issue `(tool, args, idempotency_key)` against the upstream and return its
@@ -83,7 +84,7 @@ async def recover_session(
         else:
             ledger.append(
                 session_id,
-                "step_indeterminate",
+                STEP_INDETERMINATE,
                 {
                     "tool": tool,
                     "reason": "no idempotency_key declared; cannot safely reconcile with upstream",

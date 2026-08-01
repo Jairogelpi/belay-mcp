@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed (design). One concrete slice (R1.7.1, below) accepted and
-implemented alongside this ADR. The remaining slices (R1.7.2-R1.7.4) are
-sequenced, not built yet.
+Proposed (design). Two concrete slices implemented alongside this ADR:
+R1.7.1 (below) and R1.7.2 (below, narrower in scope than first sketched
+-- see its own note). R1.7.3-R1.7.4 remain sequenced, not built yet.
 
 ## Context
 
@@ -81,11 +81,32 @@ sequenced as R1.9 in the broader roadmap, out of scope for R1.7.
 `consumed_policy_hash` fields exactly as R1.6 built them; no new type.
 **R1.7.1 (this slice) is the first non-hooks consumer** -- see below.
 
-**`OutcomeEvidence`** (not built this slice) -- unify
-`step_committed`/`step_failed`/`step_indeterminate` into one shared
-`Outcome` type both `SagaExecutor` and a future hooks `PostToolUse`
-handler write to, replacing the three disconnected string-literal sites
-above. Sequenced as R1.7.2.
+**`OutcomeEvidence`** -- R1.7.2 landed a first, narrower slice of this
+than originally sketched above. Closer inspection while implementing it
+found the three "step-outcome" literals were never actually the same
+type wearing three names -- `RecoveryOutcome.status` (`reconciled` |
+`indeterminate`), `RewindStepPlan.status`/`StepStatus` (`reversible` |
+`irreversible` | `conditional_unmet` | `indeterminate` | `no_op`), and
+`CompensationOutcome.status`/`OutcomeStatus` (`compensated` |
+`verification_failed` | `compensation_failed` | `skipped` | `paused` |
+`denied`) each answer a genuinely different question (did recovery
+resolve this step? / what's this step's reversibility classification?
+/ what happened when we tried to compensate it?) -- collapsing them into
+one `Outcome` enum would conflate three distinct concerns, not unify one.
+The real, narrower duplication was the bare string `"step_indeterminate"`
+(and its siblings `"step_committed"`/`"step_failed"`) typed out
+independently at every producer/consumer site with no compiler-enforced
+link between them. **Fixed as R1.7.2**: `belay/ledger/model.py` now
+exports `STEP_COMMITTED`/`STEP_FAILED`/`STEP_INDETERMINATE` as named
+constants (additive aliases into `EVENT_TYPES`, spec §9.1's list left
+untouched), referenced from every writer (`belay/executor/saga.py`,
+`belay/executor/recovery.py`) and every classifying reader
+(`belay/rewind/service.py`, `belay/cli/causal.py`,
+`belay/proxy/lifecycle.py`'s `step_failed` appends) instead of the bare
+strings. A real `OutcomeEvidence` type spanning both engines (hooks has
+no equivalent to any of these three today) remains separately scoped,
+larger follow-up work -- not attempted here, and not the same task as
+"remove the string-literal duplication."
 
 **`TransactionReceipt`** (not built this slice) -- extend
 `belay/ledger/signing.py::SignedEvidence` with a `policy_hash` field
@@ -120,11 +141,13 @@ session_started, contract_set_pinned            (once per session)
   -> compensation_registered -> step_committed | step_failed
 ```
 
-Formalizing this as a real `TransactionState` enum is deferred until
-`OutcomeEvidence` unification (R1.7.2) gives `indeterminate`/`compensated`
-a proper home -- adding an enum today would either omit those states or
-duplicate the three-way string-literal split this ADR is trying to
-retire.
+Formalizing this as a real `TransactionState` enum is deferred until a
+genuine `OutcomeEvidence` type (spanning both engines, still R1.7.3+
+scope) gives `indeterminate`/`compensated` a proper shared home --
+R1.7.2 (below) only removed the string-literal duplication around the
+existing three separate status concepts, it did not merge them into one,
+so adding a `TransactionState` enum today would still have to pick one of
+those three pre-existing, differently-shaped status types to build on.
 
 ### R1.7.1 (this slice): MCP proxy adopts the same Capability Lease
 
@@ -159,6 +182,32 @@ human actually approved. Fixed by calling the same
   resource as if it were still fresh" for the saga executor's own
   idempotency keys) rather than an 18th registered code.
 
+### R1.7.2 (this slice, revised scope): named step-outcome constants
+
+Implementing the `OutcomeEvidence` unification sketched earlier in this
+ADR found the three "step-outcome" status types were never duplicates of
+each other -- each answers a different question (see the `OutcomeEvidence`
+entry above for the full comparison). The actual, narrower duplication
+was the bare strings `"step_committed"`/`"step_failed"`/
+`"step_indeterminate"` typed out independently at every producer and
+consumer site, with no compiler-enforced link between them -- a typo at
+any one site would silently break the connection. Fixed:
+
+- `belay/ledger/model.py` gains `STEP_COMMITTED`/`STEP_FAILED`/
+  `STEP_INDETERMINATE` constants -- additive aliases into `EVENT_TYPES`
+  (spec §9.1's normative list, left untouched as a tuple), not a
+  replacement for it.
+- Every writer (`belay/executor/saga.py`'s committed/failed appends,
+  `belay/executor/recovery.py`'s indeterminate append,
+  `belay/proxy/lifecycle.py`'s three `step_failed` appends) and every
+  classifying reader (`belay/rewind/service.py::build_plan`'s
+  `committed`/`indeterminate` checks, `belay/cli/causal.py`'s status
+  fold) now reference the shared constants instead of the bare strings.
+- Pure refactor, zero behavior change -- confirmed by the full test suite
+  passing unchanged (no existing test needed updating), plus two new
+  sanity tests (`tests/ledger/test_model.py`) asserting the constants'
+  string values and that each is a real member of `EVENT_TYPES`.
+
 ## Consequences
 
 - Both engines now share one real piece of the eventual canonical
@@ -168,10 +217,17 @@ human actually approved. Fixed by calling the same
 - `consumed_by_host="mcp"` and a real `policy_hash` are now recorded for
   every MCP-side consumption, giving `belay approvals`/future receipt
   tooling a uniform audit trail across both engines.
+- `belay/ledger/model.py::STEP_COMMITTED`/`STEP_FAILED`/`STEP_INDETERMINATE`
+  are now the one place every step-outcome event type is spelled --
+  future code should reference these rather than reintroducing bare
+  string literals.
 - Does **not** yet unify `ActionEnvelope`, `ActionPlan` production, or
-  `OutcomeEvidence`/`indeterminate` -- those remain real, separately
-  scoped follow-up work (R1.7.2-R1.7.4), not silently implied done by
-  this slice's title.
+  produce a real cross-engine `OutcomeEvidence` type -- those remain real,
+  separately scoped follow-up work (R1.7.3-R1.7.4), not silently implied
+  done by this slice's title. R1.7.2 specifically turned out to be
+  narrower than first sketched (see its own section above) -- the three
+  step-outcome status types (`RecoveryOutcome`/`StepStatus`/
+  `OutcomeStatus`) remain three distinct types on purpose, not merged.
 - `idempotency_conflict` is now used for two related-but-distinct things
   (the saga executor's upstream-call idempotency keys, and approval
   consumption) -- both mean "a resource that must be used at most once
@@ -190,3 +246,9 @@ changes (verified by reading it first -- the fix is additive to a third
 call, not a behavior change to the first two); one test confirming
 `consumed_by_host`/`consumed_policy_hash` land on the `ApprovalItem`
 after a real `govern_and_execute` consumes it.
+
+`tests/ledger/test_model.py` (new, R1.7.2): the three constants' string
+values, and that each is a real member of `EVENT_TYPES`. Full existing
+suite re-run unchanged (821 fast tests) to confirm the constant swap is
+a pure refactor -- no test needed updating, since the actual event-type
+strings written/read never changed.

@@ -20,6 +20,7 @@ from belay.clock import Clock, SystemClock
 from belay.contracts.model import Contract, ContractSet
 from belay.errors import BelayError
 from belay.executor.saga import SagaExecutor
+from belay.ledger.model import STEP_FAILED
 from belay.ledger.redact import redact
 from belay.ledger.store import LedgerStore
 from belay.planner.model import NativeDryRunCaller, Plan, PlanningSession
@@ -364,7 +365,7 @@ class Lifecycle:
             if violation is not None:
                 self.ledger.append(
                     self.session_id,
-                    "step_failed",
+                    STEP_FAILED,
                     {
                         "tool": tool,
                         "args": args,
@@ -393,7 +394,7 @@ class Lifecycle:
         except BelayError as exc:
             self.ledger.append(
                 self.session_id,
-                "step_failed",
+                STEP_FAILED,
                 redact(
                     {
                         "tool": tool,
@@ -486,7 +487,7 @@ class Lifecycle:
             )
             self.ledger.append(
                 self.session_id,
-                "step_failed",
+                STEP_FAILED,
                 redact(
                     {"tool": tool, "args": args, "error": deny_exc.to_dict()},
                     resolved.contract,

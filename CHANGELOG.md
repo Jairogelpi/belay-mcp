@@ -30,6 +30,22 @@ once it reaches 1.0.
   concrete step, not the whole thing; R1.7.2-R1.7.4 are sequenced, not
   built yet.
 
+- **R1.7.2 -- named step-outcome event-type constants:** implementing the
+  `OutcomeEvidence` unification ADR 0025 sketched found the three
+  "step-outcome" status types (`RecoveryOutcome.status`,
+  `RewindStepPlan.status`/`StepStatus`, `CompensationOutcome.status`/
+  `OutcomeStatus`) each answer a genuinely different question -- merging
+  them would conflate three concerns, not unify one. The real, narrower
+  duplication was `"step_committed"`/`"step_failed"`/`"step_indeterminate"`
+  typed out independently at every producer/consumer site with no
+  compiler-enforced link. Fixed: `belay/ledger/model.py` now exports
+  `STEP_COMMITTED`/`STEP_FAILED`/`STEP_INDETERMINATE` (additive aliases
+  into `EVENT_TYPES`), referenced from every writer
+  (`belay/executor/saga.py`, `belay/executor/recovery.py`,
+  `belay/proxy/lifecycle.py`) and reader (`belay/rewind/service.py`,
+  `belay/cli/causal.py`) instead of bare strings. Pure refactor -- the
+  full test suite passed unchanged, confirming no behavior moved.
+
 - **R1.6 correctness lock -- six concrete gaps closed before any further
   parallel hook-specific tracking is added on top of R1's five slices:**
   - **Fail-closed configured policy:** `Supervisor._load_contract_set`/
