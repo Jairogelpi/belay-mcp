@@ -670,6 +670,76 @@ class TestHooksQuota:
         assert not _settings_path(tmp_path).is_file()
 
 
+class TestHooksAllowlistExtra:
+    """R1 fifth slice (ADR 0024): `belay hooks install --allowlist-extra
+    <file>`, end to end through the real CLI and a real spawned
+    supervisor."""
+
+    def _run_pre_bash(self, command: str, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "belay-hooks.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+
+    def test_command_matching_a_configured_entry_is_allowed(self, tmp_path: Path) -> None:
+        allowlist = tmp_path / "extra.txt"
+        allowlist.write_text("npm run lint\n", encoding="utf-8")
+        result = runner.invoke(
+            app, ["hooks", "install", "--allowlist-extra", str(allowlist), "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "will now be allowed" in result.output
+
+        out = self._run_pre_bash("npm run lint", "toolu_allowlist_ok")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert "operator-configured" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_command_not_matching_any_entry_still_pauses(self, tmp_path: Path) -> None:
+        allowlist = tmp_path / "extra.txt"
+        allowlist.write_text("npm run lint\n", encoding="utf-8")
+        assert runner.invoke(
+            app, ["hooks", "install", "--allowlist-extra", str(allowlist), "--yes"]
+        ).exit_code == 0
+
+        out = self._run_pre_bash("rm -rf /tmp/x", "toolu_allowlist_unrelated")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_without_allowlist_extra_configured_behavior_is_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        # no --allowlist-extra
+        assert runner.invoke(app, ["hooks", "install", "--yes"]).exit_code == 0
+        out = self._run_pre_bash("npm run lint", "toolu_no_allowlist")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_invalid_allowlist_entry_is_rejected_at_install_time(self, tmp_path: Path) -> None:
+        allowlist = tmp_path / "bad.txt"
+        allowlist.write_text("npm run lint; rm -rf /\n", encoding="utf-8")
+        result = runner.invoke(
+            app, ["hooks", "install", "--allowlist-extra", str(allowlist), "--yes"]
+        )
+        assert result.exit_code != 0
+        assert not _settings_path(tmp_path).is_file()
+
+    def test_nonexistent_allowlist_file_is_rejected_at_install_time(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["hooks", "install", "--allowlist-extra", str(tmp_path / "missing.txt"), "--yes"],
+        )
+        assert result.exit_code != 0
+        assert not _settings_path(tmp_path).is_file()
+
+
 class TestFileEditRewind:
     """E18.3: native Edit/Write calls are captured for rewind, end-to-end
     through the real CLI, two separate `belay hooks run` invocations (pre

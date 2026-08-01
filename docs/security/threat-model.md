@@ -150,12 +150,13 @@ classifier (no `PolicyEngine`), and no anomaly-baseline tracking at all.
 An approval granted on one path cannot satisfy the other, even for what a
 human would call the same action.
 
-**Four gaps have been closed** ([ADR 0021](../adr/0021-r1-native-gate-contract-check.md)/
+**Five gaps have been closed** ([ADR 0021](../adr/0021-r1-native-gate-contract-check.md)/
 [ADR 0022](../adr/0022-r1-native-gate-session-fencing.md)/
-[ADR 0023](../adr/0023-r1-native-gate-quota.md), R1's slices so far):
-`belay hooks install --contracts <file>` (opt-in, off by default) makes
-native `Edit`/`Write`/`NotebookEdit` calls resolve against a real
-`ContractSet` the same way the MCP proxy's `resolve()` does -- no
+[ADR 0023](../adr/0023-r1-native-gate-quota.md)/
+[ADR 0024](../adr/0024-r1-native-gate-configurable-allowlist.md), R1's
+slices so far): `belay hooks install --contracts <file>` (opt-in, off by
+default) makes native `Edit`/`Write`/`NotebookEdit` calls resolve against
+a real `ContractSet` the same way the MCP proxy's `resolve()` does -- no
 matching contract now denies (`contract_missing`), instead of the old
 unconditional allow. The same file also reaches native
 `mcp__server__tool` calls: a declared, all-read contract now auto-allows
@@ -168,17 +169,23 @@ fences an MCP session. `belay hooks install --quota-max/--quota-window`
 caps how many approved risky actions one OS user (identity, for the
 hooks world -- see ADR 0023 for why this differs from the MCP proxy's
 `--initiated-by`) can accumulate per window before a new pause escalates
-to a hard deny.
+to a hard deny. `belay hooks install --allowlist-extra <file>` lets an
+operator add their own literal, additive entries to Bash's safe-read
+allowlist -- checked after the built-in patterns and after the same
+shell-metacharacter guard, so it can only turn a PAUSE into an ALLOW for
+an entry the operator explicitly wrote, never a bypass route.
 
-Bash's governance (still a static classifier, no `PolicyEngine`) and
-anomaly-baseline tracking are untouched and remain fully divergent from
-the proxy path -- extending Bash needs a way to assign policy-evaluable
-"effects" to arbitrary shell text, a genuinely different design problem
-from the contract/quota slices above, tracked as open R1 scope. Until
-that's resolved, treat the Native Agent Gate as a **materially weaker,
-best-effort** governance layer compared to the MCP proxy — appropriate
-for routine coding-session safety net, not a substitute for wrapping a
-tool server through `belay run` when the stakes are high.
+Bash's core governance (still a static classifier, no `PolicyEngine` --
+the extra allowlist above extends *what* it recognizes as safe, not *how*
+it reasons about risk) and anomaly-baseline tracking are untouched and
+remain fully divergent from the proxy path -- giving Bash a real
+`PolicyEngine` needs a way to assign policy-evaluable "effects" to
+arbitrary shell text, a genuinely different design problem from every
+slice above, tracked as open R1 scope. Until that's resolved, treat the
+Native Agent Gate as a **materially weaker, best-effort** governance
+layer compared to the MCP proxy — appropriate for routine coding-session
+safety net, not a substitute for wrapping a tool server through `belay
+run` when the stakes are high.
 
 ## A note on unformalized invariants
 

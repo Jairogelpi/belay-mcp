@@ -49,6 +49,7 @@ from belay.contracts.loader import load_contract_set
 from belay.contracts.model import ContractSet
 from belay.errors import BelayError
 from belay.hooks import claude_code_adapter, gate
+from belay.hooks.decision import ExtraAllowlist, load_extra_allowlist
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
 from belay.hooks.quota import QuotaConfig
@@ -158,6 +159,7 @@ class Supervisor:
         self._pre_times_lock = threading.Lock()
         self._contract_set = self._load_contract_set()
         self._quota = self._load_quota_config()
+        self._extra_allowlist = self._load_extra_allowlist()
 
     def _load_contract_set(self) -> ContractSet | None:
         """`None` (the default) is unchanged legacy behavior -- this only
@@ -197,6 +199,24 @@ class Supervisor:
             return None
         return QuotaConfig(ledger=self._ledger, max_actions=max_actions, window=window)
 
+    def _load_extra_allowlist(self) -> ExtraAllowlist:
+        """`()` (the default) means no operator-configured entries --
+        exactly `belay/hooks/decision.py::classify_bash`'s own default.
+        Same best-effort, fail-open-to-no-extra-entries posture as
+        `_load_contract_set`/`_load_quota_config`: a missing or invalid
+        pointed-to file falls back to nothing extra allowed, never to a
+        crash or a fail-closed deny of Bash entirely."""
+        pointer = self._identity.extra_allowlist_pointer_path
+        if not pointer.is_file():
+            return ()
+        try:
+            allowlist_path = pointer.read_text(encoding="utf-8").strip()
+            if not allowlist_path:
+                return ()
+            return load_extra_allowlist(allowlist_path)
+        except (OSError, ValueError):
+            return ()
+
     def _decide_pre(self, event: HookEvent) -> GateDecision:
         # R1 third slice (ADR 0021): a session fenced via `belay hooks
         # fence` is closed to every surface, checked once here rather than
@@ -211,7 +231,9 @@ class Supervisor:
                 "fence`) -- no new tool calls are accepted for it",
             )
         if event.surface == "shell" and event.tool_name == "Bash":
-            return gate.evaluate(event, self._queue, quota=self._quota)
+            return gate.evaluate(
+                event, self._queue, quota=self._quota, extra_allowlist=self._extra_allowlist
+            )
         if event.surface == "file":
             return gate.evaluate_file_edit(
                 event,
@@ -225,7 +247,9 @@ class Supervisor:
                 event, self._queue, contract_set=self._contract_set, quota=self._quota
             )
         # its own guard denies unrecognized surfaces
-        return gate.evaluate(event, self._queue, quota=self._quota)
+        return gate.evaluate(
+            event, self._queue, quota=self._quota, extra_allowlist=self._extra_allowlist
+        )
 
     def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:
         if event.phase == "pre":

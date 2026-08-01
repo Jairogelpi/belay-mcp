@@ -87,6 +87,11 @@ class SupervisorIdentity:
     #: fourth slice, ADR 0023). Same absence-means-unchanged rule as
     #: `contracts_pointer_path`: no file means no quota check at all.
     quota_config_path: Path
+    #: A one-line pointer file (plain text: the absolute path to an
+    #: operator's extra-safe-Bash-commands file) written by `belay hooks
+    #: install --allowlist-extra <file>` (R1 fifth slice, ADR 0024). Same
+    #: absence-means-unchanged rule as `contracts_pointer_path`.
+    extra_allowlist_pointer_path: Path
 
 
 def supervisor_identity(
@@ -122,4 +127,5 @@ def supervisor_identity(
         data_path=home / "data" / f"{install_id}.db",
         contracts_pointer_path=home / "data" / f"{install_id}.contracts_path.txt",
         quota_config_path=home / "data" / f"{install_id}.quota.json",
+        extra_allowlist_pointer_path=home / "data" / f"{install_id}.allowlist_path.txt",
     )

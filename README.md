@@ -248,6 +248,18 @@ directly. Off unless you opt in:
 belay hooks install --quota-max 20 --quota-window 1d --yes
 ```
 
+**Extra Bash allowlist** (R1 fifth slice, [ADR 0024](docs/adr/0024-r1-native-gate-configurable-allowlist.md)):
+add your own literal, safe commands to the built-in read-only allowlist
+-- not a `PolicyEngine` for Bash, just an extensible list of commands your
+project already trusts. Entries are checked after the same
+shell-metacharacter guard everything else is, so they can never become a
+chaining/redirection bypass:
+
+```bash
+echo "npm run lint" > my-safe-commands.txt
+belay hooks install --allowlist-extra my-safe-commands.txt --yes
+```
+
 #### Live conformance (E18.7): `trust_tier="T1"` for Claude Code's Bash surface
 
 `tests/hooks/test_live_conformance.py` is a real, opt-in (spends real

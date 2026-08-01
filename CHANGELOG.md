@@ -10,6 +10,24 @@ once it reaches 1.0.
 
 ### Added
 
+- **Operator-configurable extra Bash allowlist, R1 fifth slice ([ADR 0024](docs/adr/0024-r1-native-gate-configurable-allowlist.md)):**
+  Bash's remaining gap (still a static classifier, no `PolicyEngine`) was
+  explicitly scoped as a genuinely different problem from the
+  contract/quota slices -- commands are arbitrary shell text, not a fixed
+  tool name, so there's no stable identity to resolve a `Contract`
+  against. What *is* a bounded slice: the hardcoded safe-read allowlist
+  (`ls`, `cat`, `git status`, etc.) is now extensible. `belay hooks
+  install --allowlist-extra <file>` (opt-in, off by default) parses a
+  plain-text file of literal command prefixes (never regex -- an
+  operator-authored regex risks an accidental hole in a security
+  allowlist); an entry only ever turns a PAUSE into an ALLOW, checked
+  after the built-in patterns and after the same shell-metacharacter
+  guard every command already passes through, so an entry can never
+  itself become a chaining/redirection/substitution bypass. This does
+  **not** give Bash a `PolicyEngine` or any reversibility/blast-radius
+  reasoning -- it's a configurable allowlist, nothing more; extending Bash
+  to real policy-evaluated governance remains explicitly out of scope.
+
 - **Native Agent Gate per-OS-user quota, R1 fourth slice ([ADR 0023](docs/adr/0023-r1-native-gate-quota.md)):**
   E15 gives the MCP proxy a per-identity rolling cap on approved
   irreversible actions; the Native Agent Gate had no equivalent because it

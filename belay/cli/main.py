@@ -1113,6 +1113,15 @@ def hooks_install(
         help="Rolling window for --quota-max, e.g. '1d', '12h', '30m'. Ignored if "
         "--quota-max is not set.",
     ),
+    allowlist_extra: str | None = typer.Option(
+        None,
+        "--allowlist-extra",
+        help="Opt-in (R1 fifth slice): a text file, one literal safe command prefix per "
+        "line ('#'-comments/blank lines ignored). A Bash command exactly matching an "
+        "entry (or that entry followed by more arguments) is allowed instead of pausing "
+        "-- additive only, never affects the built-in allowlist or the shell-metacharacter "
+        "guard. Omit for today's unchanged behavior.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would change, write nothing."
     ),
@@ -1171,6 +1180,28 @@ def hooks_install(
                 err=True,
             )
             raise typer.Exit(code=1)
+
+    allowlist_extra_path: Path | None = None
+    if allowlist_extra is not None:
+        from belay.hooks.decision import load_extra_allowlist
+
+        allowlist_extra_path = Path(allowlist_extra).resolve()
+        try:
+            load_extra_allowlist(allowlist_extra_path)
+        except ValueError as exc:
+            typer.echo(
+                f"error: --allowlist-extra {allowlist_extra_path} is invalid: {exc} -- "
+                "nothing was written",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(
+                f"error: could not read --allowlist-extra {allowlist_extra_path}: {exc} -- "
+                "nothing was written",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
 
     clients = [c.strip() for c in client.split(",")]
     for c in clients:
@@ -1242,6 +1273,16 @@ def hooks_install(
             f"pause-worthy action denies outright instead of being queued. A running "
             f"supervisor for this install must be restarted (`belay supervisor stop --db "
             f"{db}`) to pick this up."
+        )
+    if allowlist_extra_path is not None:
+        identity.extra_allowlist_pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        identity.extra_allowlist_pointer_path.write_text(
+            str(allowlist_extra_path), encoding="utf-8"
+        )
+        typer.echo(
+            f"Bash commands matching an entry in {allowlist_extra_path} will now be allowed "
+            f"instead of pausing. A running supervisor for this install must be restarted "
+            f"(`belay supervisor stop --db {db}`) to pick this up."
         )
     typer.echo("restart the agent for the hook to take effect")
 

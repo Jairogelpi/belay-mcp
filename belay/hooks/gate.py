@@ -42,7 +42,7 @@ from typing import Any, Literal
 
 from belay.approvals.queue import ApprovalQueue
 from belay.contracts.model import ContractSet
-from belay.hooks.decision import DECISION_LOGIC_VERSION, Verdict, classify_bash
+from belay.hooks.decision import DECISION_LOGIC_VERSION, ExtraAllowlist, Verdict, classify_bash
 from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
 from belay.hooks.quota import QuotaConfig
 from belay.supervisor.addressing import belay_home
@@ -145,7 +145,11 @@ def _plan_id_for_mcp(event: HookEvent) -> str:
 
 
 def evaluate(
-    event: HookEvent, queue: ApprovalQueue, *, quota: QuotaConfig | None = None
+    event: HookEvent,
+    queue: ApprovalQueue,
+    *,
+    quota: QuotaConfig | None = None,
+    extra_allowlist: ExtraAllowlist = (),
 ) -> GateDecision:
     """Bash-specific classification -- `belay/supervisor/server.py`'s
     `_decide_pre` dispatches here only for `surface == "shell"`. Edit/Write/
@@ -160,6 +164,12 @@ def evaluate(
     to a hard deny -- never touches an existing pending/approved/rejected
     lookup above. Off by default; every install that doesn't configure a
     quota is unchanged.
+
+    `extra_allowlist` (R1 fifth slice, ADR 0024) is opt-in, operator-
+    configured additional safe commands (see
+    `belay/hooks/decision.py::load_extra_allowlist`) -- only ever turns a
+    PAUSE into an ALLOW for an entry the operator explicitly listed,
+    never the reverse. Empty by default, fully unchanged behavior.
     """
     if event.phase != "pre":
         return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
@@ -183,7 +193,7 @@ def evaluate(
     if not isinstance(command, str):
         return GateDecision("deny", "belay: Bash call had no 'command' string")
 
-    decision = classify_bash(command)
+    decision = classify_bash(command, extra_allowlist=extra_allowlist)
     if decision.verdict is Verdict.ALLOW:
         if _touches_belay_home(command, event.cwd):
             return GateDecision(

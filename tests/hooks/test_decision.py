@@ -12,8 +12,19 @@ the start of the string.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
-from belay.hooks.decision import Verdict, classify_bash
+from belay.hooks.decision import ExtraAllowlist, Verdict, classify_bash, load_extra_allowlist
+
+
+def _write_and_load(tmp_path: Path, text: str) -> ExtraAllowlist:
+    """Test-only convenience: `load_extra_allowlist` reads a real file, so
+    write `text` to one under pytest's own `tmp_path` rather than
+    duplicating its line-parsing logic here."""
+    path = tmp_path / "extra.txt"
+    path.write_text(text, encoding="utf-8")
+    return load_extra_allowlist(path)
 
 
 @pytest.mark.parametrize(
@@ -116,3 +127,88 @@ def test_classify_bash_never_raises_on_garbage_input() -> None:
     for garbage in ["\x00\x01\x02", "a" * 100_000, "🔥" * 50, None]:  # type: ignore[list-item]
         decision = classify_bash(garbage)  # type: ignore[arg-type]
         assert decision.verdict == Verdict.PAUSE
+
+
+class TestExtraAllowlist:
+    """R1 fifth slice (ADR 0024): operator-configured additional safe
+    commands. Only ever turns a PAUSE into an ALLOW, never the reverse --
+    `extra_allowlist=()` (the default) is fully unchanged legacy
+    behavior."""
+
+    def test_empty_extra_allowlist_is_unchanged_default(self) -> None:
+        decision = classify_bash("npm run lint")
+        assert decision.verdict == Verdict.PAUSE
+
+    def test_exact_match_of_an_extra_entry_allows(self, tmp_path: Path) -> None:
+        extra = _write_and_load(tmp_path, "npm run lint")
+        decision = classify_bash("npm run lint", extra_allowlist=extra)
+        assert decision.verdict == Verdict.ALLOW
+        assert "operator-configured" in decision.reason
+
+    def test_extra_entry_with_trailing_arguments_also_allows(self, tmp_path: Path) -> None:
+        extra = _write_and_load(tmp_path, "npm run lint")
+        decision = classify_bash("npm run lint --fix", extra_allowlist=extra)
+        assert decision.verdict == Verdict.ALLOW
+
+    def test_extra_entry_as_a_bare_prefix_of_a_different_word_does_not_match(
+        self, tmp_path: Path
+    ) -> None:
+        """"npm run lint" must not match "npm run linter" -- the boundary
+        check requires whitespace after the entry, not just any suffix."""
+        extra = _write_and_load(tmp_path, "npm run lint")
+        decision = classify_bash("npm run linter", extra_allowlist=extra)
+        assert decision.verdict == Verdict.PAUSE
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm run lint; rm -rf /",
+            "npm run lint && rm -rf /",
+            "npm run lint | sh",
+            "npm run lint `rm -rf /`",
+            "npm run lint $(rm -rf /)",
+        ],
+    )
+    def test_extra_entry_with_shell_chaining_still_pauses(
+        self, command: str, tmp_path: Path
+    ) -> None:
+        """The same metacharacter guard applies before extra entries are
+        ever consulted -- an operator-trusted prefix is not a license to
+        chain arbitrary commands after it."""
+        extra = _write_and_load(tmp_path, "npm run lint")
+        decision = classify_bash(command, extra_allowlist=extra)
+        assert decision.verdict == Verdict.PAUSE
+
+    def test_load_extra_allowlist_skips_blank_lines_and_comments(self, tmp_path: Path) -> None:
+        path = tmp_path / "extra.txt"
+        path.write_text(
+            "# safe commands for this project\n\nnpm run lint\n\n# also this one\nmake test\n",
+            encoding="utf-8",
+        )
+        entries = load_extra_allowlist(path)
+        names = [name for name, _ in entries]
+        assert names == ["npm run lint", "make test"]
+
+    def test_load_extra_allowlist_rejects_an_entry_with_a_metacharacter(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "extra.txt"
+        path.write_text("npm run lint; rm -rf /\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="metacharacter"):
+            load_extra_allowlist(path)
+
+    def test_load_extra_allowlist_error_message_includes_the_line_number(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "extra.txt"
+        path.write_text("npm run lint\nmake test; rm -rf /\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"line 2"):
+            load_extra_allowlist(path)
+
+    def test_built_in_allowlist_is_still_checked_even_with_extra_entries_configured(
+        self, tmp_path: Path
+    ) -> None:
+        extra = _write_and_load(tmp_path, "npm run lint")
+        decision = classify_bash("git status", extra_allowlist=extra)
+        assert decision.verdict == Verdict.ALLOW
+        assert "operator-configured" not in decision.reason

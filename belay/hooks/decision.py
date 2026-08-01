@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 #: Bumped whenever the allowlist or metacharacter rules change. Folded into
 #: an approval's plan_id (belay/hooks/gate.py) so a human's approval, granted
@@ -70,11 +71,70 @@ _SAFE_READ_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def classify_bash(command: str) -> Decision:
+#: One compiled entry: (the operator's literal string, as written in their
+#: allowlist file, and the pattern it compiles to). Kept as a tuple of
+#: tuples, never a dict, mirroring `_SAFE_READ_PATTERNS` above -- order is
+#: the file's own line order, and duplicate literal entries are harmless
+#: (the first match wins either way).
+ExtraAllowlist = tuple[tuple[str, "re.Pattern[str]"], ...]
+
+
+def _compile_extra_entry(literal: str) -> re.Pattern[str]:
+    # `literal` alone (nothing after it), or `literal` followed by
+    # whitespace and further arguments -- e.g. "npm run lint" also matches
+    # "npm run lint --fix". `re.escape` because this is a literal string
+    # the operator wrote, never treated as a regex (see
+    # `load_extra_allowlist`'s docstring for why).
+    return re.compile(re.escape(literal) + r"(\s+\S.*)?")
+
+
+def load_extra_allowlist(path: str | Path) -> ExtraAllowlist:
+    """Parse an operator-supplied extra-safe-commands file (R1 fifth
+    slice, ADR 0024): one literal command prefix per line, blank lines and
+    `#`-prefixed comment lines ignored.
+
+    Deliberately literal strings, never regex: letting an operator author
+    a regex here risks an accidental `.*`-shaped hole opening in a
+    security allowlist, a worse failure mode than the minor inconvenience
+    of listing several literal command variants by hand. Each entry still
+    passes through the same shell-metacharacter guard every command is
+    checked against first (`classify_bash` runs that check before ever
+    consulting this allowlist) -- an entry can never itself be used to
+    smuggle chaining/redirection/substitution through, even if such text
+    somehow ended up in the file.
+
+    Raises `ValueError` if any entry itself contains a shell
+    metacharacter: that entry could never match a real (metacharacter-free)
+    command anyway, so refusing it loudly at load time beats silently
+    shipping dead, confusing configuration.
+    """
+    entries: list[tuple[str, re.Pattern[str]]] = []
+    text = Path(path).read_text(encoding="utf-8")
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if _SHELL_METACHARACTERS.search(line):
+            raise ValueError(
+                f"line {lineno}: {line!r} contains a shell metacharacter -- it could "
+                "never match any real command (metacharacters always pause before "
+                "the allowlist is even checked), so this entry is refused"
+            )
+        entries.append((line, _compile_extra_entry(line)))
+    return tuple(entries)
+
+
+def classify_bash(command: str, *, extra_allowlist: ExtraAllowlist = ()) -> Decision:
     """Classify a single Bash tool call's `command` string. Never raises --
     an exception escaping the matching logic itself would defeat the point
     of a safety gate, so any unexpected input falls through to the same
-    PAUSE default as anything simply unrecognized."""
+    PAUSE default as anything simply unrecognized.
+
+    `extra_allowlist` (R1 fifth slice, ADR 0024) is opt-in, operator-
+    configured additional entries (see `load_extra_allowlist`) -- checked
+    only after the built-in patterns above, and only ever able to turn a
+    PAUSE into an ALLOW, never the reverse. Empty by default (the
+    parameter's default), which is fully unchanged legacy behavior."""
     try:
         stripped = command.strip()
         if not stripped:
@@ -89,6 +149,12 @@ def classify_bash(command: str) -> Decision:
         for name, pattern in _SAFE_READ_PATTERNS:
             if pattern.fullmatch(stripped):
                 return Decision(Verdict.ALLOW, f"matches safe-read allowlist entry: {name}")
+        for literal, pattern in extra_allowlist:
+            if pattern.fullmatch(stripped):
+                return Decision(
+                    Verdict.ALLOW,
+                    f"matches operator-configured allowlist entry: {literal!r}",
+                )
         return Decision(Verdict.PAUSE, "not on the safe-read allowlist")
     except Exception as exc:  # see docstring: never raise out of a gate
         return Decision(Verdict.PAUSE, f"classification error, defaulting to pause: {exc}")
