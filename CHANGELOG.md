@@ -10,6 +10,25 @@ once it reaches 1.0.
 
 ### Added
 
+- **R1.8 investigation -- [ADR 0026](docs/adr/0026-r1-8-hooks-ledger-vocabulary.md),
+  design only, no code:** before planning "R1.8: TransactionEngine
+  único," checked whether the pattern R1.7.3 found (hooks reusing
+  `PolicyEngine` would leave quota/anomaly permanently inert, since hooks
+  never writes the ledger events they key on) was a one-off or systemic.
+  It's systemic: intent contracts are a complete MCP-only subsystem with
+  zero hooks footprint, and rewind/undo are two genuinely independent
+  systems (`belay/rewind/service.py::RewindService`'s typed, policy-gated
+  compensation vs. `belay/hooks/file_snapshot.py::SnapshotStore`'s bare
+  content-addressed blob store) sharing no code at all. Root cause, one
+  fact behind all of it: the hooks path writes exactly two ledger event
+  types (`hook_pre_tool_use`/`hook_post_tool_use`), never the MCP path's
+  rich step lifecycle (`plan_created`...`step_committed`) any unifying
+  machinery needs to read. R1.8 is redefined around that prerequisite
+  (hooks gets a real step-lifecycle ledger presence) rather than
+  attempted as a single "unify everything" slice; quota/anomaly/rewind
+  unification become revisit-with-evidence decisions after it lands, not
+  automatic follow-ons. Intent contracts for hooks: not scheduled.
+
 - **R1.7.1 -- MCP proxy adopts the same Capability Lease as the Native
   Agent Gate ([ADR 0025](docs/adr/0025-r1-canonical-protocol.md)):**
   `belay/proxy/lifecycle.py::ApprovalStage.check()` used to treat
