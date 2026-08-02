@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from belay.approvals.queue import ApprovalQueue
 from belay.clock import FixedClock
-from belay.contracts.model import ContractSet
+from belay.contracts.model import Contract, ContractSet, Effect
 from belay.hooks.claude_code_adapter import normalize
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import (
@@ -30,6 +30,7 @@ from belay.hooks.gate import (
     evaluate_file_edit,
     evaluate_mcp_call,
     ledger_session_id,
+    plan_created_evidence,
     post_event_evidence,
     pre_event_evidence,
     session_key,
@@ -859,3 +860,58 @@ class TestLedgerEvidenceHelpers:
         event = normalize(raw, installation_id="i")
         evidence = post_event_evidence(event, duration_ms=None)
         assert evidence["duration_ms"] is None
+
+    def test_plan_created_evidence_uses_the_resolved_contract_verbatim(self) -> None:
+        """R1.8 prerequisite (ADR 0026): when a `ContractSet` is
+        configured and resolves this tool, its own declared
+        effects/reversibility are used -- not a guess."""
+        event = _event("git status")
+        contract = Contract(
+            belay_contract="0.1",
+            tool="Bash",
+            reversibility="irreversible",
+            effects=[Effect(type="read", resource="shell")],
+        )
+        contract_set = ContractSet(contracts={"Bash": contract}, set_hash="sha256:x")
+        evidence = plan_created_evidence(event, contract_set)
+        assert evidence["tool"] == "Bash"
+        assert evidence["effects"] == [
+            {"type": "read", "resource": "shell", "count": None, "amount": None, "recipients": None}
+        ]
+        assert evidence["reversibility"] == "irreversible"
+
+    def test_plan_created_evidence_file_surface_without_contract_is_a_coarse_guess(
+        self,
+    ) -> None:
+        event = _file_event("Write", "/tmp/f.txt")
+        evidence = plan_created_evidence(event, None)
+        assert evidence["effects"] == [{"type": "update", "resource": "native.file"}]
+        assert evidence["reversibility"] == "irreversible"
+
+    def test_plan_created_evidence_shell_surface_without_contract_is_a_coarse_guess(
+        self,
+    ) -> None:
+        event = _event("git status")
+        evidence = plan_created_evidence(event, None)
+        assert evidence["effects"] == [{"type": "execute", "resource": "shell"}]
+        assert evidence["reversibility"] == "irreversible"
+
+    def test_plan_created_evidence_mcp_surface_without_contract_is_a_coarse_guess(
+        self,
+    ) -> None:
+        event = _mcp_event("mcp__github__create_issue", {"title": "x"})
+        evidence = plan_created_evidence(event, None)
+        assert evidence["effects"] == [
+            {"type": "execute", "resource": "mcp__github__create_issue"}
+        ]
+        assert evidence["reversibility"] == "irreversible"
+
+    def test_plan_created_evidence_no_contract_set_configured_falls_back_to_guess(
+        self,
+    ) -> None:
+        """`contract_set=None` (never configured) must behave exactly like
+        a configured-but-non-resolving `ContractSet` -- both mean "no
+        declared contract to trust," not two different code paths."""
+        event = _event("git status")
+        empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
+        assert plan_created_evidence(event, None) == plan_created_evidence(event, empty_set)

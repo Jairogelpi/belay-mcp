@@ -251,14 +251,86 @@ def test_hooks_run_posttooluse_records_evidence_and_acks_empty(tmp_path: Path) -
     ledger = LedgerStore(db_url=f"sqlite:///{data_path}")
     events = ledger.read("hook-claude-code-s1")
     types = [e.type for e in events]
-    assert types == ["hook_pre_tool_use", "hook_post_tool_use"]
+    # R1.8 prerequisite (ADR 0026): a real step-lifecycle presence now
+    # rides alongside the original two hook events.
+    assert types == [
+        "hook_pre_tool_use",
+        "plan_created",
+        "step_journaled",
+        "hook_post_tool_use",
+        "result_recorded",
+        "compensation_registered",
+        "step_committed",
+    ]
 
-    pre_event, post_event = events
+    pre_event = events[0]
+    post_event = events[3]
     assert pre_event.payload["verdict"] == "allow"
     assert post_event.payload["exit_code"] == 0
     assert post_event.payload["result_status"] == "success"
     assert post_event.payload["duration_ms"] is not None  # correlated with the pre event
     assert post_event.payload["duration_ms"] >= 0
+
+    from belay.ledger.verify import verify_coherence
+
+    assert verify_coherence(events).ok
+
+
+def test_a_hook_gated_session_is_now_visible_to_RewindService(tmp_path: Path) -> None:
+    """R1.8 prerequisite (ADR 0026), proven concretely rather than just
+    asserted: before this slice, `RewindService.build_plan()` pointed at
+    a hooks session's ledger found nothing at all (neither
+    `step_committed` nor `step_indeterminate` existed there) -- it would
+    silently return an empty plan, indistinguishable from an unknown or
+    truly empty session. Now a real, committed step is visible, honestly
+    classified `irreversible` (no `compensation_registered` event exists
+    for hooks yet -- that's real, separately-scoped follow-up work, not
+    this slice's job -- so `RewindService` correctly reports there's
+    nothing it can undo, rather than crashing or fabricating a
+    compensation it doesn't have)."""
+    pre_payload = json.dumps(
+        {
+            "session_id": "s_rewind_visibility",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_rewind_vis",
+        }
+    )
+    pre_result = runner.invoke(
+        app, ["hooks", "run", "PreToolUse", "--db", "test.db"], input=pre_payload
+    )
+    assert pre_result.exit_code == 0, pre_result.output
+
+    post_payload = json.dumps(
+        {
+            "session_id": "s_rewind_visibility",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_use_id": "toolu_rewind_vis",
+            "tool_response": {"exit_code": 0, "stdout": "clean", "stderr": ""},
+        }
+    )
+    post_result = runner.invoke(
+        app, ["hooks", "run", "PostToolUse", "--db", "test.db"], input=post_payload
+    )
+    assert post_result.exit_code == 0, post_result.output
+
+    from belay.ledger.store import LedgerStore
+    from belay.rewind.service import RewindService
+    from belay.supervisor.addressing import supervisor_identity
+
+    data_path = supervisor_identity((tmp_path / "test.db").resolve()).data_path
+    ledger = LedgerStore(db_url=f"sqlite:///{data_path}")
+    rewind = RewindService(ledger=ledger)
+
+    plan = rewind.build_plan("hook-claude-code-s_rewind_visibility")
+
+    assert len(plan.steps) == 1
+    assert plan.steps[0].tool == "Bash"
+    assert plan.steps[0].status == "irreversible"
+    assert plan.reversible == []  # nothing RewindService can undo yet -- honest, not a crash
 
 
 def test_hooks_run_posttooluse_without_matching_pretooluse_records_null_duration(

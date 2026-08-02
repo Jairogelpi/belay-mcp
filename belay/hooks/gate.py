@@ -635,3 +635,50 @@ def post_event_evidence(event: HookEvent, *, duration_ms: float | None) -> dict[
         "output_digest": event.output_digest,
         "truncated": event.truncated,
     }
+
+
+def plan_created_evidence(event: HookEvent, contract_set: ContractSet | None) -> dict[str, Any]:
+    """R1.8 prerequisite (ADR 0026): a `plan_created`-shaped payload for a
+    hook-gated event -- the first thing MCP-side machinery that reads
+    `plan_created` (`belay/policy/baseline.py`'s anomaly counting,
+    `belay/cli/causal.py`'s display) has to recognize on the hooks
+    surface at all. Written alongside `hook_pre_tool_use`, never
+    replacing it, and consulted by nothing in this gate -- this is
+    evidence assembled *after* `_decide_pre` already decided, it can
+    never influence a decision, only describe one after the fact.
+
+    `effects`/`reversibility` are a best-effort guess, not a real
+    `Planner.plan()` run -- hooks has no `Planner`/`PolicyEngine` wiring
+    and this slice does not add any (ADR 0026 found that would go
+    permanently inert on this surface regardless, extending R1.7.3's
+    finding: the identity/ledger-shape mismatch is structural, not fixed
+    by more evidence alone). When a `ContractSet` is configured and
+    resolves this tool, its own declared `effects`/`reversibility` are
+    used verbatim -- the same source of truth
+    `evaluate_file_edit`/`evaluate_mcp_call` already resolve against.
+    Otherwise, a coarse guess by surface, always `irreversible`: not
+    because nothing here is ever undoable (native file edits *are*, via
+    `belay hooks rewind` -- a completely separate mechanism, see ADR
+    0026's rewind-duplication finding), but because *this* event has no
+    declared `undo` a `belay rewind`-style compensation could act on, and
+    claiming otherwise would be a fabricated claim of reversibility this
+    gate cannot actually honor through this payload."""
+    contract = contract_set.resolve(event.tool_name) if contract_set is not None else None
+    if contract is not None:
+        effects = [e.model_dump(mode="json") for e in contract.effects]
+        reversibility = contract.reversibility
+    elif event.surface == "file":
+        effects = [{"type": "update", "resource": "native.file"}]
+        reversibility = "irreversible"
+    elif event.surface == "shell":
+        effects = [{"type": "execute", "resource": "shell"}]
+        reversibility = "irreversible"
+    else:
+        effects = [{"type": "execute", "resource": event.tool_name}]
+        reversibility = "irreversible"
+    return {
+        "tool": event.tool_name,
+        "args": event.args,
+        "effects": effects,
+        "reversibility": reversibility,
+    }

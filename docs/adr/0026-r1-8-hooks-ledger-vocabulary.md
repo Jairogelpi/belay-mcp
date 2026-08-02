@@ -2,9 +2,14 @@
 
 ## Status
 
-Proposed (design only -- no code in this slice, by explicit choice: every
-R1.7 sub-slice needed real rescoping once actually investigated, so this
-one was investigated before committing to an implementation plan at all).
+Accepted, implemented. Originally landed as design-only (every R1.7
+sub-slice needed real rescoping once actually investigated, so this one
+was investigated before committing to an implementation plan at all) --
+the user then asked for the redefined R1.8 prerequisite itself in the
+same session. See "Implementation" below for what actually shipped and
+one real design correction found while building it (a
+`verify_coherence` regression the design section below did not
+anticipate).
 
 ## Context
 
@@ -145,6 +150,69 @@ exists, and why**:
 - **Intent contracts for hooks**: not scheduled; revisit only if a real
   product need for scope-gating native tool calls emerges.
 
+## Implementation
+
+The redefined R1.8 prerequisite shipped in the same session as this
+ADR. `belay/supervisor/server.py::Supervisor._decide` now writes, per
+hook-gated call, alongside the original `hook_pre_tool_use`/
+`hook_post_tool_use`:
+
+- **PRE phase**: `plan_created` (payload from the new
+  `belay/hooks/gate.py::plan_created_evidence(event, contract_set)` --
+  a resolved contract's own `effects`/`reversibility` verbatim when one
+  exists, otherwise a coarse, honestly-`irreversible` guess by surface:
+  file edits update `native.file`, Bash executes `shell`, anything else
+  executes the bare tool name) and `step_journaled` (minimal --
+  `{"tool": ...}` -- just enough for `RewindService.build_plan`'s own
+  tool-name lookup, not a claim this is a real saga journal entry).
+- **A new per-`ledger_session_id` monotonic `step_seq` counter**
+  (`Supervisor._hook_step_seq`/`_hook_step_seq_by_event_id`), the same
+  in-memory-only, lost-on-restart posture as the existing `_pre_times`
+  duration-tracking dict, for the same accepted reason: this is evidence
+  richness, not correctness-critical state.
+- **POST phase**: `step_committed` (`result_status == "success"`),
+  `step_failed` (`"failure"`), or -- new, honest use of a type that
+  previously only ever came from MCP crash-recovery --
+  `step_indeterminate` for anything else (an unrecognized or missing
+  `result_status`, genuinely "we don't know what happened," not a
+  guessed failure).
+
+**One real design correction found only while implementing, not
+anticipated by the Decision section above**: naively emitting
+`step_committed` alone would have made
+`belay/ledger/verify.py::verify_coherence` -- which requires
+`step_journaled`/`result_recorded`/`compensation_registered` for every
+committed step (spec §9.2) -- start **failing** for every hook-gated
+committed action, where it previously passed trivially (no
+`step_committed` existed to check at all). Fixed by also writing
+`result_recorded` (the same result fields already in
+`hook_post_tool_use`) and `compensation_registered` with an honest
+`{"reversible": false, "reason": "no_mcp_shaped_compensation_on_the_hooks_surface"}`
+whenever a step commits -- this exactly matches what
+`RewindService.build_plan` already defaults to when the event is
+*absent*, so it makes the classification explicit and
+coherence-satisfying without changing what that classification is.
+
+**Proven concretely, not just asserted**: a new test
+(`tests/cli/test_hooks_lifecycle.py::test_a_hook_gated_session_is_now_visible_to_RewindService`)
+runs a real hook-gated Bash call end to end, then calls the real
+`RewindService.build_plan()` against that session -- it now returns one
+step (`tool="Bash"`, `status="irreversible"`), where before this slice
+it silently returned an empty plan (indistinguishable from an unknown or
+truly empty session). A manual check confirmed the same for
+`belay/cli/causal.py::build_causal_graph`: it now produces a real
+`CausalNode(tool="Bash", status="step_committed", ...)` for a hooks
+session instead of nothing. Neither rewind's actual undo behavior nor
+`causal`'s CLI output format changed for MCP sessions -- both paths are
+purely additive for the hooks surface.
+
+**Still explicitly not done**, matching the Decision section's own
+scope: no `session_started`-shaped event (quota unification remains a
+deferred, revisit-with-evidence question, not silently enabled by
+accident), no real compensation mechanism (rewind for native edits stays
+`belay hooks rewind`'s separate `SnapshotStore`), and no intent-contract
+enforcement on this surface.
+
 ## Consequences
 
 - Prevents R1.8 from starting as an unbounded "unify everything" effort
@@ -163,5 +231,15 @@ exists, and why**:
   automatic follow-ons -- ADR 0023's parallel-tracker pattern for hooks
   quota may still turn out to be the right call, not merely the
   current one.
-- No code changes in this slice -- `ruff`/`mypy`/`pytest` are unaffected;
-  this ADR is the entire deliverable.
+- Confirms the value of building even a "prerequisite" slice for real
+  rather than stopping at the design doc: the `verify_coherence`
+  regression (emitting bare `step_committed` without
+  `result_recorded`/`compensation_registered` would have made every
+  hook-gated committed action fail coherence verification where it
+  previously passed trivially) was found only by actually running the
+  test suite against real appended events, not by reasoning about the
+  design in the abstract.
+- `belay/rewind/service.py::RewindService` and `belay/cli/causal.py` now
+  produce real, non-empty output for hook-gated sessions for the first
+  time -- both were previously silently blind to the hooks surface, not
+  merely "not yet unified" with it.

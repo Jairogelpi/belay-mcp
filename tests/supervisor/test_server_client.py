@@ -136,9 +136,28 @@ def test_posttooluse_event_records_evidence_and_acks_empty(
 
     ledger = LedgerStore(db_url=f"sqlite:///{db_path}")
     events = ledger.read("hook-claude-code-s1")
-    assert [e.type for e in events] == ["hook_pre_tool_use", "hook_post_tool_use"]
-    assert events[1].payload["exit_code"] == 0
-    assert events[1].payload["duration_ms"] is not None
+    # R1.8 prerequisite (ADR 0026): a real step-lifecycle presence now
+    # rides alongside the original two hook events, giving MCP-side
+    # machinery (anomaly counting, `causal`, `RewindService`) something
+    # real to recognize on this surface -- see gate.py::plan_created_evidence
+    # and Supervisor._decide's own docstring-style comments for why each
+    # one is there (`result_recorded`/`compensation_registered` exist
+    # specifically to keep `verify_coherence` passing).
+    assert [e.type for e in events] == [
+        "hook_pre_tool_use",
+        "plan_created",
+        "step_journaled",
+        "hook_post_tool_use",
+        "result_recorded",
+        "compensation_registered",
+        "step_committed",
+    ]
+    assert events[3].payload["exit_code"] == 0
+    assert events[3].payload["duration_ms"] is not None
+
+    from belay.ledger.verify import verify_coherence
+
+    assert verify_coherence(events).ok
 
 
 def test_hook_event_for_unknown_host_is_denied(

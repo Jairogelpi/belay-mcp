@@ -54,6 +54,7 @@ from belay.hooks.decision import ExtraAllowlist, load_extra_allowlist
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
 from belay.hooks.quota import QuotaConfig
+from belay.ledger.model import STEP_COMMITTED, STEP_FAILED, STEP_INDETERMINATE
 from belay.ledger.store import LedgerStore
 from belay.policy.quota import parse_window
 from belay.rewind.service import is_fenced
@@ -179,6 +180,19 @@ class Supervisor:
         #: (see `belay/supervisor/idempotency.py`).
         self._pre_times: dict[str, int] = {}
         self._pre_times_lock = threading.Lock()
+        #: R1.8 prerequisite (ADR 0026): a per-`ledger_session_id`
+        #: monotonic step counter, giving hook-gated calls a real int
+        #: `step_seq` -- `belay/rewind/service.py::build_plan` and
+        #: `belay/policy/baseline.py`'s anomaly counting both silently
+        #: skip any event with `step_seq is None`, so without this,
+        #: nothing written here would ever be visible to that machinery.
+        #: Same in-memory-only, lost-on-restart posture as `_pre_times`
+        #: above, for the same reason: an honest, accepted gap (a handful
+        #: of step_seqs restarting from 1 after a restart), never a
+        #: correctness problem the way losing idempotency/approval state
+        #: would be.
+        self._hook_step_seq: dict[str, int] = {}
+        self._hook_step_seq_by_event_id: dict[str, int] = {}
         self._contract_set = self._load_contract_set()
         self._quota = self._load_quota_config()
         self._extra_allowlist = self._load_extra_allowlist()
@@ -311,21 +325,58 @@ class Supervisor:
     def _decide(self, event: HookEvent, render: RenderFn) -> dict[str, Any]:
         if event.phase == "pre":
             decision = self._decide_pre(event)
+            session_id = gate.ledger_session_id(event)
             self._ledger.append(
-                gate.ledger_session_id(event),
+                session_id,
                 "hook_pre_tool_use",
                 gate.pre_event_evidence(event, decision),
             )
             if event.event_id:
                 with self._pre_times_lock:
                     self._pre_times[event.event_id] = event.monotonic_ns
+                    step_seq = self._hook_step_seq.get(session_id, 0) + 1
+                    self._hook_step_seq[session_id] = step_seq
+                    self._hook_step_seq_by_event_id[event.event_id] = step_seq
+                # R1.8 prerequisite (ADR 0026): a real `plan_created`-shaped
+                # event for this hook-gated call, so MCP-side machinery
+                # that reads `plan_created` (anomaly counting, `causal`
+                # display) has something real to see on this surface for
+                # the first time -- evidence only, assembled after
+                # `decision` already exists, never consulted by it.
+                contract_set_for_evidence = (
+                    self._contract_set if isinstance(self._contract_set, ContractSet) else None
+                )
+                self._ledger.append(
+                    session_id,
+                    "plan_created",
+                    gate.plan_created_evidence(event, contract_set_for_evidence),
+                    step_seq=step_seq,
+                )
+                # `belay/rewind/service.py::build_plan` reads a step's
+                # tool name from `step_journaled` specifically (not
+                # `plan_created`) -- without this, every hooks-sourced
+                # `RewindStepPlan.tool` would show "?" instead of the
+                # real tool name. Minimal payload: just enough for that
+                # one lookup, not a claim this is a real saga journal
+                # entry (`belay/executor/saga.py`'s own `step_journaled`
+                # carries far more -- contract, reversibility -- none of
+                # which exists on this surface).
+                self._ledger.append(
+                    session_id,
+                    "step_journaled",
+                    {"tool": event.tool_name},
+                    step_seq=step_seq,
+                )
             return render(decision)
 
         if event.phase == "post":
             duration_ms = None
+            session_id = gate.ledger_session_id(event)
+            outcome_step_seq: int | None = None
             if event.event_id:
                 with self._pre_times_lock:
                     pre_ns = self._pre_times.pop(event.event_id, None)
+                    outcome_step_seq = self._hook_step_seq_by_event_id.pop(event.event_id, None)
                 if pre_ns is not None:
                     duration_ms = (event.monotonic_ns - pre_ns) / 1_000_000
             if event.surface == "file" and event.event_id:
@@ -333,10 +384,71 @@ class Supervisor:
                 if path_str is not None:
                     self._snapshots.record_after(event.event_id, Path(path_str))
             self._ledger.append(
-                gate.ledger_session_id(event),
+                session_id,
                 "hook_post_tool_use",
                 gate.post_event_evidence(event, duration_ms=duration_ms),
             )
+            if outcome_step_seq is not None:
+                # R1.8 prerequisite (ADR 0026): the outcome half of the
+                # same step-lifecycle presence -- `STEP_INDETERMINATE`
+                # (not `STEP_FAILED`) for an unrecognized/missing
+                # `result_status`, honestly reflecting "we don't know
+                # what happened" rather than guessing it failed.
+                if event.result_status == "success":
+                    outcome_type = STEP_COMMITTED
+                elif event.result_status == "failure":
+                    outcome_type = STEP_FAILED
+                else:
+                    outcome_type = STEP_INDETERMINATE
+                if outcome_type is STEP_COMMITTED:
+                    # `belay/ledger/verify.py::verify_coherence` requires
+                    # `result_recorded`/`compensation_registered` for
+                    # every `step_committed` step (spec §9.2) -- without
+                    # these, a hooks session with any committed step would
+                    # now fail coherence verification where it used to
+                    # trivially pass (no step_committed existed to check
+                    # at all). Both are honest, not fabricated:
+                    # `result_recorded` reuses the same result fields
+                    # already in `hook_post_tool_use`; `compensation_registered`
+                    # truthfully declares `reversible: False` -- there is
+                    # no MCP-shaped compensation mechanism on this surface
+                    # (the real undo path for native file edits is
+                    # `belay hooks rewind`'s separate `SnapshotStore`, per
+                    # ADR 0026's rewind-duplication finding), so this
+                    # matches exactly what `RewindService.build_plan`
+                    # already defaults to when the event is absent -- it
+                    # makes the classification explicit and coherence-valid,
+                    # it does not change what that classification is.
+                    self._ledger.append(
+                        session_id,
+                        "result_recorded",
+                        {
+                            "tool": event.tool_name,
+                            "result_status": event.result_status,
+                            "exit_code": event.exit_code,
+                            "output_digest": event.output_digest,
+                        },
+                        step_seq=outcome_step_seq,
+                    )
+                    self._ledger.append(
+                        session_id,
+                        "compensation_registered",
+                        {
+                            "reversible": False,
+                            "reason": "no_mcp_shaped_compensation_on_the_hooks_surface",
+                        },
+                        step_seq=outcome_step_seq,
+                    )
+                self._ledger.append(
+                    session_id,
+                    outcome_type,
+                    {
+                        "event_id": event.event_id,
+                        "tool_name": event.tool_name,
+                        "result_status": event.result_status,
+                    },
+                    step_seq=outcome_step_seq,
+                )
             return render(None)
 
         # Not reachable while Phase is exactly "pre" | "post" (protocol.py),

@@ -10,24 +10,35 @@ once it reaches 1.0.
 
 ### Added
 
-- **R1.8 investigation -- [ADR 0026](docs/adr/0026-r1-8-hooks-ledger-vocabulary.md),
-  design only, no code:** before planning "R1.8: TransactionEngine
-  único," checked whether the pattern R1.7.3 found (hooks reusing
+- **R1.8 -- hooks gets a real step-lifecycle ledger presence
+  ([ADR 0026](docs/adr/0026-r1-8-hooks-ledger-vocabulary.md)):**
+  investigated whether the pattern R1.7.3 found (hooks reusing
   `PolicyEngine` would leave quota/anomaly permanently inert, since hooks
-  never writes the ledger events they key on) was a one-off or systemic.
-  It's systemic: intent contracts are a complete MCP-only subsystem with
-  zero hooks footprint, and rewind/undo are two genuinely independent
-  systems (`belay/rewind/service.py::RewindService`'s typed, policy-gated
+  never writes the ledger events they key on) was a one-off or systemic
+  before planning "R1.8: TransactionEngine único." It's systemic: intent
+  contracts are a complete MCP-only subsystem with zero hooks footprint,
+  and rewind/undo are two genuinely independent systems
+  (`belay/rewind/service.py::RewindService`'s typed, policy-gated
   compensation vs. `belay/hooks/file_snapshot.py::SnapshotStore`'s bare
-  content-addressed blob store) sharing no code at all. Root cause, one
-  fact behind all of it: the hooks path writes exactly two ledger event
+  content-addressed blob store) sharing no code at all -- root cause, one
+  fact behind all of it: the hooks path wrote exactly two ledger event
   types (`hook_pre_tool_use`/`hook_post_tool_use`), never the MCP path's
-  rich step lifecycle (`plan_created`...`step_committed`) any unifying
-  machinery needs to read. R1.8 is redefined around that prerequisite
-  (hooks gets a real step-lifecycle ledger presence) rather than
-  attempted as a single "unify everything" slice; quota/anomaly/rewind
-  unification become revisit-with-evidence decisions after it lands, not
-  automatic follow-ons. Intent contracts for hooks: not scheduled.
+  rich step lifecycle any unifying machinery needs to read. Implemented
+  the redefined prerequisite: `Supervisor._decide` now also writes
+  `plan_created`/`step_journaled` (PRE) and
+  `step_committed`/`step_failed`/`step_indeterminate` +
+  `result_recorded`/`compensation_registered` (POST, the latter two
+  specifically to keep `belay/ledger/verify.py::verify_coherence` passing
+  -- a regression caught only by actually running the suite, not by the
+  design alone) for every hook-gated call, reusing R1.7.2's
+  `STEP_COMMITTED`/`STEP_FAILED`/`STEP_INDETERMINATE` constants and a new
+  per-session `step_seq` counter. Proven concretely: `RewindService.build_plan()`
+  and `belay/cli/causal.py::build_causal_graph()` now both produce real,
+  non-empty output for a hooks session for the first time (previously
+  silently empty, not merely "not yet unified"). Zero change to any
+  existing decision/gating behavior. Quota/anomaly/rewind unification
+  remain deferred, revisit-with-evidence decisions -- not automatic
+  follow-ons; intent contracts for hooks: not scheduled.
 
 - **R1.7.1 -- MCP proxy adopts the same Capability Lease as the Native
   Agent Gate ([ADR 0025](docs/adr/0025-r1-canonical-protocol.md)):**
