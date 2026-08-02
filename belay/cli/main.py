@@ -1126,6 +1126,16 @@ def hooks_install(
         "-- additive only, never affects the built-in allowlist or the shell-metacharacter "
         "guard. Omit for today's unchanged behavior.",
     ),
+    anomaly: bool = typer.Option(
+        False,
+        "--anomaly",
+        help="Opt-in (R1.8.x, ADR 0026): checks a native MCP call's declared effect count "
+        "against this session's own trailing history, same z-score check belay run's own "
+        "proxy path already applies, fixed thresholds (no tuning flag yet). Foundational: "
+        "a static --contracts file declares the same literal count on every call, so this "
+        "cannot yet actually flag a real outlier -- see docs/adr/0026 before relying on it "
+        "for anything. Omit for today's unchanged behavior.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would change, write nothing."
     ),
@@ -1260,6 +1270,8 @@ def hooks_install(
         extra_files.append(str(identity.quota_config_path))
     if allowlist_extra_path is not None:
         extra_files.append(str(identity.extra_allowlist_pointer_path))
+    if anomaly:
+        extra_files.append(str(identity.anomaly_pointer_path))
 
     _write_client_config(
         "claude-code-hooks", target, "belay-hooks", new_text, before_text,
@@ -1316,6 +1328,18 @@ def hooks_install(
         )
     else:
         identity.extra_allowlist_pointer_path.unlink(missing_ok=True)
+    if anomaly:
+        identity.anomaly_pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        identity.anomaly_pointer_path.write_text("1", encoding="utf-8")
+        typer.echo(
+            "anomaly checking is now active for native MCP calls with a configured "
+            "count-bearing contract (foundational -- a static contract's count is fixed per "
+            "call today, so this cannot yet flag a real outlier; see docs/adr/0026). "
+            f"A running supervisor for this install must be restarted (`belay supervisor stop "
+            f"--db {db}`) to pick this up."
+        )
+    else:
+        identity.anomaly_pointer_path.unlink(missing_ok=True)
     typer.echo("restart the agent for the hook to take effect")
 
 

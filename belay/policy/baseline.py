@@ -14,8 +14,12 @@ from dataclasses import dataclass, field
 from belay.ledger.store import LedgerStore
 
 
-def _upper_bound(count: str | None) -> float | None:
-    """Parse an `EffectEstimate.count` string (`"N"` or `"~N"`) into a float, if possible."""
+def upper_bound(count: str | None) -> float | None:
+    """Parse an `EffectEstimate.count` string (`"N"` or `"~N"`) into a
+    float, if possible. Public (not module-private): R1.8.x
+    (`belay/hooks/gate.py::evaluate_anomaly`, ADR 0026) reuses this same
+    parser for hook-gated effect payloads, rather than duplicating the
+    `"N"`/`"~N"` convention a second time."""
     if count is None:
         return None
     text = count.lstrip("~")
@@ -81,7 +85,7 @@ class BaselineStore:
             for effect in payload.get("effects", []) or []:
                 if effect.get("type") != effect_type:
                     continue
-                value = _upper_bound(effect.get("count"))
+                value = upper_bound(effect.get("count"))
                 if value is not None:
                     welford.update(value)
         return welford

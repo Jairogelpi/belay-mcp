@@ -40,6 +40,37 @@ once it reaches 1.0.
   remain deferred, revisit-with-evidence decisions -- not automatic
   follow-ons; intent contracts for hooks: not scheduled.
 
+- **R1.8.x -- quota/anomaly/rewind revisited with real ledger evidence
+  ([ADR 0026](docs/adr/0026-r1-8-hooks-ledger-vocabulary.md)):**
+  investigated all three, concretely, now that R1.8 gives hooks a real
+  ledger presence -- they resolved three different ways, not one. Quota
+  and rewind stay closed with no new code: quota still keys on
+  `session_started.initiated_by`, an event hooks deliberately still
+  doesn't write (faking it from `os_user` would blur an identity
+  distinction ADR 0023 established on purpose); rewind still has no
+  compensation event for hooks steps (`belay/hooks/gate.py` honestly
+  writes `compensation_registered: {"reversible": false, ...}` for every
+  one), so real unification would mean a genuine behavioral redesign, not
+  a free consequence of more events existing. Anomaly is genuinely
+  different -- `belay/policy/baseline.py::BaselineStore` has zero identity
+  dependency, only reads `plan_created` events, which now exist for
+  hooks -- so it's built: `belay/hooks/anomaly.py::AnomalyConfig`/
+  `evaluate_anomaly` reuses `BaselineStore` directly (no parallel
+  tracker), wired into `evaluate_mcp_call`'s declared-read-only
+  auto-allow (falls through to the normal pause/queue flow when
+  anomalous, never widening anything), `Supervisor._load_anomaly_config`
+  mirroring `_load_quota_config`'s R1.6 fail-closed posture, and
+  `belay hooks install --anomaly` (bare opt-in flag, fixed thresholds,
+  no tuning surface yet). Honest limitation, found and proven by testing
+  rather than assumed: a static `--contracts` file's declared effect
+  count is the same literal value on every call (spec §5.3's
+  "contract"-basis), so this cannot yet flag a real outlier for *any*
+  hook-gated call, contracted or not -- the MCP proxy only ever sees a
+  genuinely varying count via `sql_simulator`/`native_dry_run`, neither
+  of which hooks has. Real, tested foundation for the day hooks gains a
+  dynamic count source; not a functioning guard today, and every
+  doc/help string this slice touched says so.
+
 - **R1.7.1 -- MCP proxy adopts the same Capability Lease as the Native
   Agent Gate ([ADR 0025](docs/adr/0025-r1-canonical-protocol.md)):**
   `belay/proxy/lifecycle.py::ApprovalStage.check()` used to treat

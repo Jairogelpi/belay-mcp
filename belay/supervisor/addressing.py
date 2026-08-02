@@ -92,6 +92,17 @@ class SupervisorIdentity:
     #: install --allowlist-extra <file>` (R1 fifth slice, ADR 0024). Same
     #: absence-means-unchanged rule as `contracts_pointer_path`.
     extra_allowlist_pointer_path: Path
+    #: A one-line pointer file (plain text: literally the string `"1"`)
+    #: written by `belay hooks install --anomaly` (R1.8.x, ADR 0026). Same
+    #: absence-means-unchanged rule as `contracts_pointer_path`: no file
+    #: means no anomaly check at all. Unlike `quota_config_path`, this
+    #: first cut has no per-run tuning surface -- the file's mere presence
+    #: turns the check on with `AnomalyDefaults`' own fixed numbers
+    #: (`belay/hooks/anomaly.py::DEFAULT_Z_SCORE_THRESHOLD`/
+    #: `DEFAULT_MIN_SAMPLES`), so its content is never actually parsed
+    #: for values, only checked for existence -- deliberately, to avoid
+    #: building a config surface nobody has asked to tune yet.
+    anomaly_pointer_path: Path
 
 
 def supervisor_identity(
@@ -128,4 +139,5 @@ def supervisor_identity(
         contracts_pointer_path=home / "data" / f"{install_id}.contracts_path.txt",
         quota_config_path=home / "data" / f"{install_id}.quota.json",
         extra_allowlist_pointer_path=home / "data" / f"{install_id}.allowlist_path.txt",
+        anomaly_pointer_path=home / "data" / f"{install_id}.anomaly.txt",
     )

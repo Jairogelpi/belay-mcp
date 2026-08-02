@@ -22,6 +22,7 @@ import pytest
 from belay.approvals.queue import ApprovalQueue
 from belay.clock import FixedClock
 from belay.contracts.model import Contract, ContractSet, Effect
+from belay.hooks.anomaly import AnomalyConfig
 from belay.hooks.claude_code_adapter import normalize
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import (
@@ -782,6 +783,114 @@ class TestQuotaEnforcement:
         result = evaluate_file_edit(event, queue, snapshots, quota=quota)
         assert result.verdict == "deny"
         assert "quota exceeded" in result.reason
+        assert queue.list() == []
+
+
+class TestAnomalyEnforcement:
+    """R1.8.x (ADR 0026): `anomaly` only ever narrows the declared-read-only
+    auto-allow exception (`TestMcpCallContractCheck`), never widens
+    anything -- `anomaly=None` (the default) is fully unchanged. See
+    `tests/hooks/test_anomaly.py` for the underlying z-score logic and its
+    honest "cannot yet fire against a real static contract" limitation;
+    these tests only cover the wiring in `evaluate_mcp_call` itself."""
+
+    def _read_only_contract_set(self, tool: str) -> ContractSet:
+        contract = Contract(
+            belay_contract="0.1",
+            tool=tool,
+            reversibility="irreversible",
+            effects=[Effect(type="read", resource="github.issues", count="50")],
+        )
+        return ContractSet(contracts={tool: contract}, set_hash="sha256:read-count")
+
+    def _anomaly_config(self) -> AnomalyConfig:
+        from belay.ledger.store import LedgerStore
+
+        return AnomalyConfig(ledger=LedgerStore())
+
+    def test_anomaly_none_leaves_read_only_auto_allow_unchanged(
+        self, queue: ApprovalQueue
+    ) -> None:
+        contract_set = self._read_only_contract_set("mcp__github__list_issues")
+        event = _mcp_event("mcp__github__list_issues", {})
+        result = evaluate_mcp_call(event, queue, contract_set=contract_set, anomaly=None)
+        assert result.verdict == "allow"
+        assert queue.list() == []
+
+    def test_anomaly_configured_but_no_baseline_yet_still_auto_allows(
+        self, queue: ApprovalQueue
+    ) -> None:
+        """Cold start (fewer than `min_samples` prior calls, here zero):
+        `evaluate_anomaly` returns `None`, so this behaves exactly like
+        `anomaly=None` -- never a surprise pause on a session's first call."""
+        contract_set = self._read_only_contract_set("mcp__github__list_issues")
+        event = _mcp_event("mcp__github__list_issues", {})
+        result = evaluate_mcp_call(
+            event, queue, contract_set=contract_set, anomaly=self._anomaly_config()
+        )
+        assert result.verdict == "allow"
+        assert queue.list() == []
+
+    def test_anomalous_effect_falls_through_to_pause_with_the_anomaly_reason_queued(
+        self, queue: ApprovalQueue
+    ) -> None:
+        """Seeds the ledger directly with a varying-count history (what a
+        future dynamic count source would produce -- see
+        `tests/hooks/test_anomaly.py`'s module docstring for why a real
+        static contract can't produce this on its own) to prove the
+        wiring itself -- not just the underlying math -- correctly
+        detects an outlier and falls through to the normal pause/queue
+        flow instead of auto-allowing."""
+        from belay.ledger.store import LedgerStore
+
+        tool = "mcp__github__list_issues"
+        contract_set = self._read_only_contract_set(tool)
+        event = _mcp_event(tool, {})
+        ledger = LedgerStore()
+        session_id = ledger_session_id(event)
+        for _ in range(10):
+            ledger.append(
+                session_id,
+                "plan_created",
+                {
+                    "tool": tool,
+                    "effects": [{"type": "read", "resource": "github.issues", "count": "10"}],
+                },
+            )
+        anomaly = AnomalyConfig(ledger=ledger)
+
+        result = evaluate_mcp_call(event, queue, contract_set=contract_set, anomaly=anomaly)
+
+        assert result.verdict == "deny"
+        assert "anomaly:" in result.reason
+        items = queue.list()
+        assert len(items) == 1
+        assert items[0].plan["reason"].startswith("anomaly:")
+
+    def test_non_anomalous_effect_matching_the_seeded_baseline_still_auto_allows(
+        self, queue: ApprovalQueue
+    ) -> None:
+        from belay.ledger.store import LedgerStore
+
+        tool = "mcp__github__list_issues"
+        contract_set = self._read_only_contract_set(tool)  # declares count="50"
+        event = _mcp_event(tool, {})
+        ledger = LedgerStore()
+        session_id = ledger_session_id(event)
+        for _ in range(10):
+            ledger.append(
+                session_id,
+                "plan_created",
+                {
+                    "tool": tool,
+                    "effects": [{"type": "read", "resource": "github.issues", "count": "50"}],
+                },
+            )
+        anomaly = AnomalyConfig(ledger=ledger)
+
+        result = evaluate_mcp_call(event, queue, contract_set=contract_set, anomaly=anomaly)
+
+        assert result.verdict == "allow"
         assert queue.list() == []
 
 

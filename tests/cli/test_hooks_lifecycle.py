@@ -476,18 +476,19 @@ class TestInstallWithContracts:
 
 class TestHooksUninstallCleansUpPointerFiles:
     """R1.6: `hooks_uninstall` used to only touch settings.json, leaving
-    the contracts/quota/allowlist pointer files under `belay_home()`
-    permanently on disk -- a bare reinstall (no flags) would then silently
-    reactivate the old config. Closed via `Manifest.extra_files`
-    (belay/cli/client_configs.py): `hooks install` records exactly which
-    pointer files it wrote, and `hooks uninstall` removes each one."""
+    the contracts/quota/allowlist(/anomaly, R1.8.x) pointer files under
+    `belay_home()` permanently on disk -- a bare reinstall (no flags)
+    would then silently reactivate the old config. Closed via
+    `Manifest.extra_files` (belay/cli/client_configs.py): `hooks install`
+    records exactly which pointer files it wrote, and `hooks uninstall`
+    removes each one."""
 
     def _identity(self, tmp_path: Path):
         from belay.supervisor.addressing import supervisor_identity
 
         return supervisor_identity((tmp_path / "belay-hooks.db").resolve())
 
-    def test_uninstall_removes_all_three_pointer_files(self, tmp_path: Path) -> None:
+    def test_uninstall_removes_all_four_pointer_files(self, tmp_path: Path) -> None:
         contracts = tmp_path / "hook-contracts.yaml"
         contracts.write_text(
             "belay_contract: '0.1'\n"
@@ -508,6 +509,7 @@ class TestHooksUninstallCleansUpPointerFiles:
                 "--contracts", str(contracts),
                 "--quota-max", "5", "--quota-window", "1d",
                 "--allowlist-extra", str(allowlist),
+                "--anomaly",
                 "--yes",
             ],
         )
@@ -517,6 +519,7 @@ class TestHooksUninstallCleansUpPointerFiles:
         assert identity.contracts_pointer_path.is_file()
         assert identity.quota_config_path.is_file()
         assert identity.extra_allowlist_pointer_path.is_file()
+        assert identity.anomaly_pointer_path.is_file()
 
         result = runner.invoke(app, ["hooks", "uninstall", "--yes"])
         assert result.exit_code == 0, result.output
@@ -524,6 +527,7 @@ class TestHooksUninstallCleansUpPointerFiles:
         assert not identity.contracts_pointer_path.is_file()
         assert not identity.quota_config_path.is_file()
         assert not identity.extra_allowlist_pointer_path.is_file()
+        assert not identity.anomaly_pointer_path.is_file()
 
     def test_bare_reinstall_after_uninstall_starts_with_no_config(self, tmp_path: Path) -> None:
         """The end-to-end regression this closes: install with --contracts,
@@ -748,6 +752,64 @@ class TestMcpCallContractCheckEndToEnd:
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+class TestAnomalyEndToEnd:
+    """R1.8.x (ADR 0026), end to end through the real CLI and a real
+    spawned supervisor: proves the honest limitation directly, not just
+    in isolation (`tests/hooks/test_anomaly.py`) -- a real static
+    `--contracts` file's declared count is the exact same literal on
+    every single call, so `--anomaly` cannot actually flag any of them as
+    an outlier, no matter how many real calls accumulate real ledger
+    history. This is the current, correct behavior; it is not a bug
+    left open, and this test exists specifically so a future change that
+    makes hooks compute a genuinely varying count doesn't silently drift
+    without anyone noticing this assumption changed."""
+
+    def _install_with_count_bearing_read_only_contract(self, tmp_path: Path) -> None:
+        contracts = tmp_path / "hook-contracts.yaml"
+        contracts.write_text(
+            "belay_contract: '0.1'\n"
+            "tool: mcp__github__list_issues\n"
+            "reversibility: irreversible\n"
+            "effects:\n"
+            "  - type: read\n"
+            "    resource: github.issues\n"
+            "    count: '50'\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app,
+            ["hooks", "install", "--contracts", str(contracts), "--anomaly", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+
+    def _run_pre_mcp(self, tool_name: str, args: dict, event_id: str) -> dict:
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "tool_input": args,
+                "tool_use_id": event_id,
+            }
+        )
+        result = runner.invoke(
+            app, ["hooks", "run", "PreToolUse", "--db", "belay-hooks.db"], input=payload
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+
+    def test_repeated_real_calls_to_a_static_count_bearing_contract_never_flag_anomaly(
+        self, tmp_path: Path
+    ) -> None:
+        self._install_with_count_bearing_read_only_contract(tmp_path)
+        # Comfortably past AnomalyConfig's default min_samples=10.
+        for i in range(15):
+            out = self._run_pre_mcp(
+                "mcp__github__list_issues", {}, f"toolu_anomaly_repeat_{i}"
+            )
+            assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
 class TestHooksFence:
     """R1 third slice (ADR 0021): `belay hooks fence <session>` closes a
     hook session to every surface, end to end through the real CLI and a
@@ -960,6 +1022,47 @@ class TestHooksAllowlistExtra:
         )
         assert result.exit_code != 0
         assert not _settings_path(tmp_path).is_file()
+
+
+class TestInstallWithAnomaly:
+    """R1.8.x (ADR 0026): `belay hooks install --anomaly` -- a bare opt-in
+    flag, no per-run tuning surface. Writes a presence-only pointer file
+    (`identity.anomaly_pointer_path`), cleaned up by `hooks uninstall`'s
+    existing `Manifest.extra_files` mechanism, same as contracts/quota/
+    allowlist."""
+
+    def test_anomaly_flag_writes_the_pointer_file(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["hooks", "install", "--anomaly", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "anomaly checking is now active" in result.output
+
+        from belay.supervisor.addressing import supervisor_identity
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        assert identity.anomaly_pointer_path.is_file()
+
+    def test_omitting_anomaly_writes_no_pointer_file(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["hooks", "install", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        from belay.supervisor.addressing import supervisor_identity
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        assert not identity.anomaly_pointer_path.is_file()
+
+    def test_reinstall_without_anomaly_flag_clears_the_stale_pointer(
+        self, tmp_path: Path
+    ) -> None:
+        assert runner.invoke(app, ["hooks", "install", "--anomaly", "--yes"]).exit_code == 0
+
+        from belay.supervisor.addressing import supervisor_identity
+
+        identity = supervisor_identity((tmp_path / "belay-hooks.db").resolve())
+        assert identity.anomaly_pointer_path.is_file()
+
+        result = runner.invoke(app, ["hooks", "install", "--yes"])  # no --anomaly this time
+        assert result.exit_code == 0, result.output
+        assert not identity.anomaly_pointer_path.is_file()
 
 
 class TestFileEditRewind:

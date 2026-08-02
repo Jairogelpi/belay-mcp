@@ -52,6 +52,7 @@ from typing import Any, Literal
 
 from belay.approvals.queue import ApprovalAlreadyConsumed, ApprovalItem, ApprovalQueue
 from belay.contracts.model import ContractSet
+from belay.hooks.anomaly import AnomalyConfig, evaluate_anomaly
 from belay.hooks.decision import DECISION_LOGIC_VERSION, ExtraAllowlist, Verdict, classify_bash
 from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
 from belay.hooks.quota import QuotaConfig
@@ -463,6 +464,7 @@ def evaluate_mcp_call(
     *,
     contract_set: ContractSet | None = None,
     quota: QuotaConfig | None = None,
+    anomaly: AnomalyConfig | None = None,
 ) -> GateDecision:
     """Claude Code's native `mcp__<server>__<tool>` calls reach whatever MCP
     server is configured directly through the agent's own client -- a
@@ -493,12 +495,27 @@ def evaluate_mcp_call(
     contract at all, the default) still pauses exactly as before; this
     never turns a pause into an allow without positive, declared evidence
     the call is read-only.
+
+    `anomaly` (R1.8.x, ADR 0026) narrows that same auto-allow exception
+    further, never widens anything: even a declared-read-only call still
+    falls through to the normal pause/approval flow below if its
+    contract declares a numeric effect count that's anomalously high
+    against this session's own trailing history (`evaluate_anomaly`,
+    reusing `belay.policy.baseline.BaselineStore` directly) -- a
+    provably-safe-to-read tool can still be reading an alarmingly large
+    batch. In today's real usage this never actually fires, though: a
+    static contract's declared count is the same literal value on every
+    call (see `resolve_effects`'s docstring and `belay/hooks/anomaly.py`'s
+    module docstring) -- real, tested machinery with no live source of a
+    genuinely varying count yet, not a functioning guard against an
+    actual outlier today.
     """
     if event.phase != "pre":
         return GateDecision("deny", f"belay: {event.phase}-phase events are not yet handled")
     if not event.event_id:
         return GateDecision("deny", "belay: missing event id -- ambiguous identity, denying")
 
+    anomaly_reason: str | None = None
     if contract_set is not None:
         contract = contract_set.resolve(event.tool_name)
         if (
@@ -506,12 +523,19 @@ def evaluate_mcp_call(
             and contract.effects
             and all(effect.type == "read" for effect in contract.effects)
         ):
-            return GateDecision(
-                "allow",
-                f"belay: {event.tool_name} is declared read-only in the configured "
-                "ContractSet (all effects are type=read) -- allowed without approval, "
-                "same as the MCP proxy's own readOnlyHint default rule",
-            )
+            if anomaly is not None:
+                effects, _ = resolve_effects(event, contract_set)
+                anomaly_reason = evaluate_anomaly(event, effects, anomaly)
+            if anomaly_reason is None:
+                return GateDecision(
+                    "allow",
+                    f"belay: {event.tool_name} is declared read-only in the configured "
+                    "ContractSet (all effects are type=read) -- allowed without approval, "
+                    "same as the MCP proxy's own readOnlyHint default rule",
+                )
+            # Anomalous -- falls through to the normal plan_id/queue flow
+            # below instead of auto-allowing; `anomaly_reason` rides in
+            # the queued item's `plan` payload.
 
     plan_id = _plan_id_for_mcp(event)
     existing = queue.for_plan(plan_id)
@@ -557,10 +581,20 @@ def evaluate_mcp_call(
         plan={
             "tool": event.tool_name,
             "args": event.args,
-            "reason": "native MCP tool call, not routed through belay's own proxy "
+            "reason": anomaly_reason
+            if anomaly_reason is not None
+            else "native MCP tool call, not routed through belay's own proxy "
             "-- not contract-checked",
         },
     )
+    if anomaly_reason is not None:
+        return GateDecision(
+            "deny",
+            f"belay: {anomaly_reason} -- queued for human approval "
+            f"(approval {item.approval_id}) -- run `belay approvals list` / "
+            "`belay approvals approve`, then retry the exact same call",
+            approval_id=item.approval_id,
+        )
     return GateDecision(
         "deny",
         f"belay: {event.tool_name} is a native MCP call outside belay's own proxy -- "
@@ -637,32 +671,30 @@ def post_event_evidence(event: HookEvent, *, duration_ms: float | None) -> dict[
     }
 
 
-def plan_created_evidence(event: HookEvent, contract_set: ContractSet | None) -> dict[str, Any]:
-    """R1.8 prerequisite (ADR 0026): a `plan_created`-shaped payload for a
-    hook-gated event -- the first thing MCP-side machinery that reads
-    `plan_created` (`belay/policy/baseline.py`'s anomaly counting,
-    `belay/cli/causal.py`'s display) has to recognize on the hooks
-    surface at all. Written alongside `hook_pre_tool_use`, never
-    replacing it, and consulted by nothing in this gate -- this is
-    evidence assembled *after* `_decide_pre` already decided, it can
-    never influence a decision, only describe one after the fact.
+def resolve_effects(
+    event: HookEvent, contract_set: ContractSet | None
+) -> tuple[list[dict[str, Any]], str]:
+    """Best-effort `(effects, reversibility)` for a hook-gated event -- not
+    a real `Planner.plan()` run, hooks has no `Planner`/`PolicyEngine`
+    wiring and neither R1.8 nor R1.8.x adds any (ADR 0026 found that
+    would go permanently inert on this surface regardless, extending
+    R1.7.3's finding: the identity/ledger-shape mismatch is structural,
+    not fixed by more evidence alone). When a `ContractSet` is
+    configured and resolves this tool, its own declared
+    `effects`/`reversibility` are used verbatim -- the same source of
+    truth `evaluate_file_edit`/`evaluate_mcp_call` already resolve
+    against. Otherwise, a coarse guess by surface, always
+    `irreversible`: not because nothing here is ever undoable (native
+    file edits *are*, via `belay hooks rewind` -- a completely separate
+    mechanism, see ADR 0026's rewind-duplication finding), but because
+    *this* event has no declared `undo` a `belay rewind`-style
+    compensation could act on, and claiming otherwise would be a
+    fabricated claim of reversibility this gate cannot actually honor
+    through this payload.
 
-    `effects`/`reversibility` are a best-effort guess, not a real
-    `Planner.plan()` run -- hooks has no `Planner`/`PolicyEngine` wiring
-    and this slice does not add any (ADR 0026 found that would go
-    permanently inert on this surface regardless, extending R1.7.3's
-    finding: the identity/ledger-shape mismatch is structural, not fixed
-    by more evidence alone). When a `ContractSet` is configured and
-    resolves this tool, its own declared `effects`/`reversibility` are
-    used verbatim -- the same source of truth
-    `evaluate_file_edit`/`evaluate_mcp_call` already resolve against.
-    Otherwise, a coarse guess by surface, always `irreversible`: not
-    because nothing here is ever undoable (native file edits *are*, via
-    `belay hooks rewind` -- a completely separate mechanism, see ADR
-    0026's rewind-duplication finding), but because *this* event has no
-    declared `undo` a `belay rewind`-style compensation could act on, and
-    claiming otherwise would be a fabricated claim of reversibility this
-    gate cannot actually honor through this payload."""
+    The single shared source both `plan_created_evidence` (evidence) and
+    `evaluate_anomaly` (R1.8.x, an actual decision input) resolve effects
+    through -- one place that guesses, not two copies that could drift."""
     contract = contract_set.resolve(event.tool_name) if contract_set is not None else None
     if contract is not None:
         effects = [e.model_dump(mode="json") for e in contract.effects]
@@ -676,6 +708,20 @@ def plan_created_evidence(event: HookEvent, contract_set: ContractSet | None) ->
     else:
         effects = [{"type": "execute", "resource": event.tool_name}]
         reversibility = "irreversible"
+    return effects, reversibility
+
+
+def plan_created_evidence(event: HookEvent, contract_set: ContractSet | None) -> dict[str, Any]:
+    """R1.8 prerequisite (ADR 0026): a `plan_created`-shaped payload for a
+    hook-gated event -- the first thing MCP-side machinery that reads
+    `plan_created` (`belay/policy/baseline.py`'s anomaly counting,
+    `belay/cli/causal.py`'s display) has to recognize on the hooks
+    surface at all. Written alongside `hook_pre_tool_use`, never
+    replacing it, and consulted by nothing in this gate -- this is
+    evidence assembled *after* `_decide_pre` already decided, it can
+    never influence a decision, only describe one after the fact. See
+    `resolve_effects` for how `effects`/`reversibility` are derived."""
+    effects, reversibility = resolve_effects(event, contract_set)
     return {
         "tool": event.tool_name,
         "args": event.args,

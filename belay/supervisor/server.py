@@ -50,6 +50,7 @@ from belay.contracts.loader import load_contract_set
 from belay.contracts.model import ContractSet
 from belay.errors import BelayError
 from belay.hooks import claude_code_adapter, gate
+from belay.hooks.anomaly import AnomalyConfig
 from belay.hooks.decision import ExtraAllowlist, load_extra_allowlist
 from belay.hooks.file_snapshot import SnapshotStore
 from belay.hooks.gate import GateDecision
@@ -196,6 +197,7 @@ class Supervisor:
         self._contract_set = self._load_contract_set()
         self._quota = self._load_quota_config()
         self._extra_allowlist = self._load_extra_allowlist()
+        self._anomaly = self._load_anomaly_config()
 
     def _load_contract_set(self) -> ContractSet | ConfigUnavailable | None:
         """`None` (the default) is unchanged legacy behavior -- no
@@ -240,6 +242,25 @@ class Supervisor:
             return ConfigUnavailable(f"quota config file is unreadable/invalid: {exc}")
         return QuotaConfig(ledger=self._ledger, max_actions=max_actions, window=window)
 
+    def _load_anomaly_config(self) -> AnomalyConfig | ConfigUnavailable | None:
+        """`None` (the default) means no anomaly check at all -- only set
+        when `belay hooks install --anomaly` wrote
+        `identity.anomaly_pointer_path` for this install. Same R1.6 posture
+        as `_load_quota_config`: once that pointer file exists, an
+        unreadable target returns `ConfigUnavailable` rather than silently
+        falling back to "no anomaly check". Unlike quota, there is nothing
+        to parse out of the file's content (R1.8.x, ADR 0026, has no
+        per-run tuning surface yet) -- only its readability matters, so a
+        present-but-unreadable pointer is the only failure mode."""
+        pointer = self._identity.anomaly_pointer_path
+        if not pointer.is_file():
+            return None
+        try:
+            pointer.read_text(encoding="utf-8")
+        except OSError as exc:
+            return ConfigUnavailable(f"anomaly pointer file is unreadable: {exc}")
+        return AnomalyConfig(ledger=self._ledger)
+
     def _load_extra_allowlist(self) -> ExtraAllowlist | ConfigUnavailable:
         """`()` (the default) means no operator-configured entries --
         exactly `belay/hooks/decision.py::classify_bash`'s own default.
@@ -273,6 +294,7 @@ class Supervisor:
         contract_set = self._contract_set
         quota = self._quota
         extra_allowlist = self._extra_allowlist
+        anomaly = self._anomaly
         broken: list[str] = []
         if isinstance(contract_set, ConfigUnavailable):
             broken.append(f"contracts ({contract_set.reason})")
@@ -283,6 +305,9 @@ class Supervisor:
         if isinstance(extra_allowlist, ConfigUnavailable):
             broken.append(f"extra Bash allowlist ({extra_allowlist.reason})")
             extra_allowlist = ()
+        if isinstance(anomaly, ConfigUnavailable):
+            broken.append(f"anomaly ({anomaly.reason})")
+            anomaly = None
         if broken:
             return GateDecision(
                 "deny",
@@ -317,7 +342,7 @@ class Supervisor:
             )
         if event.surface == "mcp":
             return gate.evaluate_mcp_call(
-                event, self._queue, contract_set=contract_set, quota=quota
+                event, self._queue, contract_set=contract_set, quota=quota, anomaly=anomaly
             )
         # its own guard denies unrecognized surfaces
         return gate.evaluate(event, self._queue, quota=quota, extra_allowlist=extra_allowlist)

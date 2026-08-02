@@ -243,3 +243,70 @@ enforcement on this surface.
   produce real, non-empty output for hook-gated sessions for the first
   time -- both were previously silently blind to the hooks surface, not
   merely "not yet unified" with it.
+
+## R1.8.x: quota/anomaly/rewind revisited with real ledger evidence
+
+With R1.8's prerequisite shipped, the user asked to revisit quota,
+anomaly, and rewind unification concretely rather than assume they were
+now automatically unlocked. Investigating each found three different
+answers, not one:
+
+**Quota: still blocked, no new code.** `belay/policy/engine.py`'s quota
+check keys on `session_started.initiated_by`, an event hooks
+deliberately still does not write -- faking `initiated_by` from
+`event.os_user` would blur the identity distinction ADR 0023 established
+on purpose ("which OS user is running this agent" vs. "who authorized
+this session"). `HookQuotaTracker` (ADR 0023) remains the permanent
+answer for hooks quota, not a stepping stone.
+
+**Rewind: still two systems, no new code.** Real `step_committed` events
+now flow, but `belay/hooks/gate.py` still emits
+`compensation_registered: {"reversible": false, ...}` for every hooks
+step by design (see "Implementation" above) -- so every hooks-sourced
+step correctly classifies `irreversible`, not "almost reversible."
+Making it real would mean re-expressing `SnapshotStore`'s byte-level
+restore as an `undo.tool`/`undo.args`-shaped compensation
+`RewindService` could execute -- a genuine behavioral redesign, not a
+consequence of more ledger events existing.
+
+**Anomaly: genuinely different, and built -- but weaker than it first
+looked.** `belay/policy/baseline.py::BaselineStore.stats()` has zero
+identity dependency (it only reads `plan_created` events matching
+`(tool, effect_type)`), which R1.8 now makes real for hooks. This is the
+opposite blocker from quota, and reusing `BaselineStore` directly
+(`belay/hooks/anomaly.py::evaluate_anomaly`, no parallel tracker) is
+genuinely tractable. Shipped: `AnomalyConfig`/`evaluate_anomaly` wired
+into `evaluate_mcp_call` only (declared read-only auto-allow now falls
+through to the normal pause/queue flow when anomalous, never widening
+anything), `Supervisor._load_anomaly_config` mirroring
+`_load_quota_config`'s R1.6 fail-closed posture exactly, and
+`belay hooks install --anomaly` (a bare opt-in flag, no per-run tuning
+surface -- fixed thresholds matching `AnomalyDefaults`).
+
+**The limitation found while testing this, corrected from the original
+plan's expectation**: it isn't just "inert for the common uncontracted
+case" -- it is currently inert for *every* real hook-gated call,
+contracted or not. `resolve_effects` resolves a configured `Contract`'s
+declared effects verbatim (spec §5.3's "contract"-basis: a literal
+string declared once in the YAML). The MCP proxy path only ever sees a
+genuinely varying, real per-call count via `sql_simulator`
+(`belay/planner/planner.py::_sql_effects`, ADR 0011) or `native_dry_run`
+(the tool executed dry) -- both requiring something to actually run at
+decision time. Hooks has neither: the same literal count comes back on
+every call to a given tool, so `value` always equals `stats.mean` once a
+baseline exists, never exceeds it. `tests/hooks/test_anomaly.py::test_real_static_contract_effects_never_vary_so_this_never_actually_flags`
+and `tests/cli/test_hooks_lifecycle.py::TestAnomalyEndToEnd` prove this
+directly (15 real repeated calls through a real static count-bearing
+contract, never once flagged) rather than leaving it as an inference.
+The z-score logic itself is proven correct separately, by seeding the
+ledger directly with a varying-count history (what a future dynamic
+count source would produce) -- see the rest of
+`tests/hooks/test_anomaly.py`.
+
+This is real, tested, foundational machinery -- not dead code -- and the
+correct base for the day hooks gains its own dynamic count source. It is
+not, as of R1.8.x, something that can actually pause a real anomalous
+call; every doc/help string this slice touched (`belay hooks install
+--anomaly --help`, the install-time success message, both docstrings in
+`belay/hooks/anomaly.py`/`belay/hooks/gate.py`) says so plainly rather
+than overclaiming parity with the MCP proxy's own anomaly check.
