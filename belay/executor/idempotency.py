@@ -11,12 +11,13 @@ restart.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any
 
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session as DBSession
 
+from belay.db.lifecycle import EngineLease
 from belay.db.models import Base, IdempotencyRow
 
 
@@ -43,8 +44,25 @@ class IdempotencyStore:
     """Tracks in-flight and completed calls by their declared `idempotency_key`."""
 
     def __init__(self, db_url: str = "sqlite:///:memory:", *, engine: Engine | None = None) -> None:
-        self._engine = engine if engine is not None else create_engine(db_url, future=True)
+        self._engine_lease = (
+            EngineLease.create(db_url) if engine is None else EngineLease.borrow(engine)
+        )
+        self._engine = self._engine_lease.engine
         Base.metadata.create_all(self._engine)
+
+    def close(self) -> None:
+        self._engine_lease.close()
+
+    def __enter__(self) -> IdempotencyStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def get(self, key: str) -> IdempotencyRecord | None:
         with DBSession(self._engine) as db:

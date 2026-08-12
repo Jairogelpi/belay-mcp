@@ -9,13 +9,15 @@ import threading
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
+from types import TracebackType
 from typing import Any
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session as DBSession
 
 from belay.canonical import canonical_bytes, sha256_hex
+from belay.db.lifecycle import EngineLease
 from belay.db.models import Base, EventRow
 from belay.ledger.model import GENESIS_HASH, Event
 
@@ -50,13 +52,30 @@ class LedgerStore:
     """
 
     def __init__(self, db_url: str = "sqlite:///:memory:", *, engine: Engine | None = None) -> None:
-        self._engine = engine if engine is not None else create_engine(db_url, future=True)
+        self._engine_lease = (
+            EngineLease.create(db_url) if engine is None else EngineLease.borrow(engine)
+        )
+        self._engine = self._engine_lease.engine
         Base.metadata.create_all(self._engine)
         # ponytail: process-local lock per session, not a DB-level lock —
         # fine for single-process `belay run`; multi-process writers to the
         # same SQLite file would need a real advisory/row lock instead.
         self._locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+    def close(self) -> None:
+        self._engine_lease.close()
+
+    def __enter__(self) -> LedgerStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def _lock_for(self, session_id: str) -> threading.Lock:
         with self._locks_guard:

@@ -26,14 +26,16 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import TracebackType
 from typing import Any, Literal
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session as DBSession
 
 from belay.clock import Clock, SystemClock
+from belay.db.lifecycle import EngineLease
 from belay.db.models import ApprovalRow, Base
 from belay.errors import BelayError
 
@@ -134,9 +136,26 @@ class ApprovalQueue:
         engine: Engine | None = None,
         clock: Clock | None = None,
     ) -> None:
-        self._engine = engine if engine is not None else create_engine(db_url, future=True)
+        self._engine_lease = (
+            EngineLease.create(db_url) if engine is None else EngineLease.borrow(engine)
+        )
+        self._engine = self._engine_lease.engine
         Base.metadata.create_all(self._engine)
         self._clock = clock or SystemClock()
+
+    def close(self) -> None:
+        self._engine_lease.close()
+
+    def __enter__(self) -> ApprovalQueue:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def request(
         self,
