@@ -32,32 +32,16 @@ def test_install_sh_exists_and_is_executable() -> None:
         assert os.access(INSTALL_SH, os.X_OK)
 
 
-def _msys_path(path: Path) -> str:
-    """`C:/Users/...` -> `/c/Users/...` -- Git Bash (MSYS)'s own mount
-    convention, not a plain drive-letter path with forward slashes (which it
-    fails to resolve at all -- confirmed empirically on this Windows
-    machine). No-op-ish on POSIX (no drive letter to rewrite)."""
-    posix = path.as_posix()
-    if len(posix) > 2 and posix[1] == ":":
-        return f"/{posix[0].lower()}{posix[2:]}"
-    return posix
-
-
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
 def test_install_sh_has_valid_syntax() -> None:
-    # Resolve to the full path via shutil.which and pass THAT as argv[0] --
-    # on Windows, a bare "bash" argv[0] goes through CreateProcess's own
-    # search order (which includes System32) rather than shutil.which's
-    # PATH-only search, and can silently resolve to the WSL bash.exe shim
-    # instead of Git Bash -- confirmed on this machine: WSL's bash doesn't
-    # understand "/c/..." MSYS-style paths and fails with a confusingly
-    # identical "No such file or directory".
     bash = shutil.which("bash")
     assert bash is not None
+    # Windows text-mode pipes translate LF to CRLF, which WSL Bash rejects.
+    script = INSTALL_SH.read_bytes()
     result = subprocess.run(
-        [bash, "-n", _msys_path(INSTALL_SH)], capture_output=True, text=True, check=False
+        [bash, "-n"], input=script, capture_output=True, check=False
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
 
 
 def test_install_sh_defaults_to_the_real_repo_and_main_branch() -> None:
