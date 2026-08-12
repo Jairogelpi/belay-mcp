@@ -48,6 +48,7 @@ from sqlalchemy import create_engine
 from belay.approvals.queue import ApprovalQueue
 from belay.contracts.loader import load_contract_set
 from belay.contracts.model import ContractSet
+from belay.db.lifecycle import EngineLease
 from belay.errors import BelayError
 from belay.hooks import claude_code_adapter, gate
 from belay.hooks.anomaly import AnomalyConfig
@@ -167,6 +168,8 @@ class Supervisor:
         # (plan-v2 E19.7).
         identity.lock_path.parent.mkdir(parents=True, exist_ok=True)
         engine = create_engine(f"sqlite:///{identity.data_path}", future=True)
+        self._engine_lease = EngineLease(engine, owned=True)
+        self._engine = engine
         self._queue = ApprovalQueue(engine=engine)
         self._idempotency = IdempotencyStore(engine)
         self._ledger = LedgerStore(engine=engine)
@@ -526,6 +529,10 @@ class Supervisor:
             return _collision_response(event.phase)
         return winner.response
 
+    def close(self) -> None:
+        """Dispose the shared database engine once all supervisor work ends."""
+        self._engine_lease.close()
+
     def serve_forever(self) -> None:
         """Runs `MAX_WORKERS` accept threads and `MAX_WORKERS` handler
         threads, all `daemon=True`. Deliberately hand-rolled rather than
@@ -536,12 +543,19 @@ class Supervisor:
         (confirmed empirically too). Together those mean a stuck accept
         call would keep a non-daemon thread alive forever, which keeps the
         whole process alive forever, which is exactly the hang a shutdown
-        path must never have. Daemon threads sidestep that: once
-        `shutdown_event` is set, this method returns immediately and the
-        process can exit even with an accept thread still parked -- the OS
+        path must never have. Daemon threads sidestep that: shutdown does
+        not join accept threads, so after the handler workers drain this
+        method can return even with an accept thread still parked -- the OS
         reclaims it along with everything else when the process actually
-        terminates.
+        terminates. Handler threads are different: shutdown joins them so
+        none can use the shared database engine after its lease is closed.
         """
+        try:
+            self._serve_forever()
+        finally:
+            self.close()
+
+    def _serve_forever(self) -> None:
         authkey = load_or_create_authkey(self._identity.authkey_path)
         if sys.platform != "win32":
             # A hard-killed (not gracefully shut down) prior supervisor for
@@ -564,6 +578,41 @@ class Supervisor:
         listener = Listener(self._identity.address, authkey=authkey, backlog=self.MAX_WORKERS * 2)
         shutdown_event = threading.Event()
         connections: queue.Queue[Any] = queue.Queue()
+        # Linearizes accept->queue handoff and worker dispatch admission with
+        # the shutdown transition. Once shutdown owns this lock and flips the
+        # flag, no connection can be queued behind the worker sentinels or
+        # newly admitted to `_handle_connection`.
+        dispatch_lock = threading.Lock()
+        accepting_connections = True
+
+        def request_shutdown() -> None:
+            nonlocal accepting_connections
+            with dispatch_lock:
+                accepting_connections = False
+                shutdown_event.set()
+
+        def handoff(conn: Any) -> None:
+            with dispatch_lock:
+                if not accepting_connections:
+                    conn.close()
+                    return
+                connections.put(conn)
+
+        def begin_dispatch(conn: Any) -> bool:
+            with dispatch_lock:
+                if not accepting_connections:
+                    conn.close()
+                    return False
+                return True
+
+        def close_queued_connections() -> None:
+            while True:
+                try:
+                    conn = connections.get_nowait()
+                except queue.Empty:
+                    return
+                if conn is not _STOP:
+                    conn.close()
 
         def accept_loop() -> None:
             while not shutdown_event.is_set():
@@ -583,38 +632,62 @@ class Supervisor:
                         return  # the listener was closed as part of shutdown -- expected
                     logger.exception("error accepting a connection")
                     continue
-                connections.put(conn)
+                handoff(conn)
 
         def worker_loop() -> None:
             while True:
                 conn = connections.get()
                 if conn is _STOP:
                     return
-                self._handle_connection(conn, shutdown_event)
+                if not begin_dispatch(conn):
+                    continue
+                self._handle_connection(conn, request_shutdown)
 
-        threads = [
+        accept_threads = [
             threading.Thread(target=accept_loop, daemon=True, name=f"belay-accept-{i}")
             for i in range(self.MAX_WORKERS)
-        ] + [
+        ]
+        worker_threads = [
             threading.Thread(target=worker_loop, daemon=True, name=f"belay-worker-{i}")
             for i in range(self.MAX_WORKERS)
         ]
-        for t in threads:
-            t.start()
+        started_accept_threads: list[threading.Thread] = []
+        started_worker_threads: list[threading.Thread] = []
+        try:
+            # Append only after start() returns: setup can fail partway, and
+            # cleanup must join exactly the database-using workers that exist.
+            for thread in accept_threads:
+                thread.start()
+                started_accept_threads.append(thread)
+            for thread in worker_threads:
+                thread.start()
+                started_worker_threads.append(thread)
 
-        logger.info("belay supervisor listening on %s", self._identity.address)
-        shutdown_event.wait()
-        logger.info("belay supervisor shutting down on request")
-        for _ in range(self.MAX_WORKERS):
-            connections.put(_STOP)  # let idle workers exit their loop promptly
-        listener.close()
+            logger.info("belay supervisor listening on %s", self._identity.address)
+            shutdown_event.wait()
+            logger.info("belay supervisor shutting down on request")
+        finally:
+            request_shutdown()
+            try:
+                listener.close()
+            finally:
+                close_queued_connections()
+                for _ in started_worker_threads:
+                    connections.put(_STOP)  # let idle workers exit their loop promptly
+                for worker in started_worker_threads:
+                    worker.join()
+                close_queued_connections()
+                # Accept threads are deliberately not joined: Listener.close()
+                # cannot reliably unblock an accept already in progress. They
+                # remain daemon threads and any later accepted connection loses
+                # `handoff()` against `accepting_connections` and is closed.
 
     # `listener.accept()` returns `Connection | PipeConnection` (the latter
     # Windows-only, for named pipes) -- typeshed doesn't expose a common
     # base type for both that's convenient to annotate with, hence `Any`
     # rather than fighting the stdlib's own cross-platform typing gap.
-    def _handle_connection(self, conn: Any, shutdown_event: threading.Event) -> None:
-        """Runs in a worker thread. Sets `shutdown_event` if this connection
+    def _handle_connection(self, conn: Any, request_shutdown: Callable[[], None]) -> None:
+        """Runs in a worker thread. Requests shutdown if this connection
         asked the supervisor to stop (after replying, so the client isn't
         left waiting on a connection that was simply dropped). Any I/O
         error on `conn` -- the peer disconnecting, a broken pipe
@@ -623,7 +696,7 @@ class Supervisor:
         down this one worker thread in a way that leaks it."""
         try:
             if self._handle_request(conn) == "shutdown":
-                shutdown_event.set()
+                request_shutdown()
         except (OSError, EOFError):
             logger.warning("connection error while handling a request", exc_info=True)
         finally:

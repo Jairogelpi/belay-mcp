@@ -5,15 +5,23 @@ its cache on every supervisor restart.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from belay.supervisor.idempotency import IdempotencyStore, content_digest, event_key
 from belay.supervisor.protocol import HookEvent
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 
-def _engine(tmp_path: Path):
-    return create_engine(f"sqlite:///{tmp_path / 'idem.db'}", future=True)
+@pytest.fixture
+def engine(tmp_path: Path) -> Iterator[Engine]:
+    engine = create_engine(f"sqlite:///{tmp_path / 'idem.db'}", future=True)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 def _event(command: str = "rm -rf /tmp/x", event_id: str = "toolu_1") -> HookEvent:
@@ -39,13 +47,13 @@ def _event(command: str = "rm -rf /tmp/x", event_id: str = "toolu_1") -> HookEve
     )
 
 
-def test_get_returns_none_when_absent(tmp_path: Path) -> None:
-    store = IdempotencyStore(_engine(tmp_path))
+def test_get_returns_none_when_absent(engine: Engine) -> None:
+    store = IdempotencyStore(engine)
     assert store.get("nope") is None
 
 
-def test_record_then_get_round_trips(tmp_path: Path) -> None:
-    store = IdempotencyStore(_engine(tmp_path))
+def test_record_then_get_round_trips(engine: Engine) -> None:
+    store = IdempotencyStore(engine)
     key = event_key("i1", "claude-code", "s1", "e1", "pre")
     digest = "abc123"
     response = {"hookSpecificOutput": {"permissionDecision": "deny"}}
@@ -57,22 +65,28 @@ def test_record_then_get_round_trips(tmp_path: Path) -> None:
     assert cached.response == response
 
 
-def test_survives_a_fresh_store_instance_against_the_same_engine(tmp_path: Path) -> None:
+def test_survives_a_fresh_store_instance_against_the_same_engine(
+    engine: Engine, tmp_path: Path
+) -> None:
     """Simulates a supervisor restart: a NEW IdempotencyStore (as a fresh
     process would construct) against the SAME underlying file must still
     see prior decisions -- the whole point of moving off an in-memory dict."""
-    engine = _engine(tmp_path)
     key = event_key("i1", "claude-code", "s1", "e1", "pre")
     IdempotencyStore(engine).record_if_absent(key, "digest1", {"a": 1})
+    engine.dispose()
 
-    reopened = IdempotencyStore(_engine(tmp_path))  # a different Store, same file
-    cached = reopened.get(key)
-    assert cached is not None
-    assert cached.response == {"a": 1}
+    reopened_engine = create_engine(f"sqlite:///{tmp_path / 'idem.db'}", future=True)
+    try:
+        reopened = IdempotencyStore(reopened_engine)  # a different Store, same file
+        cached = reopened.get(key)
+        assert cached is not None
+        assert cached.response == {"a": 1}
+    finally:
+        reopened_engine.dispose()
 
 
-def test_record_if_absent_second_call_returns_the_first_winner(tmp_path: Path) -> None:
-    store = IdempotencyStore(_engine(tmp_path))
+def test_record_if_absent_second_call_returns_the_first_winner(engine: Engine) -> None:
+    store = IdempotencyStore(engine)
     key = event_key("i1", "claude-code", "s1", "e1", "pre")
     first = store.record_if_absent(key, "digestA", {"answer": "first"})
     second = store.record_if_absent(key, "digestB", {"answer": "second"})

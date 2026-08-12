@@ -10,7 +10,11 @@ from sqlalchemy.engine import Engine
 
 
 class EngineLease:
-    """Own or borrow an engine and close only engines created by the lease."""
+    """Own or borrow an engine and close only engines created by the lease.
+
+    An owning lease must outlive every borrower. Using a borrowed engine after
+    its owner has closed the lease is unsupported.
+    """
 
     def __init__(self, engine: Engine, *, owned: bool) -> None:
         self._engine = engine

@@ -162,14 +162,17 @@ class TestNormalizeApplyPatchApproval:
         params = _patch_params(fileChanges={str(target): {"type": "update", "unified_diff": "x"}})
         event = normalize_apply_patch_approval(params, installation_id="i", host_session_id="s")
 
-        queue = ApprovalQueue()
         engine = create_engine("sqlite:///:memory:", future=True)
-        snapshots = SnapshotStore(engine, tmp_path / "snaps")
-        result = evaluate_file_edit(event, queue, snapshots)
-        assert result.verdict == "allow"
-        snap = snapshots.get(event.event_id)
-        assert snap is not None
-        assert snap.existed_before is True
+        try:
+            snapshots = SnapshotStore(engine, tmp_path / "snaps")
+            with ApprovalQueue() as queue:
+                result = evaluate_file_edit(event, queue, snapshots)
+            assert result.verdict == "allow"
+            snap = snapshots.get(event.event_id)
+            assert snap is not None
+            assert snap.existed_before is True
+        finally:
+            engine.dispose()
 
 
 class TestRenderApplyPatchApprovalResponse:
