@@ -91,8 +91,8 @@ def filesystem_pack() -> BundledFilesystemPack:
 
     metadata = yaml.safe_load(pack_yaml_path.read_text(encoding="utf-8"))
     upstream = metadata.get("upstream", {}) if isinstance(metadata, dict) else {}
-    identity = upstream.get("identity")
-    version = upstream.get("verified_version")
+    identity = str(upstream.get("identity"))
+    version = str(upstream.get("verified_version"))
     _check_pin(identity, version)
 
     return BundledFilesystemPack(
