@@ -288,4 +288,3 @@ Expected: clean formatting and no uncommitted files.
 - [ ] **Step 5: Push and open PR E21**
 
 The PR body must link `docs/plan.md` E21, list tests added, paste the exact verification summaries, and avoid claiming E22/E23.
-
