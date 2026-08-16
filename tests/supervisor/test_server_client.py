@@ -586,6 +586,28 @@ def test_shutdown_does_not_strand_connection_accepted_during_queue_handoff(
     serve_thread.start()
 
     authkey = load_or_create_authkey(identity.authkey_path)
+    # `serve_thread.start()` only schedules the thread -- it does not wait
+    # for `_serve_forever` to actually bind the `Listener`. Dialing in
+    # before that bind happens fails immediately (`Client(...)` raises
+    # `OSError`, uncaught inside `active_thread`'s target, silently
+    # swallowed by the threading module), which then hangs every
+    # downstream `.wait(...)` in this test forever regardless of timeout,
+    # since nothing will ever retry the connection. The real root cause of
+    # this test's CI flakiness -- confirmed by reproducing it locally with
+    # even a 5s timeout -- not merely a too-tight budget. Same
+    # connect-and-close readiness probe `running_supervisor` above already
+    # uses.
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            probe = Client(identity.address, authkey=authkey)
+        except OSError:
+            if time.monotonic() >= deadline:
+                pytest.fail("supervisor never started listening")
+            time.sleep(0.02)
+            continue
+        probe.close()
+        break
     active_event = {
         "_host": "claude-code",
         "session_id": "s-handoff",
