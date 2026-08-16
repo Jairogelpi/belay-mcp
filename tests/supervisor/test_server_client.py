@@ -602,7 +602,16 @@ def test_shutdown_does_not_strand_connection_accepted_during_queue_handoff(
         daemon=True,
     )
     active_thread.start()
-    assert handler_started.wait(timeout=2)
+    # These outer waits gate the same handoff the mocked handlers below
+    # budget 5s for internally (`release_handler`/`allow_shutdown_signal`/
+    # `release_late_handoff` all use `timeout=5`) -- a real accept -> queue
+    # -> worker-dispatch round trip over the actual IPC transport, spawning
+    # MAX_WORKERS threads fresh, observed to occasionally exceed 2s on
+    # loaded shared CI runners (not a functional regression: confirmed
+    # locally passing well under 1s). Match that same 5s budget here so a
+    # slow-but-healthy CI runner doesn't fail this test at the very first
+    # synchronization point.
+    assert handler_started.wait(timeout=5)
 
     shutdown_responses: list[SupervisorResponse] = []
     shutdown_thread = threading.Thread(
@@ -612,21 +621,21 @@ def test_shutdown_does_not_strand_connection_accepted_during_queue_handoff(
         daemon=True,
     )
     shutdown_thread.start()
-    assert shutdown_response_sent.wait(timeout=2)
+    assert shutdown_response_sent.wait(timeout=5)
 
     block_next_handoff.set()
     late_client = Client(identity.address, authkey=authkey)
-    assert late_handoff_started.wait(timeout=2)
+    assert late_handoff_started.wait(timeout=5)
     allow_shutdown_signal.set()
-    shutdown_thread.join(timeout=2)
+    shutdown_thread.join(timeout=5)
     assert shutdown_responses[0].ok
-    all_sentinels_queued.wait(timeout=0.2)
+    all_sentinels_queued.wait(timeout=2)
     release_late_handoff.set()
     try:
         assert disposed == []
         release_handler.set()
-        active_thread.join(timeout=2)
-        serve_thread.join(timeout=2)
+        active_thread.join(timeout=5)
+        serve_thread.join(timeout=5)
 
         assert active_responses[0].ok
         assert disposed == [engine]
@@ -637,9 +646,9 @@ def test_shutdown_does_not_strand_connection_accepted_during_queue_handoff(
         release_handler.set()
         allow_shutdown_signal.set()
         late_client.close()
-        shutdown_thread.join(timeout=2)
-        active_thread.join(timeout=2)
-        serve_thread.join(timeout=2)
+        shutdown_thread.join(timeout=5)
+        active_thread.join(timeout=5)
+        serve_thread.join(timeout=5)
 
 
 def test_a_connected_but_silent_client_does_not_block_other_clients(
