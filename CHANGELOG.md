@@ -18,6 +18,36 @@ once it reaches 1.0.
 
 ### Added
 
+- **E22 -- zero-config Codex/Claude connection (`belay connect`/`belay
+  disconnect`):** one command connects the current directory to a
+  Belay-protected instance of the pinned Filesystem MCP server
+  (`@modelcontextprotocol/server-filesystem`, pinned to `2026.7.10`, now
+  shipped inside the wheel at `belay/packs/filesystem/`), registering with
+  every detected client (Codex CLI, Claude Code CLI, Claude Desktop)
+  through each one's OWN official registration mechanism
+  (`codex mcp add`/`claude mcp add`, never a hand-rolled edit of
+  `~/.codex/config.toml`/`~/.claude.json`; Claude Desktop, which has no
+  CLI, gets a surgical `mcpServers.<name>` JSON merge instead). A real MCP
+  `initialize`/`list_tools` preflight -- through Belay, spawning the exact
+  argv that will be registered -- runs before any client is touched, and
+  again afterward against each client's own recorded registration, before
+  the connection is ever marked `connected`. The whole transaction is
+  compare-and-swap: every target's before/after bytes are snapshotted
+  (`belay/cli/connection_models.py`), so a failure anywhere reverses
+  everything already done in exact reverse order, and a target that
+  changed underneath Belay mid-rollback is never overwritten -- the
+  connection is left `rollback_incomplete` and reported by name rather
+  than silently clobbered. `belay disconnect` removes only what `belay
+  connect` itself registered (same compare-and-swap discipline), never
+  deletes `.belay/belay.db`, and only removes `.belay/belay.wrap.json`
+  with `--purge-runtime`. `belay doctor`/`belay repair` understand this
+  connection's health too (`inspect_connection`, read-only). Claude Code
+  additionally gets a project-scoped `PreToolUse`/`PostToolUse` hook at
+  `<project>/.claude/settings.json`; Codex gets MCP-only protection --
+  said plainly, there is no Codex-side native-tool hook this integrates
+  with. See the README's "Zero-config: `belay connect`" section and
+  `docs/architecture.md`'s "Zero-config client connection" section.
+
 - **R1.8 -- hooks gets a real step-lifecycle ledger presence
   ([ADR 0026](docs/adr/0026-r1-8-hooks-ledger-vocabulary.md)):**
   investigated whether the pattern R1.7.3 found (hooks reusing
