@@ -96,8 +96,8 @@ once it reaches 1.0.
   `CapabilityLease`/`OutcomeEvidence`/`TransactionReceipt`) and maps each
   piece onto what already exists in the codebase (`Plan`, `PolicyResult`,
   `SagaExecutor`'s stages, `SignedEvidence`) -- this slice is the first
-  concrete step, not the whole thing; R1.7.2-R1.7.3 (below) landed in the
-  same session, R1.7.4 remains sequenced, not built yet.
+  concrete step, not the whole thing; R1.7.2-R1.7.4 (below) landed in the
+  same session.
 
 - **R1.7.2 -- named step-outcome event-type constants:** implementing the
   `OutcomeEvidence` unification ADR 0025 sketched found the three

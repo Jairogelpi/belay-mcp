@@ -27,13 +27,15 @@ gated, and — when it goes wrong — reversible."
 > (E10-E20, `docs/plan-v2.md`) shipped past v0.1.0 without breaking L3 — see
 > "What's new since v0.1.0" below (E18 is a first slice — Claude Code only,
 > said plainly in its own section below; R1.6, see [`CHANGELOG.md`](CHANGELOG.md),
-> closed six correctness gaps in that gate). 834 tests, passing on real
-> Linux/macOS/Windows CI (not just one dev machine — see E19.7 below), plus
+> closed six correctness gaps in that gate). Passing on real
+> Linux/macOS/Windows CI (not just one dev machine — see E19.7 below and the
+> CI badge above for the current run), plus
 > [`docs/traceability.md`](docs/traceability.md) proving every normative MUST
 > in the spec has a real test (CI-enforced, not a stale doc). The protocol is
 > specified in [`docs/spec.md`](docs/spec.md) (Belay Specification 0.1).
-> **Coverage: ~82% repo-wide** (`fail_under = 79`, CI-enforced floor against
-> regressions — raised as more lands, never lowered silently). The
+> **Branch coverage: 81.34% repo-wide**, measured 2026-08-12 (`fail_under =
+> 81`, CI-enforced floor against regressions — raised as more lands, never
+> lowered silently; see [ADR 0027](docs/adr/0027-e21-release-truth.md)). The
 > spec-normative core stays high where it matters — `contracts/` 92-100%,
 > `policy/` 88-100%, `ledger/` 93-100%, `rewind/` 87-94%, `intent/` (scope
 > enforcement) 79-100% — it's the newer adoption/DX modules (dashboard,
@@ -361,8 +363,11 @@ verdicts, and pending approvals with the exact command to resolve them.
 
 ## What's new since v0.1.0
 
-Seven entregas landed on top of the v0.1.0 lifecycle (`docs/plan-v2.md`,
-ADRs 0010-0018), each additive — none weakened an existing test or broke L3
+Seven of the eleven entregas that landed on top of the v0.1.0 lifecycle
+(`docs/plan-v2.md`, ADRs 0010-0018) are spec-numbered lifecycle extensions,
+listed below; the remaining four (E17-E20) are adoption/DX work, covered in
+the "Adoption/DX" subsection right after. Each is additive — none weakened
+an existing test or broke L3
 conformance:
 
 - **Statistical anomaly baselines** (E10) — a per-session rolling
@@ -508,14 +513,20 @@ replacement for any:
 
 ## Release status
 
-`v0.1.0` is tagged (`git tag v0.1.0`, on top of the full E0-E9 Definition of
-Done, §0) but **not published to PyPI yet** — that's a manual step for the
-maintainer (PyPI trusted publishing must be configured on the PyPI project
-first; an agent cannot do that). `main` is currently ahead of the `v0.1.0`
-tag with E10-E20 (see "What's new since v0.1.0" above); no new tag has been
-cut for those yet. See
+`v0.1.0` is tagged (`git tag v0.1.0`) and immutable, but it is a **historical,
+incomplete** release candidate: it contains package version `0.1.0.dev0`, its
+PyPI Trusted Publishing workflow failed because Trusted Publishing was never
+configured (so it did not publish to PyPI), and it did not meet the
+historical global Definition of Done (§0) — 90% branch coverage and a
+clean-clone test run under 60 seconds. See
+[ADR 0027](docs/adr/0027-e21-release-truth.md) for the full record; it will
+not be moved, recreated, or force-updated to change that history.
+
+`main` is currently ahead of `v0.1.0` with E10-E20 (see "What's new since
+v0.1.0" above). `v0.2.0a1` is the planned next GitHub prerelease — see
 [`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
-[`CHANGELOG.md`](CHANGELOG.md).
+[`CHANGELOG.md`](CHANGELOG.md); it has not been cut yet, and no GitHub
+Release or PyPI publication should be assumed to exist until it is.
 
 An npm wrapper package (`npm/`, also `belay-mcp`) is written and locally
 verified but likewise **not published to npm yet** — same manual step,
