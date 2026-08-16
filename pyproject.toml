@@ -98,7 +98,7 @@ strict = false
 ignore_errors = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=belay --cov-report=term-missing -m \"not slow and not live_conformance\""
+addopts = "--cov=belay --cov-branch --cov-report=term-missing -m \"not slow and not live_conformance\""
 testpaths = ["tests"]
 markers = [
     "slow: starts a real MCP subprocess or otherwise runs noticeably longer than the fast suite",
@@ -109,15 +109,8 @@ markers = [
 source = ["belay"]
 
 [tool.coverage.report]
-# 79.7-80.0% real, measured (observed to vary by a few tenths of a point run
-# to run with no code changes -- likely test-order/hash-seed nondeterminism
-# affecting which conditional branches execute -- so the floor below is set
-# with real margin under the low end, not pinned to a single run's number),
-# after the E18 first slice (belay/hooks/: Bash risk classifier,
-# ApprovalQueue-backed PreToolUse gate, belay hooks
-# install/uninstall/doctor/run) plus the one-line installers
-# (scripts/install.sh/.ps1). Locked in as a floor against regressions --
-# raise it as more integration tests land, target 90% (plan.md §0), but
-# never lower it silently.
-fail_under = 79
+# Measured Python 3.13 safe fast-gate branch coverage was 81.15% on
+# 2026-08-12. The enforceable floor is 81%, is upward-only, and must never be
+# silently lowered. The historical target remains 90% (docs/plan.md section 0).
+fail_under = 81
 exclude_also = ["if TYPE_CHECKING:"]

@@ -15,6 +15,7 @@ shaped like the old raw-payload API.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -49,6 +50,15 @@ def clock() -> FixedClock:
 @pytest.fixture
 def queue(clock: FixedClock) -> ApprovalQueue:
     return ApprovalQueue(clock=clock)
+
+
+@pytest.fixture
+def snapshots(tmp_path: Path) -> Iterator[SnapshotStore]:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    try:
+        yield SnapshotStore(engine, tmp_path / "snaps")
+    finally:
+        engine.dispose()
 
 
 def _event(
@@ -625,29 +635,24 @@ class TestFileEditContractCheck:
     fully unchanged; only an explicitly configured `ContractSet` turns the
     check on."""
 
-    def _snapshots(self, tmp_path: Path) -> SnapshotStore:
-        engine = create_engine("sqlite:///:memory:", future=True)
-        return SnapshotStore(engine, tmp_path / "snaps")
-
     def test_no_contract_set_configured_is_unchanged_allow_by_default(
-        self, queue: ApprovalQueue, tmp_path: Path
+        self, queue: ApprovalQueue, snapshots: SnapshotStore, tmp_path: Path
     ) -> None:
         target = tmp_path / "f.txt"
         target.write_text("original", encoding="utf-8")
         event = _file_event("Write", str(target))
-        result = evaluate_file_edit(event, queue, self._snapshots(tmp_path))
+        result = evaluate_file_edit(event, queue, snapshots)
         assert result.verdict == "allow"
         assert queue.list() == []
 
     def test_contract_set_configured_but_no_matching_contract_denies(
-        self, queue: ApprovalQueue, tmp_path: Path
+        self, queue: ApprovalQueue, snapshots: SnapshotStore, tmp_path: Path
     ) -> None:
         target = tmp_path / "f.txt"
         target.write_text("original", encoding="utf-8")
         event = _file_event("Write", str(target))
         empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
 
-        snapshots = self._snapshots(tmp_path)
         result = evaluate_file_edit(event, queue, snapshots, contract_set=empty_set)
 
         assert result.verdict == "deny"
@@ -658,7 +663,7 @@ class TestFileEditContractCheck:
         assert queue.list() == []
 
     def test_contract_set_configured_with_a_matching_contract_falls_through_to_allow(
-        self, queue: ApprovalQueue, tmp_path: Path
+        self, queue: ApprovalQueue, snapshots: SnapshotStore, tmp_path: Path
     ) -> None:
         from belay.contracts.model import Contract, Effect
 
@@ -675,14 +680,13 @@ class TestFileEditContractCheck:
             contracts={"Write": write_contract}, set_hash="sha256:has-write"
         )
 
-        snapshots = self._snapshots(tmp_path)
         result = evaluate_file_edit(event, queue, snapshots, contract_set=configured_set)
 
         assert result.verdict == "allow"
         assert snapshots.get(event.event_id) is not None
 
     def test_contract_missing_denial_happens_before_the_no_path_check(
-        self, queue: ApprovalQueue, tmp_path: Path
+        self, queue: ApprovalQueue, snapshots: SnapshotStore
     ) -> None:
         """A call with neither a resolvable path nor a matching contract
         must report contract_missing, not the unrelated "no recognizable
@@ -697,7 +701,7 @@ class TestFileEditContractCheck:
         }
         event = normalize(raw, installation_id="test-install")
         empty_set = ContractSet(contracts={}, set_hash="sha256:empty")
-        result = evaluate_file_edit(event, queue, self._snapshots(tmp_path), contract_set=empty_set)
+        result = evaluate_file_edit(event, queue, snapshots, contract_set=empty_set)
         assert result.verdict == "deny"
         assert "contract_missing" in result.reason
 
@@ -771,10 +775,8 @@ class TestQuotaEnforcement:
         assert queue.list() == []
 
     def test_oversized_file_edit_new_pause_denies_hard_when_quota_exceeded(
-        self, queue: ApprovalQueue, tmp_path: Path
+        self, queue: ApprovalQueue, snapshots: SnapshotStore, tmp_path: Path
     ) -> None:
-        engine = create_engine("sqlite:///:memory:", future=True)
-        snapshots = SnapshotStore(engine, tmp_path / "snaps")
         big_file = tmp_path / "big.bin"
         big_file.write_bytes(b"x" * (6 * 1024 * 1024))  # over MAX_SNAPSHOT_BYTES (5 MiB)
         event = _file_event("Write", str(big_file))

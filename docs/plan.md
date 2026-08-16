@@ -18,6 +18,20 @@ La release `v0.1.0` de `belay` está terminada cuando, partiendo de un clon limp
 
 Regla suprema, heredada de la spec: **ningún MUST de `docs/spec.md` sin su test**. Si durante la implementación un MUST resulta ambiguo o inviable, se cambia primero la spec en un commit separado con nota de decisión, nunca se divierge en silencio.
 
+### 0.1 Estado histórico y promesa de la siguiente release
+
+Enmienda propuesta el 2026-08-12: el tag público `v0.1.0` no satisfizo la
+definición global anterior. Apunta a la versión interna `0.1.0.dev0`, no llegó
+a PyPI y las mediciones actuales no alcanzan todavía ni el 90 % de cobertura
+con ramas ni los 60 segundos. Esos objetivos se conservan como deuda explícita;
+no se rebajan ni se declaran cumplidos retroactivamente.
+
+La siguiente entrega pública será la prerelease coherente `v0.2.0a1`. Su
+aceptación se define en E21-E23: primero verdad y calidad medible, después
+conexión sin configuración con Codex/Claude ya instalados y, finalmente,
+artefactos y gobierno del repositorio. Esta prerelease no sustituye ni invalida
+los criterios históricos de `v0.1.0`.
+
 ## 1. Stack y decisiones técnicas fijadas
 
 - **Python 3.12+**. Paquete `belay-mcp` en PyPI, módulo `belay`.
@@ -214,6 +228,110 @@ Adaptadores de dry-run v0.1: `contract` (siempre) y `native_dry_run` si el tool 
 4. `CONTRIBUTING.md` + plantillas de issue ("Propose a contract pack", "Spec ambiguity").
 5. Release: `release.yaml` publica en PyPI con trusted publishing al etiquetar; tag `v0.1.0` con changelog.
 **(d)** la Definición de Terminado global (§0) completa, punto por punto.
+
+### E21 — Calidad y verdad de release
+
+**(a)** Corregir el test de sintaxis de `install.sh` para Git Bash y WSL;
+cerrar o liberar explícitamente los engines/conexiones SQLite que pertenecen a
+Belay; medir ramas en CI; y reconciliar README, CHANGELOG, CONTRIBUTING,
+SECURITY y la plantilla de PR con el estado real. Un ADR registra por qué el
+tag `v0.1.0` y la definición global no coincidieron, sin modificar el tag ni
+rebajar el objetivo histórico.
+
+**(c)**
+
+- Regresión Windows: `bash -n` recibe el contenido de `install.sh` por stdin y
+  pasa tanto si `bash` es Git Bash como si es el shim de WSL.
+- Regresión de recursos: los owners compartidos de SQLAlchemy exponen y usan un
+  cierre/dispose explícito; la suite demuestra que no deja
+  `ResourceWarning: unclosed database`.
+- Cobertura: CI ejecuta `pytest-cov` con `--cov-branch`. La línea base medida el
+  2026-08-12 con Python 3.13 es 81.15 % total; el umbral exigible se fija en
+  81 % y solo puede subir. El objetivo histórico continúa en 90 %.
+- Documentación: ningún total de tests o promesa temporal queda hard-coded; los
+  comandos y las ejecuciones CI enlazadas son la evidencia viva.
+- Seguridad: los dos documentos públicos prohíben publicar detalles de una
+  vulnerabilidad y señalan el mismo canal privado.
+
+**(d)** Las suites rápida y completa pasan en los runners soportados, incluido
+Windows; la suite completa no emite ningún `ResourceWarning` por SQLite sin
+cerrar; cobertura de ramas ≥ 81 %; Ruff, mypy, trazabilidad y conformidad L3
+verdes; y los artefactos públicos describen `v0.1.0` y el estado alpha sin
+afirmaciones contradictorias. El tiempo real queda registrado en CI y no se
+declara cumplido el objetivo de < 60 s mientras no lo esté.
+
+### E22 — Conexión Codex/Claude sin configuración
+
+**(a)** Añadir `belay connect` y `belay disconnect`. Sin argumentos, `connect`
+detecta Codex y Claude ya instalados, genera un proxy para el Filesystem MCP
+oficial fijado a `@modelcontextprotocol/server-filesystem@2026.7.10` y limitado
+al directorio actual, completa un handshake MCP real, registra Belay mediante
+las CLI oficiales y, para Claude, instala hooks compatibles de proyecto. No
+instala ni autentica Codex, Claude, Node o `npx`.
+
+**(b)** El nombre por defecto es
+`belay-<slug-del-directorio>-<sha256-ruta-canónica[:8]>`. Instalaciones Python
+arrancan `<python> -m belay.cli.main run`; binarios congelados arrancan su
+propio ejecutable. `.belay/connection.json` conserva ownership, targets,
+snapshots y estado. Las escrituras y el rollback usan comparación de hashes;
+una edición concurrente nunca se sobrescribe. `disconnect` elimina solo
+registros/hooks gestionados y conserva `.belay/belay.db`; `--purge-runtime`
+tampoco borra evidencia.
+
+**(c)**
+
+- Unitarios para nombres, rutas Windows/POSIX, pin empaquetado, comandos Python
+  y frozen, colisiones, estados del manifest y planes de rollback.
+- Integración con ejecutables falsos `codex`, `claude` y `npx`, homes aislados y
+  fallos inyectados en cada etapa; la configuración previa se restaura byte a
+  byte cuando no existe conflicto y el conflicto concurrente se informa sin
+  sobrescribirlo.
+- Handshake real con el Filesystem MCP fijado; la lista de tools atraviesa el
+  proxy Belay y el upstream no puede salir del directorio actual.
+- Repetir `connect` es no-op o reparación segura; `disconnect` conserva entradas
+  ajenas. El wheel aislado contiene el pack y supera el mismo preflight.
+
+**(d)** Desde un directorio temporal y con al menos uno de Codex o Claude ya
+instalado, un único `belay connect` deja cada cliente detectado apuntando al
+proxy operativo y protegido; una segunda ejecución es idempotente; y
+`belay disconnect` revierte únicamente lo gestionado por Belay. Los smokes
+aislados de las sintaxis oficiales de Codex y Claude, el handshake MCP real y
+el wheel instalado pasan en CI sin tocar el home personal.
+
+### E23 — Prerelease de portfolio y gobierno
+
+**(a)** Renderizar la demo real a GIF; crear un workflow de release recuperable
+que construya sdist, wheel y binarios Linux/macOS/Windows; activar el reporte
+privado de vulnerabilidades; documentar honestamente `v0.1.0`; publicar
+`v0.2.0a1` como GitHub prerelease; y proteger `main` después de integrar las
+tres entregas. PyPI solo se ejecuta si la variable del repositorio
+`PYPI_PUBLISH_ENABLED` vale exactamente `true` y Trusted Publishing ya fue
+configurado y probado.
+
+**(c)**
+
+- Los binarios congelados de los tres sistemas ejecutan un `connect` extremo a
+  extremo contra el Filesystem MCP real con cliente/home aislados y nunca
+  registran un intérprete Python.
+- El workflow responde a tag push y a `workflow_dispatch(tag)`. La recuperación
+  se ejecuta desde el workflow reparado de `main`, resuelve el tag remoto,
+  verifica su SHA, hace checkout exacto y jamás mueve o recrea el tag.
+- Antes del tag: worktree limpio, `main == origin/main`, versiones Python/npm
+  coherentes, tag inexistente, PyPI desactivado y todos los checks requeridos
+  verdes. Después: se verifican las cinco clases de artefacto.
+- La protección exige PR y los contexts `test (3.12)`, `test (3.13)`,
+  `wheel-smoke`, los tres `cross-platform-clean-room (...)` y los tres
+  `build-binaries (...)`; mantiene bypass de administrador y cero aprobaciones
+  humanas obligatorias para este repositorio de un mantenedor.
+
+**(d)** E21, E22 y E23 quedan integradas mediante tres PRs secuenciales; private
+vulnerability reporting y la protección de `main` se leen de vuelta activos;
+el tag `v0.1.0` permanece inmutable y tiene una nota prerelease que explica
+`0.1.0.dev0` y el fallo/no-configuración de PyPI; `v0.2.0a1` apunta al SHA
+verificado de `main`, coincide con Python `0.2.0a1` y npm `0.2.0-alpha.1`, y su
+GitHub prerelease contiene sdist, wheel, binario Linux, binario macOS y `.exe`
+Windows verificados. El GIF reproducible está embebido en README. Si PyPI no
+está configurado, su job queda omitido en verde y no se afirma publicación.
 
 ---
 

@@ -5,6 +5,7 @@ Real SQLite fixture DB, real rows -- no mocking of SQLAlchemy or sqlite3.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -20,11 +21,15 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _make_engine(tmp_path: Path) -> Engine:
+@pytest.fixture
+def engine(tmp_path: Path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}")
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE records (id INTEGER PRIMARY KEY, last_seen INTEGER)"))
-    return engine
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 def _seed_rows(engine: Engine, last_seen_values: list[int]) -> None:
@@ -38,8 +43,7 @@ def _total_rows(engine: Engine) -> int:
         return conn.execute(text("SELECT COUNT(*) FROM records")).scalar_one()
 
 
-def test_delete_dry_run_matches_real_row_count_and_db_is_unchanged(tmp_path: Path) -> None:
-    engine = _make_engine(tmp_path)
+def test_delete_dry_run_matches_real_row_count_and_db_is_unchanged(engine: Engine) -> None:
     _seed_rows(engine, [2020, 2020, 2020, 2024])  # 3 stale, 1 fresh
 
     before = _total_rows(engine)
@@ -52,8 +56,7 @@ def test_delete_dry_run_matches_real_row_count_and_db_is_unchanged(tmp_path: Pat
     assert after == before  # provably unchanged: rolled back, never committed
 
 
-def test_zero_matching_rows_is_an_honest_zero_not_an_error(tmp_path: Path) -> None:
-    engine = _make_engine(tmp_path)
+def test_zero_matching_rows_is_an_honest_zero_not_an_error(engine: Engine) -> None:
     _seed_rows(engine, [2024, 2025])
 
     count = simulate_row_count(
@@ -63,8 +66,7 @@ def test_zero_matching_rows_is_an_honest_zero_not_an_error(tmp_path: Path) -> No
     assert count == 0
 
 
-def test_select_statement_counts_returned_rows(tmp_path: Path) -> None:
-    engine = _make_engine(tmp_path)
+def test_select_statement_counts_returned_rows(engine: Engine) -> None:
     _seed_rows(engine, [2020, 2021, 2024])
 
     count = simulate_row_count(
@@ -74,7 +76,7 @@ def test_select_statement_counts_returned_rows(tmp_path: Path) -> None:
     assert count == 2
 
 
-def test_crash_mid_simulation_leaves_db_unchanged(tmp_path: Path) -> None:
+def test_crash_mid_simulation_leaves_db_unchanged(engine: Engine) -> None:
     """Kill the connection mid-simulation (no commit, no explicit rollback).
 
     This is the safety property `simulate_row_count`'s `finally: rollback()`
@@ -83,7 +85,6 @@ def test_crash_mid_simulation_leaves_db_unchanged(tmp_path: Path) -> None:
     that guarantee directly, without going through the well-behaved
     `finally` path, to prove the DB is unchanged even in the worst case.
     """
-    engine = _make_engine(tmp_path)
     _seed_rows(engine, [2020, 2020, 2020, 2020, 2020])
     before = _total_rows(engine)
 
@@ -97,9 +98,8 @@ def test_crash_mid_simulation_leaves_db_unchanged(tmp_path: Path) -> None:
 
 
 async def test_make_sql_runner_wraps_simulate_row_count_as_async_callable(
-    tmp_path: Path,
+    engine: Engine,
 ) -> None:
-    engine = _make_engine(tmp_path)
     _seed_rows(engine, [2020, 2024])
     runner = make_sql_runner(engine)
 

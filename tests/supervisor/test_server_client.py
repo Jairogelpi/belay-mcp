@@ -17,14 +17,30 @@ import time
 from collections.abc import Iterator
 from multiprocessing.connection import AuthenticationError, Client
 from pathlib import Path
+from typing import Any
 
 import pytest
 from belay.approvals.queue import ApprovalQueue
+from belay.supervisor import server as server_module
 from belay.supervisor.addressing import SupervisorIdentity, supervisor_identity
 from belay.supervisor.auth import load_or_create_authkey
 from belay.supervisor.protocol import SupervisorRequest, SupervisorResponse
 from belay.supervisor.server import Supervisor
 from belay.supervisor.wire import recv_json, send_json
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+
+
+@pytest.fixture
+def supervisor_engine(tmp_path: Path) -> Iterator[tuple[Engine, list[object]]]:
+    engine = create_engine(f"sqlite:///{tmp_path / 'supervisor.db'}", future=True)
+    disposed: list[object] = []
+    event.listen(engine, "engine_disposed", disposed.append)
+    try:
+        yield engine, disposed
+    finally:
+        if not disposed:
+            engine.dispose()
 
 
 @pytest.fixture
@@ -134,8 +150,8 @@ def test_posttooluse_event_records_evidence_and_acks_empty(
 
     from belay.ledger.store import LedgerStore
 
-    ledger = LedgerStore(db_url=f"sqlite:///{db_path}")
-    events = ledger.read("hook-claude-code-s1")
+    with LedgerStore(db_url=f"sqlite:///{db_path}") as ledger:
+        events = ledger.read("hook-claude-code-s1")
     # R1.8 prerequisite (ADR 0026): a real step-lifecycle presence now
     # rides alongside the original two hook events, giving MCP-side
     # machinery (anomaly counting, `causal`, `RewindService`) something
@@ -261,10 +277,10 @@ def test_duplicate_event_id_returns_cached_response_even_after_approval(
     # queue.list() rather than recomputing gate.py's internal plan_id hash
     # formula -- that's an implementation detail this test shouldn't be
     # coupled to.
-    queue = ApprovalQueue(db_url=f"sqlite:///{db_path}")
-    pending = [i for i in queue.list() if i.state == "pending"]
-    assert len(pending) == 1
-    queue.approve(pending[0].approval_id, approved_by="jairo")
+    with ApprovalQueue(db_url=f"sqlite:///{db_path}") as queue:
+        pending = [i for i in queue.list() if i.state == "pending"]
+        assert len(pending) == 1
+        queue.approve(pending[0].approval_id, approved_by="jairo")
 
     # Same event_id again: must still return the ORIGINAL (deny) response,
     # not re-evaluate and see the now-approved state.
@@ -280,9 +296,15 @@ def test_duplicate_event_id_returns_cached_response_even_after_approval(
     assert retried.payload["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
-def test_shutdown_stops_serve_forever(tmp_path: Path) -> None:
+def test_shutdown_stops_serve_forever(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor_engine: tuple[Engine, list[object]],
+) -> None:
     project_anchor = (tmp_path / "belay-hooks.db").resolve()
     identity = supervisor_identity(project_anchor, belay_home=tmp_path / "home")
+    engine, disposed = supervisor_engine
+    monkeypatch.setattr(server_module, "create_engine", lambda *args, **kwargs: engine)
     supervisor = Supervisor(identity)
     thread = threading.Thread(target=supervisor.serve_forever, daemon=True)
     thread.start()
@@ -301,6 +323,354 @@ def test_shutdown_stops_serve_forever(tmp_path: Path) -> None:
     assert response.ok
     thread.join(timeout=2)
     assert not thread.is_alive()
+    assert disposed == [engine]
+
+    supervisor.close()
+    assert disposed == [engine]
+
+
+def test_serve_forever_disposes_engine_when_listener_setup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor_engine: tuple[Engine, list[object]],
+) -> None:
+    identity = supervisor_identity(
+        (tmp_path / "belay-hooks.db").resolve(), belay_home=tmp_path / "home"
+    )
+    engine, disposed = supervisor_engine
+    monkeypatch.setattr(server_module, "create_engine", lambda *args, **kwargs: engine)
+
+    def fail_listener(*args: object, **kwargs: object) -> None:
+        raise OSError("listener setup failed")
+
+    monkeypatch.setattr(server_module, "Listener", fail_listener)
+    supervisor = Supervisor(identity)
+
+    with pytest.raises(OSError, match="listener setup failed"):
+        supervisor.serve_forever()
+
+    assert disposed == [engine]
+
+
+def test_shutdown_waits_for_active_hook_handler_before_disposing_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor_engine: tuple[Engine, list[object]],
+) -> None:
+    identity = supervisor_identity(
+        (tmp_path / "belay-hooks.db").resolve(), belay_home=tmp_path / "home"
+    )
+    engine, disposed = supervisor_engine
+    post_disposal_connects: list[object] = []
+
+    def record_connect(dbapi_connection: object, connection_record: object) -> None:
+        if disposed:
+            post_disposal_connects.append(dbapi_connection)
+
+    event.listen(engine, "connect", record_connect)
+    monkeypatch.setattr(server_module, "create_engine", lambda *args, **kwargs: engine)
+    supervisor = Supervisor(identity)
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    original_handle_hook_event = supervisor.handle_hook_event
+
+    def blocked_handle_hook_event(host: str, payload: dict[str, Any]) -> dict[str, Any]:
+        handler_started.set()
+        assert release_handler.wait(timeout=5)
+        return original_handle_hook_event(host, payload)
+
+    monkeypatch.setattr(supervisor, "handle_hook_event", blocked_handle_hook_event)
+    serve_thread = threading.Thread(target=supervisor.serve_forever, daemon=True)
+    serve_thread.start()
+
+    authkey = load_or_create_authkey(identity.authkey_path)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            probe = Client(identity.address, authkey=authkey)
+            probe.close()
+            break
+        except OSError:
+            time.sleep(0.02)
+
+    hook_event = {
+        "_host": "claude-code",
+        "session_id": "s-active",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_active_shutdown",
+    }
+    hook_responses: list[SupervisorResponse] = []
+    hook_thread = threading.Thread(
+        target=lambda: hook_responses.append(
+            _send(identity, SupervisorRequest(kind="hook_event", event=hook_event))
+        ),
+        daemon=True,
+    )
+    hook_thread.start()
+    assert handler_started.wait(timeout=2)
+
+    shutdown_response = _send(identity, SupervisorRequest(kind="shutdown"))
+    assert shutdown_response.ok
+    try:
+        serve_thread.join(timeout=0.2)
+        assert disposed == []
+    finally:
+        release_handler.set()
+        hook_thread.join(timeout=2)
+        serve_thread.join(timeout=2)
+
+    assert hook_responses[0].ok
+    assert not hook_thread.is_alive()
+    assert not serve_thread.is_alive()
+    assert disposed == [engine]
+    assert post_disposal_connects == []
+
+
+def test_thread_start_failure_waits_for_started_active_worker_before_disposal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor_engine: tuple[Engine, list[object]],
+) -> None:
+    identity = supervisor_identity(
+        (tmp_path / "belay-hooks.db").resolve(), belay_home=tmp_path / "home"
+    )
+    engine, disposed = supervisor_engine
+    post_disposal_connects: list[object] = []
+
+    def record_connect(dbapi_connection: object, connection_record: object) -> None:
+        if disposed:
+            post_disposal_connects.append(dbapi_connection)
+
+    event.listen(engine, "connect", record_connect)
+    monkeypatch.setattr(server_module, "create_engine", lambda *args, **kwargs: engine)
+    supervisor = Supervisor(identity)
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    second_worker_start_attempted = threading.Event()
+    allow_start_failure = threading.Event()
+    start_failure_raised = threading.Event()
+    original_handle_hook_event = supervisor.handle_hook_event
+    original_thread_start = threading.Thread.start
+
+    def blocked_handle_hook_event(host: str, payload: dict[str, Any]) -> dict[str, Any]:
+        handler_started.set()
+        assert release_handler.wait(timeout=5)
+        return original_handle_hook_event(host, payload)
+
+    def fail_second_worker_start(thread: threading.Thread) -> None:
+        if thread.name == "belay-worker-1":
+            second_worker_start_attempted.set()
+            assert allow_start_failure.wait(timeout=5)
+            start_failure_raised.set()
+            raise RuntimeError("injected worker start failure")
+        original_thread_start(thread)
+
+    monkeypatch.setattr(supervisor, "handle_hook_event", blocked_handle_hook_event)
+    monkeypatch.setattr(threading.Thread, "start", fail_second_worker_start)
+    serve_errors: list[BaseException] = []
+
+    def run_server() -> None:
+        try:
+            supervisor.serve_forever()
+        except BaseException as exc:
+            serve_errors.append(exc)
+
+    serve_thread = threading.Thread(target=run_server, daemon=True, name="test-serve")
+    original_thread_start(serve_thread)
+    assert second_worker_start_attempted.wait(timeout=2)
+
+    hook_event = {
+        "_host": "claude-code",
+        "session_id": "s-start-failure",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_start_failure",
+    }
+    hook_responses: list[SupervisorResponse] = []
+    hook_thread = threading.Thread(
+        target=lambda: hook_responses.append(
+            _send(identity, SupervisorRequest(kind="hook_event", event=hook_event))
+        ),
+        daemon=True,
+        name="test-hook-client",
+    )
+    original_thread_start(hook_thread)
+    assert handler_started.wait(timeout=2)
+
+    allow_start_failure.set()
+    assert start_failure_raised.wait(timeout=2)
+    try:
+        serve_thread.join(timeout=0.2)
+        assert disposed == []
+    finally:
+        release_handler.set()
+        hook_thread.join(timeout=2)
+        serve_thread.join(timeout=2)
+
+    assert hook_responses[0].ok
+    assert len(serve_errors) == 1
+    assert isinstance(serve_errors[0], RuntimeError)
+    assert str(serve_errors[0]) == "injected worker start failure"
+    assert disposed == [engine]
+    assert post_disposal_connects == []
+
+
+def test_shutdown_does_not_strand_connection_accepted_during_queue_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor_engine: tuple[Engine, list[object]],
+) -> None:
+    identity = supervisor_identity(
+        (tmp_path / "belay-hooks.db").resolve(), belay_home=tmp_path / "home"
+    )
+    engine, disposed = supervisor_engine
+    monkeypatch.setattr(server_module, "create_engine", lambda *args, **kwargs: engine)
+    supervisor = Supervisor(identity)
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    block_next_handoff = threading.Event()
+    late_handoff_started = threading.Event()
+    release_late_handoff = threading.Event()
+    all_sentinels_queued = threading.Event()
+    shutdown_response_sent = threading.Event()
+    allow_shutdown_signal = threading.Event()
+    original_handle_hook_event = supervisor.handle_hook_event
+    original_handle_request = supervisor._handle_request
+    original_queue_put = server_module.queue.Queue.put
+    handoff_guard = threading.Lock()
+    handoff_blocked = False
+    sentinel_count = 0
+    connection_queues: list[server_module.queue.Queue[Any]] = []
+    late_server_connections: list[Any] = []
+
+    def blocked_handle_hook_event(host: str, payload: dict[str, Any]) -> dict[str, Any]:
+        handler_started.set()
+        assert release_handler.wait(timeout=5)
+        return original_handle_hook_event(host, payload)
+
+    def paused_shutdown_request(conn: Any) -> str | None:
+        result = original_handle_request(conn)
+        if result == "shutdown":
+            shutdown_response_sent.set()
+            assert allow_shutdown_signal.wait(timeout=5)
+        return result
+
+    def controlled_put(
+        connection_queue: server_module.queue.Queue[Any], item: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        nonlocal handoff_blocked, sentinel_count
+        if item is server_module._STOP:
+            sentinel_count += 1
+            if sentinel_count == supervisor.MAX_WORKERS:
+                all_sentinels_queued.set()
+        elif block_next_handoff.is_set():
+            should_block = False
+            with handoff_guard:
+                if not handoff_blocked:
+                    handoff_blocked = True
+                    should_block = True
+                    connection_queues.append(connection_queue)
+                    late_server_connections.append(item)
+            if should_block:
+                late_handoff_started.set()
+                assert release_late_handoff.wait(timeout=5)
+        original_queue_put(connection_queue, item, *args, **kwargs)
+
+    monkeypatch.setattr(supervisor, "handle_hook_event", blocked_handle_hook_event)
+    monkeypatch.setattr(supervisor, "_handle_request", paused_shutdown_request)
+    monkeypatch.setattr(server_module.queue.Queue, "put", controlled_put)
+    serve_thread = threading.Thread(target=supervisor.serve_forever, daemon=True)
+    serve_thread.start()
+
+    authkey = load_or_create_authkey(identity.authkey_path)
+    # `serve_thread.start()` only schedules the thread -- it does not wait
+    # for `_serve_forever` to actually bind the `Listener`. Dialing in
+    # before that bind happens fails immediately (`Client(...)` raises
+    # `OSError`, uncaught inside `active_thread`'s target, silently
+    # swallowed by the threading module), which then hangs every
+    # downstream `.wait(...)` in this test forever regardless of timeout,
+    # since nothing will ever retry the connection. The real root cause of
+    # this test's CI flakiness -- confirmed by reproducing it locally with
+    # even a 5s timeout -- not merely a too-tight budget. Same
+    # connect-and-close readiness probe `running_supervisor` above already
+    # uses.
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            probe = Client(identity.address, authkey=authkey)
+        except OSError:
+            if time.monotonic() >= deadline:
+                pytest.fail("supervisor never started listening")
+            time.sleep(0.02)
+            continue
+        probe.close()
+        break
+    active_event = {
+        "_host": "claude-code",
+        "session_id": "s-handoff",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status"},
+        "tool_use_id": "toolu_handoff_active",
+    }
+    active_responses: list[SupervisorResponse] = []
+    active_thread = threading.Thread(
+        target=lambda: active_responses.append(
+            _send(identity, SupervisorRequest(kind="hook_event", event=active_event))
+        ),
+        daemon=True,
+    )
+    active_thread.start()
+    # These outer waits gate the same handoff the mocked handlers below
+    # budget 5s for internally (`release_handler`/`allow_shutdown_signal`/
+    # `release_late_handoff` all use `timeout=5`) -- a real accept -> queue
+    # -> worker-dispatch round trip over the actual IPC transport, spawning
+    # MAX_WORKERS threads fresh, observed to occasionally exceed 2s on
+    # loaded shared CI runners (not a functional regression: confirmed
+    # locally passing well under 1s). Match that same 5s budget here so a
+    # slow-but-healthy CI runner doesn't fail this test at the very first
+    # synchronization point.
+    assert handler_started.wait(timeout=5)
+
+    shutdown_responses: list[SupervisorResponse] = []
+    shutdown_thread = threading.Thread(
+        target=lambda: shutdown_responses.append(
+            _send(identity, SupervisorRequest(kind="shutdown"))
+        ),
+        daemon=True,
+    )
+    shutdown_thread.start()
+    assert shutdown_response_sent.wait(timeout=5)
+
+    block_next_handoff.set()
+    late_client = Client(identity.address, authkey=authkey)
+    assert late_handoff_started.wait(timeout=5)
+    allow_shutdown_signal.set()
+    shutdown_thread.join(timeout=5)
+    assert shutdown_responses[0].ok
+    all_sentinels_queued.wait(timeout=2)
+    release_late_handoff.set()
+    try:
+        assert disposed == []
+        release_handler.set()
+        active_thread.join(timeout=5)
+        serve_thread.join(timeout=5)
+
+        assert active_responses[0].ok
+        assert disposed == [engine]
+        assert late_server_connections[0].closed
+        assert connection_queues[0].empty()
+    finally:
+        release_late_handoff.set()
+        release_handler.set()
+        allow_shutdown_signal.set()
+        late_client.close()
+        shutdown_thread.join(timeout=5)
+        active_thread.join(timeout=5)
+        serve_thread.join(timeout=5)
 
 
 def test_a_connected_but_silent_client_does_not_block_other_clients(

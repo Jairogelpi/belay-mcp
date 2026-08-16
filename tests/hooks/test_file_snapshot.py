@@ -5,19 +5,32 @@ citation)."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from belay.hooks.file_snapshot import MAX_SNAPSHOT_BYTES, SnapshotStore
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 
-def _store(tmp_path: Path) -> SnapshotStore:
+@pytest.fixture
+def engine(tmp_path: Path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite:///{tmp_path / 'snap.db'}", future=True)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def store(engine: Engine, tmp_path: Path) -> SnapshotStore:
     return SnapshotStore(engine, tmp_path / "snapshots")
 
 
-def test_capture_of_a_new_file_records_did_not_exist(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_capture_of_a_new_file_records_did_not_exist(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "new.txt"
     snap = store.capture_before("e1", "s1", target)
     assert snap.existed_before is False
@@ -25,8 +38,9 @@ def test_capture_of_a_new_file_records_did_not_exist(tmp_path: Path) -> None:
     assert snap.state == "captured"
 
 
-def test_capture_of_an_existing_file_stores_its_content(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_capture_of_an_existing_file_stores_its_content(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "existing.txt"
     target.write_text("original content", encoding="utf-8")
 
@@ -36,8 +50,9 @@ def test_capture_of_an_existing_file_stores_its_content(tmp_path: Path) -> None:
     assert snap.before_size == len(b"original content")
 
 
-def test_capture_is_idempotent_for_the_same_event_id(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_capture_is_idempotent_for_the_same_event_id(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "f.txt"
     target.write_text("v1", encoding="utf-8")
     first = store.capture_before("e1", "s1", target)
@@ -48,8 +63,9 @@ def test_capture_is_idempotent_for_the_same_event_id(tmp_path: Path) -> None:
     assert second == first  # NOT re-read against the now-changed file
 
 
-def test_full_round_trip_restores_original_content(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_full_round_trip_restores_original_content(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "f.txt"
     target.write_text("original", encoding="utf-8")
 
@@ -62,8 +78,9 @@ def test_full_round_trip_restores_original_content(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "original"
 
 
-def test_restore_of_a_newly_created_file_deletes_it(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_restore_of_a_newly_created_file_deletes_it(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "brand-new.txt"
     assert not target.exists()
 
@@ -76,8 +93,9 @@ def test_restore_of_a_newly_created_file_deletes_it(tmp_path: Path) -> None:
     assert not target.exists()
 
 
-def test_restore_refuses_on_conflict_when_file_changed_again_since(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_restore_refuses_on_conflict_when_file_changed_again_since(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "f.txt"
     target.write_text("original", encoding="utf-8")
 
@@ -93,8 +111,9 @@ def test_restore_refuses_on_conflict_when_file_changed_again_since(tmp_path: Pat
     assert target.read_text(encoding="utf-8") == "touched by someone else after the edit"
 
 
-def test_restore_is_idempotent_once_already_restored(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_restore_is_idempotent_once_already_restored(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "f.txt"
     target.write_text("original", encoding="utf-8")
     store.capture_before("e1", "s1", target)
@@ -107,14 +126,14 @@ def test_restore_is_idempotent_once_already_restored(tmp_path: Path) -> None:
     assert "already restored" in second
 
 
-def test_restore_with_no_snapshot_reports_that_plainly(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_restore_with_no_snapshot_reports_that_plainly(store: SnapshotStore) -> None:
     outcome = store.restore("never-captured")
     assert "no snapshot" in outcome
 
 
-def test_oversized_file_is_not_captured_but_does_not_crash(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_oversized_file_is_not_captured_but_does_not_crash(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     target = tmp_path / "huge.bin"
     target.write_bytes(b"x" * (MAX_SNAPSHOT_BYTES + 1))
 
@@ -126,8 +145,9 @@ def test_oversized_file_is_not_captured_but_does_not_crash(tmp_path: Path) -> No
     assert "exceeded the capture size cap" in outcome
 
 
-def test_identical_content_across_two_files_is_deduplicated_on_disk(tmp_path: Path) -> None:
-    store = _store(tmp_path)
+def test_identical_content_across_two_files_is_deduplicated_on_disk(
+    store: SnapshotStore, tmp_path: Path
+) -> None:
     a = tmp_path / "a.txt"
     b = tmp_path / "b.txt"
     a.write_text("same content", encoding="utf-8")
@@ -143,11 +163,12 @@ def test_identical_content_across_two_files_is_deduplicated_on_disk(tmp_path: Pa
     assert len(blob_files) == 1  # one blob, not two, for identical content
 
 
-def test_restore_survives_a_fresh_store_instance_against_the_same_files(tmp_path: Path) -> None:
+def test_restore_survives_a_fresh_store_instance_against_the_same_files(
+    engine: Engine, tmp_path: Path
+) -> None:
     """Durability: a NEW SnapshotStore (as a fresh supervisor process would
     construct) against the same engine/snapshots_dir must still be able to
     restore what an earlier instance captured."""
-    engine = create_engine(f"sqlite:///{tmp_path / 'snap.db'}", future=True)
     snapshots_dir = tmp_path / "snapshots"
     target = tmp_path / "f.txt"
     target.write_text("original", encoding="utf-8")

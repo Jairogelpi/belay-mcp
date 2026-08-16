@@ -20,7 +20,8 @@ docs/plan-v2.md) or ADR if there is one. -->
 ```
 ruff check .
 mypy belay
-pytest            # full suite; `pytest -m "not slow"` for the fast loop
+pytest                    # branch-covered fast gate
+pytest -m "" --no-cov     # full suite (slow/subprocess tests too) before opening a PR
 ```
 
 - [ ] All three pass locally.

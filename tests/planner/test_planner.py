@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -160,13 +161,17 @@ async def test_plan_mismatch_on_non_identical_args() -> None:
     assert excinfo.value.code == "plan_mismatch"
 
 
-def _sql_engine(tmp_path: Path) -> Engine:
+@pytest.fixture
+def sql_engine(tmp_path: Path) -> Iterator[Engine]:
     engine = create_engine(f"sqlite:///{tmp_path / 'crm.db'}")
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE records (id INTEGER PRIMARY KEY, last_seen INTEGER)"))
         for value in (2020, 2020, 2020, 2024):  # 3 stale, 1 fresh
             conn.execute(text("INSERT INTO records (last_seen) VALUES (:v)"), {"v": value})
-    return engine
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 def _sql_hinted_contract() -> Contract:
@@ -182,11 +187,10 @@ def _sql_hinted_contract() -> Contract:
     )
 
 
-async def test_sql_simulator_basis_returns_real_row_count(tmp_path: Path) -> None:
-    engine = _sql_engine(tmp_path)
+async def test_sql_simulator_basis_returns_real_row_count(sql_engine: Engine) -> None:
     planner = Planner()
     session = PlanningSession(
-        session_id="s1", contract=_sql_hinted_contract(), sql_runner=make_sql_runner(engine)
+        session_id="s1", contract=_sql_hinted_contract(), sql_runner=make_sql_runner(sql_engine)
     )
 
     plan = await planner.plan("crm.bulk_delete", {"cutoff": 2023}, session)
@@ -206,20 +210,19 @@ async def test_sql_simulator_basis_returns_real_row_count(tmp_path: Path) -> Non
     assert plan.unknown == []
     assert plan.confidence == "high"
     # provably unchanged: sql_simulator never commits.
-    with engine.connect() as conn:
+    with sql_engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM records")).scalar_one() == 4
 
 
-async def test_native_dry_run_takes_precedence_over_sql_simulator(tmp_path: Path) -> None:
+async def test_native_dry_run_takes_precedence_over_sql_simulator(sql_engine: Engine) -> None:
     async def native(tool: str, args: dict) -> dict:
         return {"effects": [{"type": "delete", "resource": "crm.record", "count": "999"}]}
 
-    engine = _sql_engine(tmp_path)
     planner = Planner()
     session = PlanningSession(
         session_id="s1",
         contract=_sql_hinted_contract(),
-        sql_runner=make_sql_runner(engine),
+        sql_runner=make_sql_runner(sql_engine),
         native_dry_run=native,
     )
 

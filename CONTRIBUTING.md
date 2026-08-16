@@ -20,11 +20,15 @@ the source of truth, and `docs/plan.md` tracks the implementation roadmap.
 1. Fork and branch from `main`.
 2. `pip install -e ".[dev]"`.
 3. `ruff check . && mypy belay && pytest` must pass before you open a PR.
-   The full suite currently runs in ~85s; `pytest -m "not slow"` runs the
-   fast loop (unit/property/in-memory integration, no real subprocess) in
-   under 30s for quick local iteration — run the full suite (including
-   `@pytest.mark.slow` tests that spawn real `belay run` subprocesses over
-   stdio) before opening a PR.
+   Bare `pytest` is the branch-covered fast gate (unit/property/in-memory
+   integration, no real subprocess; enforces the branch-coverage floor in
+   `pyproject.toml`) — use it for quick local iteration. Run
+   `pytest -m "" --no-cov` (the full suite, including `@pytest.mark.slow`
+   tests that spawn real `belay run` subprocesses over stdio, and
+   `live_conformance` tests where opted in) before opening a PR. See the CI
+   badge in `README.md` for current run times on real Linux/macOS/Windows
+   runners — this repo doesn't freeze a duration here that CI would
+   silently outdate.
 4. One pull request per entrega/feature — don't mix unrelated changes.
 5. Conventional commit messages (`feat:`, `fix:`, `test:`, `docs:`, ...).
 6. New behavior needs a test first (TDD, see above) and, if it implements a

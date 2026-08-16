@@ -1545,9 +1545,10 @@ def hooks_list_edits(
 ) -> None:
     """List captured native file edits (E18.3), most recent first --
     `belay hooks rewind <event_id>` undoes one."""
-    from sqlalchemy import create_engine, select
+    from sqlalchemy import select
     from sqlalchemy.orm import Session as DBSession
 
+    from belay.db.lifecycle import EngineLease
     from belay.db.models import FileSnapshotRow
     from belay.supervisor.addressing import supervisor_identity
 
@@ -1555,8 +1556,10 @@ def hooks_list_edits(
     if not data_path.is_file():
         typer.echo("no captured edits (nothing installed/run yet)")
         return
-    engine = create_engine(f"sqlite:///{data_path}", future=True)
-    with DBSession(engine) as session:
+    with (
+        EngineLease.create(f"sqlite:///{data_path}") as lease,
+        DBSession(lease.engine) as session,
+    ):
         rows = session.scalars(
             select(FileSnapshotRow).order_by(FileSnapshotRow.captured_at.desc())
         ).all()
@@ -1582,8 +1585,7 @@ def hooks_rewind(
     the edit this is rewinding -- run `belay hooks list-edits` to find an
     `event_id`, then this to restore that specific edit's pre-edit content
     (or delete the file, if it didn't exist before that edit)."""
-    from sqlalchemy import create_engine
-
+    from belay.db.lifecycle import EngineLease
     from belay.hooks.file_snapshot import SnapshotStore
     from belay.supervisor.addressing import belay_home, supervisor_identity
 
@@ -1592,18 +1594,18 @@ def hooks_rewind(
         typer.echo("no captured edits (nothing installed/run yet)", err=True)
         raise typer.Exit(code=1)
 
-    engine = create_engine(f"sqlite:///{identity.data_path}", future=True)
-    store = SnapshotStore(engine, belay_home() / "snapshots")
-    snapshot = store.get(event_id)
-    if snapshot is None:
-        typer.echo(f"no captured edit found for event_id {event_id!r}", err=True)
-        raise typer.Exit(code=1)
+    with EngineLease.create(f"sqlite:///{identity.data_path}") as lease:
+        store = SnapshotStore(lease.engine, belay_home() / "snapshots")
+        snapshot = store.get(event_id)
+        if snapshot is None:
+            typer.echo(f"no captured edit found for event_id {event_id!r}", err=True)
+            raise typer.Exit(code=1)
 
-    typer.echo(f"this will rewind {event_id}: {snapshot.path} ({snapshot.state})")
-    if not yes:
-        typer.confirm("Proceed?", abort=True)
+        typer.echo(f"this will rewind {event_id}: {snapshot.path} ({snapshot.state})")
+        if not yes:
+            typer.confirm("Proceed?", abort=True)
 
-    outcome = store.restore(event_id)
+        outcome = store.restore(event_id)
     typer.echo(outcome)
     if "conflict" in outcome or "no snapshot" in outcome or "missing" in outcome:
         raise typer.Exit(code=1)
@@ -1633,17 +1635,19 @@ def hooks_fence(
     from belay.hooks.gate import session_key
     from belay.rewind.service import is_fenced
 
-    ledger = _hooks_ledger_for(db)
     session_id = session_key(host, host_session_id)
-    if is_fenced(ledger, session_id):
-        typer.echo(f"{host_session_id} ({host}) is already fenced")
-        return
+    with _hooks_ledger_for(db) as ledger:
+        if is_fenced(ledger, session_id):
+            typer.echo(f"{host_session_id} ({host}) is already fenced")
+            return
 
-    typer.echo(f"this will fence {host_session_id} ({host}) -- no new actions will be accepted")
-    if not yes:
-        typer.confirm("Proceed?", abort=True)
+        typer.echo(
+            f"this will fence {host_session_id} ({host}) -- no new actions will be accepted"
+        )
+        if not yes:
+            typer.confirm("Proceed?", abort=True)
 
-    ledger.append(session_id, "session_fenced", {})
+        ledger.append(session_id, "session_fenced", {})
     typer.echo(f"fenced {host_session_id} ({host})")
 
 
@@ -1661,19 +1665,14 @@ hooks_app.add_typer(hooks_approvals_app, name="approvals")
 
 
 def _hooks_approval_queue(db: str) -> ApprovalQueue:
-    from sqlalchemy import create_engine
-
     from belay.approvals.queue import ApprovalQueue
     from belay.supervisor.addressing import supervisor_identity
 
     data_path = supervisor_identity(Path(db).resolve()).data_path
-    engine = create_engine(f"sqlite:///{data_path}", future=True)
-    return ApprovalQueue(engine=engine)
+    return ApprovalQueue(db_url=f"sqlite:///{data_path}")
 
 
 def _hooks_ledger_for(db: str) -> LedgerStore:
-    from sqlalchemy import create_engine
-
     from belay.ledger.store import LedgerStore
     from belay.supervisor.addressing import supervisor_identity
 
@@ -1686,8 +1685,7 @@ def _hooks_ledger_for(db: str) -> LedgerStore:
     # tests for `hooks fence`: sqlite3.OperationalError, "unable to open
     # database file").
     data_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(f"sqlite:///{data_path}", future=True)
-    return LedgerStore(engine=engine)
+    return LedgerStore(db_url=f"sqlite:///{data_path}")
 
 
 @hooks_approvals_app.command("list")
@@ -1695,7 +1693,8 @@ def hooks_approvals_list(
     db: str = typer.Option("belay-hooks.db", "--db", help=_DB_ANCHOR_HELP),
 ) -> None:
     """List every hook-queued approval item, oldest first."""
-    items = _hooks_approval_queue(db).list()
+    with _hooks_approval_queue(db) as queue:
+        items = queue.list()
     if not items:
         typer.echo("no approval items")
         return
@@ -1720,25 +1719,26 @@ def hooks_approvals_approve(
     from belay.errors import BelayError
 
     approver = by or getpass.getuser()
-    queue = _hooks_approval_queue(db)
-    try:
-        item = queue.approve(approval_id, approved_by=approver, reason=reason or None)
-    except BelayError as exc:
-        typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
-        raise typer.Exit(code=1) from exc
+    with _hooks_approval_queue(db) as queue:
+        try:
+            item = queue.approve(approval_id, approved_by=approver, reason=reason or None)
+        except BelayError as exc:
+            typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
+            raise typer.Exit(code=1) from exc
 
-    _hooks_ledger_for(db).append(
-        item.session_id,
-        "approval_resolved",
-        {
-            "approval_id": item.approval_id,
-            "plan_id": item.plan_id,
-            "state": "approved",
-            "approved_by": approver,
-            "reason": reason or None,
-        },
-        step_seq=item.step_seq,
-    )
+    with _hooks_ledger_for(db) as ledger:
+        ledger.append(
+            item.session_id,
+            "approval_resolved",
+            {
+                "approval_id": item.approval_id,
+                "plan_id": item.plan_id,
+                "state": "approved",
+                "approved_by": approver,
+                "reason": reason or None,
+            },
+            step_seq=item.step_seq,
+        )
     typer.echo(f"{item.approval_id} approved by {approver}")
 
 
@@ -1755,25 +1755,26 @@ def hooks_approvals_reject(
     from belay.errors import BelayError
 
     approver = by or getpass.getuser()
-    queue = _hooks_approval_queue(db)
-    try:
-        item = queue.reject(approval_id, rejected_by=approver, reason=reason or None)
-    except BelayError as exc:
-        typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
-        raise typer.Exit(code=1) from exc
+    with _hooks_approval_queue(db) as queue:
+        try:
+            item = queue.reject(approval_id, rejected_by=approver, reason=reason or None)
+        except BelayError as exc:
+            typer.echo(f"error: {exc.code} ({exc.detail})", err=True)
+            raise typer.Exit(code=1) from exc
 
-    _hooks_ledger_for(db).append(
-        item.session_id,
-        "approval_resolved",
-        {
-            "approval_id": item.approval_id,
-            "plan_id": item.plan_id,
-            "state": "rejected",
-            "rejected_by": approver,
-            "reason": reason or None,
-        },
-        step_seq=item.step_seq,
-    )
+    with _hooks_ledger_for(db) as ledger:
+        ledger.append(
+            item.session_id,
+            "approval_resolved",
+            {
+                "approval_id": item.approval_id,
+                "plan_id": item.plan_id,
+                "state": "rejected",
+                "rejected_by": approver,
+                "reason": reason or None,
+            },
+            step_seq=item.step_seq,
+        )
     typer.echo(f"{item.approval_id} rejected by {approver}")
 
 
