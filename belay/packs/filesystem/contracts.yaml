@@ -1,0 +1,276 @@
+# PACK-001 Filesystem (plan-v2 E20.1) -- contracts for the REAL, official
+# `@modelcontextprotocol/server-filesystem` MCP server (verified against
+# the actual installed npm package, not guessed from its README):
+#
+#   npx -y @modelcontextprotocol/server-filesystem <allowed-directory>
+#
+# Every field below (tool names, exact input/output shapes, error
+# behavior) was confirmed by actually calling the real, running server --
+# see tests/packs/test_filesystem_pack.py, which drives these contracts
+# against that same real server, not a mock. `belay draft-contracts`'s own
+# heuristic pass over this server got several of these wrong in ways
+# fixed by hand below:
+#
+# - `edit_file`/`move_file` were drafted as irreversible ("no read
+#   counterpart found") -- both actually have a well-defined undo, just
+#   not the same-tool-name pairing the heuristic looks for.
+# - `create_directory`'s draft undo called `create_directory` itself with
+#   a nonsensical `content` argument it doesn't accept -- this server has
+#   NO delete/remove-directory tool at all, so directory creation is
+#   genuinely irreversible via this pack, full stop.
+#
+# `write_file`'s capture (`read_file`) hard-errors (MCP `isError: true`,
+# not a soft "not found" flag) when the target file doesn't exist yet --
+# confirmed empirically, not assumed. That capture failure does NOT abort
+# the write (belay/proxy/server.py's real executor never raises on
+# `isError`, it just returns the CallToolResult; belay/executor/saga.py's
+# `_as_dict` folds `isError`/`content` into the captured state dict
+# either way) -- so creating a brand-new file always succeeds, it just
+# isn't reversible, which the `conditional` reversibility below captures
+# honestly rather than either lying about it (claiming `reversible`
+# unconditionally) or blocking new-file writes outright (claiming
+# `irreversible` unconditionally, which would also deny the always-safe
+# overwrite-an-existing-file case).
+
+belay_contract: '0.1'
+tool: read_file
+summary: Read the complete contents of a file as text (deprecated upstream in favor of read_text_file, kept here since it's still a real, callable tool).
+reversibility: reversible
+undo:
+  tool: read_file
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: read_text_file
+summary: Read the complete contents of a file from the file system as text.
+reversibility: reversible
+undo:
+  tool: read_text_file
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: read_media_file
+summary: Read a file and return it as base64-encoded content with its MIME type (images/audio as content, everything else as an embedded resource).
+reversibility: reversible
+undo:
+  tool: read_media_file
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: read_multiple_files
+summary: Read the contents of multiple files at once; a failed individual read does not stop the rest.
+reversibility: reversible
+undo:
+  tool: read_multiple_files
+  args:
+    paths: "$args.paths"
+effects:
+  - type: read
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: list_directory
+summary: List all files and directories in a specified path.
+reversibility: reversible
+undo:
+  tool: list_directory
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.directory
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: list_directory_with_sizes
+summary: List all files and directories in a specified path, including sizes.
+reversibility: reversible
+undo:
+  tool: list_directory_with_sizes
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.directory
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: directory_tree
+summary: Recursive tree view of files and directories as JSON.
+reversibility: reversible
+undo:
+  tool: directory_tree
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.directory
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: search_files
+summary: Recursively search for files/directories matching a glob-style pattern.
+reversibility: reversible
+undo:
+  tool: search_files
+  args:
+    path: "$args.path"
+    pattern: "$args.pattern"
+effects:
+  - type: read
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: get_file_info
+summary: Retrieve file/directory metadata (size, timestamps, permissions, type).
+reversibility: reversible
+undo:
+  tool: get_file_info
+  args:
+    path: "$args.path"
+effects:
+  - type: read
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: list_allowed_directories
+summary: Return the list of directories this server is allowed to access.
+reversibility: reversible
+undo:
+  tool: list_allowed_directories
+  args: {}
+effects:
+  - type: read
+    resource: filesystem.server
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: write_file
+summary: Create a new file, or completely overwrite an existing one, with new content.
+reversibility: conditional
+conditions:
+  - "$state.before.isError != true"
+capture:
+  tool: read_file
+  args:
+    path: "$args.path"
+  as: before
+undo:
+  tool: write_file
+  args:
+    path: "$args.path"
+    content: "$state.before.content"
+effects:
+  - type: update
+    resource: filesystem.file
+    count: "1"
+verification:
+  tool: read_file
+  args:
+    path: "$args.path"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: edit_file
+summary: Make line-based find/replace edits to an existing text file (git-style diff response).
+reversibility: reversible
+capture:
+  tool: read_file
+  args:
+    path: "$args.path"
+  as: before
+undo:
+  tool: write_file
+  args:
+    path: "$args.path"
+    content: "$state.before.content"
+effects:
+  - type: update
+    resource: filesystem.file
+    count: "1"
+verification:
+  tool: read_file
+  args:
+    path: "$args.path"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: move_file
+summary: Move or rename a file/directory (fails if the destination already exists -- never silently overwrites).
+reversibility: reversible
+undo:
+  tool: move_file
+  args:
+    source: "$args.destination"
+    destination: "$args.source"
+effects:
+  - type: update
+    resource: filesystem.file
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true
+---
+belay_contract: '0.1'
+tool: create_directory
+summary: Create a new directory (or ensure one exists, succeeding silently if it already does).
+reversibility: irreversible
+effects:
+  - type: create
+    resource: filesystem.directory
+    count: "1"
+provenance:
+  declared_by: integrator
+  verified: true

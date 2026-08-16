@@ -1,0 +1,63 @@
+# PACK-001 Filesystem -- pack-level metadata (plan-v2 E20.1).
+#
+# This file is documentation, not (yet) machine-enforced: there is no
+# `belay/packs/` loader that reads or validates it. The executable
+# artifact a real `belay wrap`/`belay run` session actually loads is
+# `contracts.yaml` alongside this file, via the existing, already-tested
+# `belay/contracts/loader.py` -- the same mechanism every other contract
+# set in this repo uses. Said plainly rather than implied: the full spec
+# §11 pack format (signed index, trust states, revocation checking, a
+# `belay pack install` CLI, an authoring SDK) is real, separate,
+# additional infrastructure this pass does not build -- see
+# docs/adr/0020-e20-verified-packs-scope.md for the scope decision.
+
+name: filesystem
+version: "0.1.0"
+schema_version: "0.1"
+license: MIT
+publisher: belay-mcp
+source_repository: https://github.com/Jairogelpi/belay-mcp
+source_path: packs/filesystem/contracts.yaml
+
+supported_belay_versions: ">=0.2.0a1"
+
+upstream:
+  identity: "@modelcontextprotocol/server-filesystem"
+  # The real, live-installed version this pack was verified against
+  # (`npm view @modelcontextprotocol/server-filesystem version`) --
+  # a pin to re-verify against, not a hard runtime requirement enforced
+  # by any code yet.
+  verified_version: "2026.7.10"
+  launch: "npx -y @modelcontextprotocol/server-filesystem <allowed-directory>"
+
+trust_state: unverified
+# spec §11.2's `official-verified` requires being maintained in the Belay
+# organization, reproducibly tested, signed, and covered by release
+# policy -- none of the signing/release-policy machinery exists yet, so
+# claiming that trust state would be exactly the kind of overclaim this
+# project has repeatedly corrected itself out of elsewhere. `unverified`
+# is the honest state today, despite the real integration testing behind
+# it (tests/packs/test_filesystem_pack.py) -- trust_state is about the
+# packaging/signing/registry chain, not just "does it work".
+
+required_credentials: none
+redaction_rules: none
+# File contents captured for undo (write_file/edit_file) are NOT redacted
+# in the ledger today -- a real gap if a pack this ships is ever used on
+# sensitive files. Flagged, not fixed, in this pass.
+
+fixtures_and_tests:
+  - tests/packs/test_filesystem_pack.py
+
+known_limitations:
+  - "No delete/remove-directory tool exists on the upstream server at
+     all -- creating a new file (write_file on a path that doesn't
+     already exist) or a new directory (create_directory) has no undo
+     path through this server's own tools, full stop. Contracts reflect
+     this honestly (write_file: conditional on the file having existed
+     before; create_directory: irreversible), not silently claimed
+     reversible."
+  - "move_file's undo (swap source/destination) assumes nothing else
+     wrote to the original source path in the interim -- the same
+     best-effort-within-a-session assumption belay's compensation model
+     makes everywhere else, not a new gap this pack introduces."
