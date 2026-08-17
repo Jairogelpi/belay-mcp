@@ -8,13 +8,18 @@ once it reaches 1.0.
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- **E21 release-readiness work (defined and being prepared):** Windows Bash
-  portability, explicit SQLite engine disposal, branch-coverage measurement,
-  and corrections to public release claims are tracked as one release-truth
-  effort. [ADR 0027](docs/adr/0027-e21-release-truth.md) records the immutable
-  `v0.1.0` history and the measured quality gate; it does not mark E21 complete.
+- **E21 -- quality and release truth:** fixed the Windows `install.sh`
+  syntax-check regression (stdin, not a path-translated file argument),
+  closed unowned SQLite engine leaks across `Supervisor`/CLI/tests via a
+  new ownership-aware `EngineLease` (`belay/db/lifecycle.py`), raised the
+  enforced branch-coverage floor from 79% to the measured 81% baseline
+  (`--cov-branch`), and reconciled README/CHANGELOG/CONTRIBUTING against
+  [ADR 0027](docs/adr/0027-e21-release-truth.md)'s release-truth record --
+  including a prior README claim, now corrected, that `v0.1.0` met the full
+  historical Definition of Done (it didn't: `0.1.0.dev0`, no PyPI publish,
+  below the 90%-branch/<60s target). `v0.2.0a1` remains the next prerelease.
 
 ### Added
 
