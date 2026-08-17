@@ -212,13 +212,14 @@ jobs:
       - name: Determine the prerelease flag from the tag's PEP 440 pre-release segment
         id: assemble
         shell: bash
+        # A multi-line, indented `python -c "..."` here is a real trap: bash
+        # passes the quoted string's literal indentation straight through as
+        # part of the Python source, and Python rejects a module-level
+        # statement that starts indented (`IndentationError: unexpected
+        # indent`) -- confirmed by actually running this exact pattern
+        # locally. A single-line -c command has no indentation to get wrong.
         run: |
-          python -c "
-          from packaging.version import Version
-          tag = '${{ needs.resolve.outputs.tag }}'
-          is_pre = Version(tag[1:]).is_prerelease
-          print(f'is_prerelease={str(is_pre).lower()}')
-          " >> "$GITHUB_OUTPUT"
+          python -c "from packaging.version import Version; tag='${{ needs.resolve.outputs.tag }}'; print('is_prerelease=' + str(Version(tag[1:]).is_prerelease).lower())" >> "$GITHUB_OUTPUT"
       - name: Create or update the GitHub release (never moves the tag)
         env:
           GH_TOKEN: ${{ github.token }}
