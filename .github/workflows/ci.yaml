@@ -55,17 +55,20 @@ jobs:
           cd /tmp
           /tmp/wheel-venv/bin/belay-conformance run --target belay --level 3
       - name: E22 zero-config connect smoke (wheel-only, isolated homes)
-        # scripts/smoke_connect.py is self-contained (no dev/test
-        # dependencies -- this venv has none) -- it generates its own fake
-        # `codex` CLI, puts it on an isolated PATH, isolates HOME so the
-        # real `belay` console script from the wheel above never touches
-        # this runner's real `~/.codex`, and fails the job outright on a
-        # missing bundled pack, wrong official-CLI syntax, a wrong
-        # recorded Belay launch command, failure to list tools through
-        # Belay, or failed directory confinement.
+        # scripts/smoke_connect.py imports belay.proxy.upstream/cli.* itself
+        # (its own MCP verification client and path helpers) -- it needs
+        # the SAME interpreter the wheel was installed into, not the
+        # runner's system `python`, or the import fails before the smoke
+        # even starts. It generates its own fake `codex` CLI, puts it on an
+        # isolated PATH, isolates HOME so the real `belay` console script
+        # from the wheel above never touches this runner's real
+        # `~/.codex`, and fails the job outright on a missing bundled pack,
+        # wrong official-CLI syntax, a wrong recorded Belay launch command,
+        # failure to list tools through Belay, or failed directory
+        # confinement.
         run: |
           mkdir -p /tmp/smoke-connect
-          python scripts/smoke_connect.py \
+          /tmp/wheel-venv/bin/python scripts/smoke_connect.py \
             --belay /tmp/wheel-venv/bin/belay \
             --bin-dir /tmp/smoke-connect/bin \
             --home /tmp/smoke-connect/home \
