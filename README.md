@@ -594,10 +594,23 @@ clean-clone test run under 60 seconds. See
 not be moved, recreated, or force-updated to change that history.
 
 `main` is currently ahead of `v0.1.0` with E10-E20 (see "What's new since
-v0.1.0" above). `v0.2.0a1` is the planned next GitHub prerelease — see
-[`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
-[`CHANGELOG.md`](CHANGELOG.md); it has not been cut yet, and no GitHub
-Release or PyPI publication should be assumed to exist until it is.
+v0.1.0" above; E21-E23 are release/governance work — quality gates,
+zero-config connect, and this prerelease process itself — tracked in
+[`CHANGELOG.md`](CHANGELOG.md) rather than the entrega table, since they
+don't add spec-numbered product behavior). `v0.2.0a1` is the planned next
+GitHub prerelease — see
+[`.github/workflows/release.yaml`](.github/workflows/release.yaml),
+[`docs/release-runbook.md`](docs/release-runbook.md) (E23 — the exact
+pre-tag gate, immutable-tag recovery procedure, and GitHub settings
+rollout order), and [`CHANGELOG.md`](CHANGELOG.md); it has not been cut
+yet, and no GitHub Release or PyPI publication should be assumed to exist
+until it is. When it is cut, the release will build source + wheel +
+Linux/macOS/Windows binaries from one immutable tagged commit, gated on
+nine required CI checks (`scripts/release_preflight.py
+REQUIRED_CHECK_NAMES`) all green on that exact commit first — see the
+runbook for the full procedure. `main` protection and mandatory checks
+are applied only after that first verified prerelease exists (E23 Task
+9), not before.
 
 An npm wrapper package (`npm/`, also `belay-mcp`) is written and locally
 verified but likewise **not published to npm yet** — same manual step,

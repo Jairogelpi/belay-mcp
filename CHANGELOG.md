@@ -23,6 +23,57 @@ once it reaches 1.0.
 
 ### Added
 
+- **E23 (Tasks 1-5) -- prerelease governance and recoverability:**
+  `scripts/release_preflight.py` validates every input a `v0.2.0a1`-style
+  tag needs before it can be cut -- tag format and PEP 440 `pyproject.toml`
+  <-> npm `package.json` semver version agreement, a clean worktree, local
+  `main` exactly matching `origin/main`, the tag genuinely absent both
+  locally and on the remote, an injectable `gh api`-backed check that all
+  nine required CI check-run names (`test (3.12)`/`test (3.13)`/
+  `wheel-smoke`/three `cross-platform-clean-room (...)`/three
+  `build-binaries (...)`) are present, on the exact candidate SHA, and
+  completed successfully (no queued/in-progress/cancelled/skipped/neutral/
+  stale-SHA/duplicate-ambiguous result silently accepted), and a five-class
+  release artifact inventory check (sdist, wheel, Linux/macOS/Windows
+  binaries -- no missing, duplicate, zero-byte, or version-mismatched
+  file). `.github/workflows/release.yaml` was rewritten around a `resolve`
+  job that independently resolves a tag (`push: tags: v*.*.*`, or a
+  `workflow_dispatch` recovery re-run with the same tag, from the
+  workflow's own default-branch checkout so a repaired workflow file is
+  what actually runs) to its exact commit SHA -- every build/test/release
+  job checks out that resolved SHA, never an implicit ref, so the tag
+  itself is never moved, recreated, or force-updated to recover from a
+  failed run. Builds source once and a PyInstaller binary per OS, each one
+  now also running the E22 zero-config connect smoke against the just-
+  built FROZEN binary itself (`scripts/smoke_connect.py --expect-frozen`,
+  also promoted into CI's own `build-binaries` matrix, not just the
+  release workflow) -- asserting the registered launch command is the
+  absolute binary plus `run --config ...`, never a `python`/`py`
+  interpreter or `belay.cli.main` spelled out, which would mean the
+  "no Python required" binary quietly still needed one. The release job
+  verifies the artifact inventory before creating/updating a matching
+  GitHub prerelease (marked `--prerelease` for an alpha tag) and uploads
+  assets `--clobber`-scoped only to its own known filenames (a recovery
+  re-run replaces its own prior partial upload, never an unrelated asset).
+  PyPI publish stays gated on the exact `vars.PYPI_PUBLISH_ENABLED ==
+  'true'` repository variable, trusted publishing (OIDC), no token secret.
+  `examples/demo.tape` is now self-contained (deterministic typing speed/
+  timing, correct output path, no stale "VHS unavailable" comment) --
+  re-ran the exact command it types (`python examples/demo.py --oops`)
+  directly and confirmed real `chain: OK`/`coherence: OK`/"session fully
+  compensated" output, but **`docs/assets/belay-demo.gif` still does not
+  exist and is not embedded**: `vhs` was not available in this environment
+  either, said plainly rather than faked (see README's "Recording"
+  section, ADR 0009). `docs/release-runbook.md` documents the exact
+  pre-tag gate commands, the immutable-tag failure-recovery procedure
+  (repair the workflow via a normal PR, re-dispatch against the same tag,
+  compare resolved SHAs, re-verify the inventory), and the GitHub
+  settings rollout (private vulnerability reporting, `main` protection
+  with the same nine required contexts, zero required human approvals,
+  administrator bypass) that Tasks 7-9 apply only after a verified
+  prerelease exists -- none of that was executed as part of Tasks 1-5,
+  which do not push, tag, open a PR, or touch PyPI/repository settings.
+
 - **E22 -- zero-config Codex/Claude connection (`belay connect`/`belay
   disconnect`):** one command connects the current directory to a
   Belay-protected instance of the pinned Filesystem MCP server

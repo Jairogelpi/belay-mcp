@@ -52,6 +52,14 @@ GitHub's private reporting flow:
 [Report a vulnerability](https://github.com/Jairogelpi/belay-mcp/security/advisories/new)
 (repo → Security tab → "Report a vulnerability").
 
+As of this writing, GitHub's private vulnerability reporting feature has
+not yet been enabled on this repository — it's part of
+[`docs/release-runbook.md`](docs/release-runbook.md)'s GitHub settings
+rollout (E23 Task 7), applied only after a verified `v0.2.0a1`
+prerelease exists, not before. Until it's confirmed enabled (the runbook
+includes the exact readback command to check), the link above may 404 or
+show as unavailable.
+
 If that's unavailable, open an issue asking for a private channel rather
 than describing the exploit inline — see
 [`CONTRIBUTING.md`](CONTRIBUTING.md)'s Security section.
