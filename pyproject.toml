@@ -59,6 +59,10 @@ dev = [
     "mypy>=1.11",
     "types-PyYAML>=6.0",
     "pre-commit>=3.7",
+    # scripts/release_preflight.py (E23) parses PEP 440 versions with this --
+    # a dev/release-time tool, never imported by the shipped `belay` package
+    # itself, so it belongs in `dev`, not the runtime dependency list above.
+    "packaging>=23.0",
 ]
 build = [
     "pyinstaller>=6.10",
