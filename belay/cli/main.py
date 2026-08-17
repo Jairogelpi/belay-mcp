@@ -386,6 +386,124 @@ def _register_client(client: str, wrap_path: Path, name: str, scope: str = "proj
     return target
 
 
+def _parse_connect_clients(client: str) -> frozenset[str]:
+    if client.strip().lower() == "all":
+        return frozenset({"codex", "claude", "claude-desktop"})
+    requested = {c.strip() for c in client.split(",") if c.strip()}
+    unknown = requested - {"codex", "claude", "claude-desktop"}
+    if unknown:
+        typer.echo(
+            f"error: unknown --client value(s) {sorted(unknown)} -- expected "
+            "codex, claude, claude-desktop, or all",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return frozenset(requested)
+
+
+@app.command()
+def connect(
+    project: str = typer.Option(
+        ".", "--project", help="Project directory to connect (default: current directory)."
+    ),
+    name: str = typer.Option(
+        "", "--name", help="Connection name (default: derived from the project directory)."
+    ),
+    client: str = typer.Option(
+        "all", "--client", help="Which client(s) to connect: codex|claude|claude-desktop|all "
+        "(comma-separated for more than one)."
+    ),
+) -> None:
+    """Zero-config: connect this directory to a Belay-protected Filesystem MCP
+    server for every detected, installed client (Codex CLI, Claude Code CLI,
+    Claude Desktop) via their own official registration commands (E22).
+
+    Requires at least one of those clients already installed. Generates and
+    preflights the protected proxy runtime (a real MCP `initialize`/
+    `list_tools` through it) before registering anything, and verifies every
+    registration the same way before declaring success -- see `belay/cli/
+    connection.py` for the full transaction.
+    """
+    from belay.cli.connection import (
+        CollisionError,
+        ConnectionError_,
+        RollbackIncompleteError,
+    )
+    from belay.cli.connection import connect as do_connect
+
+    project_dir = Path(project).resolve()
+    clients = _parse_connect_clients(client)
+
+    try:
+        result = do_connect(project_dir, name or None, clients=clients)
+    except RollbackIncompleteError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except CollisionError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ConnectionError_ as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    registered_clients = sorted({t.client for t in result.manifest.targets})
+    if result.already_connected:
+        typer.echo(
+            f"already connected: '{result.manifest.name}' -- {', '.join(registered_clients)}"
+        )
+        return
+    hooks_note = ", hooks" if result.manifest.hook_target is not None else ""
+    typer.echo(f"connected '{result.manifest.name}' -- {', '.join(registered_clients)}{hooks_note}")
+
+
+@app.command()
+def disconnect(
+    project: str = typer.Option(
+        ".", "--project", help="Project directory to disconnect (default: current directory)."
+    ),
+    name: str = typer.Option(
+        "", "--name", help="Connection name (default: whatever the manifest recorded)."
+    ),
+    purge_runtime: bool = typer.Option(
+        False, "--purge-runtime",
+        help="Also remove .belay/belay.wrap.json and the connection manifest after every "
+        "client/hook entry is cleanly removed (never removes .belay/belay.db).",
+    ),
+    client: str = typer.Option(
+        "all", "--client", help="Which client(s) to consider, comma-separated, or 'all'."
+    ),
+) -> None:
+    """Remove only Belay-managed entries this project's `belay connect` registered
+    (E22). Compare-and-swap: a target changed since Belay's own last write is
+    never overwritten -- disconnect reports it and leaves the connection
+    `rollback_incomplete` instead."""
+    from belay.cli.connection import ConnectionError_, RollbackIncompleteError
+    from belay.cli.connection import disconnect as do_disconnect
+
+    project_dir = Path(project).resolve()
+    clients = _parse_connect_clients(client)
+
+    try:
+        result = do_disconnect(
+            project_dir, name or None, purge_runtime=purge_runtime, clients=clients
+        )
+    except RollbackIncompleteError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except ConnectionError_ as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if result.manifest is None and not result.purged:
+        typer.echo("nothing to disconnect -- no belay connection found for this project")
+        return
+    if result.purged:
+        typer.echo("disconnected and purged the runtime (belay.db retained)")
+        return
+    assert result.manifest is not None
+    typer.echo(f"disconnected '{result.manifest.name}'")
+
+
 @app.command()
 def detect() -> None:
     """Report which supported MCP clients (claude-code, cursor, codex, opencode,
@@ -768,6 +886,30 @@ def doctor(
     would otherwise have nothing to actually remove.
     """
     from belay.cli.client_configs import entry_present, list_server_names, load_manifest, sha256_of
+    from belay.cli.connection import inspect_connection
+    from belay.cli.connection_models import ConnectionManifest
+
+    # E22: if this project directory has its own `belay connect` manifest,
+    # report its health first -- read-only, same as everything below, but a
+    # completely separate registration mechanism (official-CLI `mcp add`,
+    # not the file-rendering `_render_client_config` this rest of `doctor`
+    # inspects) so it gets its own section rather than being folded into
+    # the per-client loop below.
+    connection_manifest = ConnectionManifest.load(Path.cwd())
+    if connection_manifest is not None:
+        inspection = inspect_connection(Path.cwd())
+        typer.echo(f"connect: '{inspection.name}' -- status={inspection.manifest_status}")
+        for t in inspection.targets:
+            typer.echo(f"connect:   {t.client}: {t.state}")
+        if inspection.hook_state is not None:
+            typer.echo(f"connect:   claude-code-hooks: {inspection.hook_state}")
+        if inspection.rollback_incomplete:
+            typer.echo(
+                "connect:   rollback_incomplete -- run `belay disconnect` to reconcile "
+                "conflicting entries by hand before reconnecting"
+            )
+        elif inspection.healthy:
+            typer.echo("connect:   healthy")
 
     clients = (
         list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]
@@ -866,6 +1008,38 @@ def repair(
         load_manifest,
         render_claude_hooks_settings,
     )
+    from belay.cli.connection import RollbackIncompleteError, inspect_connection
+    from belay.cli.connection import connect as do_connect
+    from belay.cli.connection_models import ConnectionManifest
+
+    # E22: a `belay connect` manifest for the current project directory is
+    # a completely separate registration mechanism from the rest of this
+    # command (official-CLI `mcp add`, not `_render_client_config`) -- repair
+    # it first, on its own terms. A `rollback_incomplete` connection has a
+    # real, unresolved concurrent-edit conflict: `belay repair` must refuse
+    # it outright rather than guessing which side of the conflict to keep.
+    connection_manifest = ConnectionManifest.load(Path.cwd())
+    if connection_manifest is not None:
+        inspection = inspect_connection(Path.cwd())
+        if inspection.rollback_incomplete:
+            typer.echo(
+                f"error: connect '{inspection.name}' is rollback_incomplete -- a target changed "
+                "concurrently and was never overwritten; resolve it by hand, then run "
+                "`belay disconnect` to reconcile before reconnecting",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if inspection.healthy:
+            typer.echo(f"connect: '{inspection.name}' -- already healthy, nothing to repair")
+        else:
+            typer.echo(f"connect: repairing '{inspection.name}' via `belay connect`...")
+            try:
+                result = do_connect(Path.cwd(), inspection.name)
+            except RollbackIncompleteError as exc:
+                typer.echo(f"error: repair failed and could not fully roll back: {exc}", err=True)
+                raise typer.Exit(code=2) from exc
+            registered = sorted({t.client for t in result.manifest.targets})
+            typer.echo(f"connect: repaired '{result.manifest.name}' -- {', '.join(registered)}")
 
     clients = (
         list(_CLIENT_CONFIG_PATHS) if client == "all" else [c.strip() for c in client.split(",")]

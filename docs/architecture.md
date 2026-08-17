@@ -92,6 +92,53 @@ ended up `compensated` — never when irreversible/conditional-unmet/
 indeterminate steps are in scope, and never on a `--dry-run` (spec §10.3,
 honesty).
 
+## Zero-config client connection (E22)
+
+`belay connect`/`belay disconnect` (`belay/cli/connection.py`) are a
+separate orchestration layer sitting *above* the proxy above, not a change
+to it: they generate a `belay wrap`/`belay run` runtime for the pinned,
+bundled Filesystem pack (`belay/bundled_packs.py`, wheel-shipped under
+`belay/packs/filesystem/`) and register it with whichever of Codex CLI /
+Claude Code CLI / Claude Desktop are actually installed, through each
+client's own official mechanism (`belay/cli/client_registration.py`) —
+never by belay guessing at `~/.codex/config.toml`'s or `~/.claude.json`'s
+internal shape itself (Claude Desktop, which has no CLI, is the one
+exception: a surgical `mcpServers.<name>` JSON merge).
+
+```mermaid
+flowchart TB
+    Connect["belay connect\n(belay/cli/connection.py)"]
+    Connect --> Preflight["build runtime + real MCP\ninitialize/list_tools preflight\n(spawns the EXACT argv to be registered)"]
+    Preflight -- pass --> Snapshot["snapshot every target\n(FileSnapshot: bytes + sha256, or absence)"]
+    Snapshot --> Manifest[("connecting\n.belay/connection.json")]
+    Manifest --> Register["register each detected client\nvia its OWN official CLI\n(codex/claude adapters)"]
+    Register --> Hooks["install project-scoped\nClaude Code hooks\n(.claude/settings.json)"]
+    Hooks --> Verify["re-verify: read back each client's\nOWN recorded registration,\nreal MCP initialize/list_tools again"]
+    Verify -- pass --> Connected[("connected")]
+    Register -- any failure --> Rollback["reverse-order compare-and-swap\nrestore (exact bytes/absence)"]
+    Hooks -- any failure --> Rollback
+    Verify -- any failure --> Rollback
+    Rollback -- fully restored --> Reverted["transaction failed,\noriginal error reported"]
+    Rollback -- "a target changed\nconcurrently" --> Incomplete[("rollback_incomplete")]
+```
+
+The manifest (`.belay/connection.json`, `belay/cli/connection_models.py`)
+is the sole authority for `disconnect`/`repair`/`doctor`: every target it
+tracks carries a byte-exact before-snapshot and a post-write hash, so
+removal is always compare-and-swap (`belay disconnect`) — a target that
+changed since Belay's own last write is reported, never silently
+overwritten, and the connection is left `rollback_incomplete` instead of
+guessing which side of the conflict to keep. `inspect_connection` is
+read-only and distinguishes `healthy` / `missing` / `modified` /
+`conflict` per target without ever spawning a process.
+
+**Scope, said plainly:** current-directory-only, Filesystem-pack-only,
+one pinned upstream version — this is the single most common zero-config
+case, not a general pack installer (that remains `belay wrap`/`belay
+init`/`belay bootstrap` above, by hand, for any other upstream server).
+Codex gets MCP-only protection: there is no Codex-side native-tool hook
+this integrates with, so `belay connect` never claims one.
+
 ## Conformance
 
 `conformance/` (package `belay-conformance`) extracts every

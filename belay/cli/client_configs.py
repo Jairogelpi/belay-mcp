@@ -289,6 +289,24 @@ def list_server_names(client: str, existing: str) -> list[str]:
     return list(servers.keys()) if isinstance(servers, dict) else []
 
 
+def render_json_mcp_entry(
+    existing: str, name: str, command: str, args: list[str], key: str = "mcpServers"
+) -> str:
+    """Merge a `<key>.<name>` (default `mcpServers`) `{"command", "args"}`
+    entry into an existing (or empty) JSON config body, preserving every
+    other entry/top-level key untouched -- the JSON-config counterpart to
+    `render_codex_toml`. E22's Claude Desktop fallback (`belay/cli/
+    client_registration.py::register_claude_desktop`) is this function's
+    only caller so far -- Claude Desktop has no registration CLI, so it is
+    the one client E22 still merges its own config for."""
+    doc: dict[str, object] = json.loads(existing) if existing.strip() else {}
+    servers = doc.setdefault(key, {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"config has a non-object {key!r} key -- fix by hand")
+    servers[name] = {"command": command, "args": args}
+    return json.dumps(doc, indent=2) + "\n"
+
+
 def remove_codex_entry(existing: str, name: str) -> str:
     """Surgically remove `[mcp_servers.<name>]` from a config.toml body, leaving
     everything else untouched -- used when the file changed after install (so

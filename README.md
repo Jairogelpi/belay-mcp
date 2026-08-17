@@ -151,6 +151,64 @@ at all. The `AGENTS.md`/`CLAUDE.md` instruction is the durable nudge; a
 deterministic hook-based gate that actually intercepts native tool calls
 too is `belay hooks install` (E18), below.
 
+### Zero-config: `belay connect` (E22)
+
+```bash
+belay connect
+# ... some time later, or on a different machine:
+belay disconnect
+```
+
+The one-command version of the above for the single most common case —
+**you already have Codex CLI and/or Claude Code CLI (and/or Claude
+Desktop) installed** and want the current directory's files protected by
+Belay with no flags at all. `belay connect`, run with no arguments:
+
+- Detects which of Codex CLI, Claude Code CLI, and Claude Desktop are
+  actually installed on this machine — at least one is required; it never
+  invents a client that isn't there.
+- Generates a real, protected proxy for the current directory only — the
+  **Filesystem MCP server** (`@modelcontextprotocol/server-filesystem`),
+  **pinned** to the exact version this pack was verified against
+  (`packs/filesystem/pack.yaml`) — not "whatever `npx` resolves today".
+  No other upstream server is offered by `connect`; wrapping something
+  else still means `belay wrap`/`belay init` (above) by hand.
+- Names the connection deterministically from the project directory (an
+  ASCII slug of its basename plus an 8-hex-char hash of its full resolved
+  path — see `belay/cli/connection_models.py`), so re-running `connect` in
+  the same directory is idempotent and two different directories that
+  happen to share a basename never collide. Override with `--name`.
+- Registers with each detected client through **that client's own
+  official CLI** (`codex mcp add ... -- ...`, `claude mcp add --scope user
+  --transport stdio ... -- ...`) — never by hand-editing
+  `~/.codex/config.toml`/`~/.claude.json` itself. Claude Desktop has no
+  registration CLI, so it's the one exception: a surgical JSON merge of
+  just `mcpServers.<name>`, leaving everything else in that file
+  untouched.
+- For Claude Code specifically, also installs a **project-scoped**
+  `PreToolUse`/`PostToolUse` hook at `<project>/.claude/settings.json` (not
+  a global/user-scope hook) — the same Native Agent Gate `belay hooks
+  install` provides, scoped to just this project.
+- **Codex gets MCP-only protection** — there is no Codex-side hook
+  mechanism this integrates with (said plainly: Codex has no claimed
+  native hook integration), so only tool calls that actually go through
+  the registered MCP server are gated; Codex's own native Bash/file-edit
+  tools are not.
+- Proves the exact command it's about to register actually works, twice:
+  once before touching any client (a real MCP `initialize`/`list_tools`
+  through the generated proxy), and once after, reading back each
+  client's own recorded registration rather than assuming it matches.
+- Every tool call goes through the same append-only, hash-chained ledger
+  (`.belay/belay.db`) as `belay wrap`/`belay run` — `belay disconnect`
+  never deletes it, with or without `--purge-runtime`.
+
+`belay disconnect` removes only the entries `belay connect` itself
+registered (compare-and-swap: an entry hand-edited since is left alone,
+reported, never silently overwritten) and leaves `.belay/belay.wrap.json`
+and `.belay/belay.db` in place unless you pass `--purge-runtime`, which
+still never touches the ledger database. `belay doctor`/`belay repair`
+understand this connection's health too — see their `--help`.
+
 ## Quickstart
 
 ```bash
