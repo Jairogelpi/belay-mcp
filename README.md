@@ -246,11 +246,24 @@ step is the equivalent E7 actually built and tested — the agent retries with
 a different, narrower filter, which is a new plan the human approves
 instead of the original one.
 
-**Recording:** a VHS tape script (`examples/demo.tape`) is checked in for
-whoever has the `vhs` binary to render a GIF from — `asciinema` and `vhs`
-were not available in the sandbox this entrega was built in, so no
-recording is embedded here yet. This is an honest gap, not a placeholder
-GIF; see ADR 0009.
+**Recording:** a self-contained VHS tape script (`examples/demo.tape`,
+fixed up in E23 — deterministic typing speed/timing, output path, no `cd`
+assumptions) is checked in for whoever has the `vhs` binary to render a
+GIF from:
+
+```bash
+vhs examples/demo.tape   # from the repository root -> docs/assets/belay-demo.gif
+```
+
+`vhs` was not available in either the sandbox E9 was built in or the
+environment E23 was built in, so `docs/assets/belay-demo.gif` still does
+not exist and nothing is embedded here yet. This is an honest gap, not a
+placeholder GIF — the tape itself was re-verified in E23 by running the
+exact command it types (`python examples/demo.py --oops`) directly, which
+produced real `chain: OK` / `coherence: OK` / "session fully compensated"
+output; only the actual VHS render step could not run. See ADR 0009 and
+[ADR 0027](docs/adr/0027-e21-release-truth.md)'s release-truth precedent
+for why this stays stated plainly instead of silently dropped or faked.
 
 ## Advanced setup
 
