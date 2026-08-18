@@ -187,6 +187,16 @@ jobs:
   release:
     needs: [resolve, build-source, build-binaries]
     runs-on: ubuntu-latest
+    # The repo's own default workflow token permission is read-only
+    # (`gh api repos/.../actions/permissions/workflow` -> "read") --
+    # confirmed the hard way (E23 Task 8's first real v0.2.0a1 run: `gh
+    # release create`/`upload` 403'd, "Resource not accessible by
+    # integration"). `contents: write` is exactly what creating/editing a
+    # release and uploading its assets needs, scoped to this job only, the
+    # same least-privilege pattern `publish-pypi` below already uses for
+    # its own `id-token: write`.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
