@@ -330,6 +330,20 @@ def run_smoke(
     bin_dir.mkdir(parents=True, exist_ok=True)
     home.mkdir(parents=True, exist_ok=True)
     project.mkdir(parents=True, exist_ok=True)
+    # `belay connect` itself registers the upstream Filesystem server's
+    # allowed-directory root as `project_dir.resolve()` (`connection.py`'s
+    # `build_proposed_runtime`) -- the *canonical* path, e.g. macOS's real
+    # `/private/tmp/...` for a `/tmp/...` symlink, or a Windows long name
+    # for a short `RUNNER~1`-style one CI happens to hand this script.
+    # `write_file`/`read_file` calls below must target that same canonical
+    # form: the upstream server's own confinement check is a literal path
+    # comparison, not a realpath-normalizing one, so a call spelled with an
+    # unresolved alias of an in-bounds path gets a real, correct "access
+    # denied" -- confirmed the hard way against a real frozen build on
+    # macos-latest/windows-latest CI runners (E23 Task 3), where the two
+    # forms differ and ubuntu-latest/most local dev machines' `/tmp`
+    # happens not to.
+    project = project.resolve()
     outside = project.parent / f"{project.name}-outside-confinement-check"
     outside.mkdir(parents=True, exist_ok=True)
     (outside / "secret.txt").write_text("do not read me", encoding="utf-8")
