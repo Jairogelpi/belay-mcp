@@ -51,6 +51,10 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mcp.types import CallToolResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -306,13 +310,18 @@ async def _list_tools_through_belay(argv: list[str]) -> list[str]:
     return [t.name for t in tools]
 
 
-async def _call_tool_through_belay(argv: list[str], tool: str, args: dict[str, object]) -> bool:
-    """Returns True if the call succeeded (no MCP-level error)."""
+async def _call_tool_through_belay(
+    argv: list[str], tool: str, args: dict[str, object]
+) -> CallToolResult:
+    """Returns the full MCP result -- callers need `.content` on failure,
+    not just a bool, to say *why* a call was denied (a bare True/False here
+    once made a real E23 CI failure -- a policy/contract rejection, not the
+    frozen-binary bug it looked like at first glance -- unreadable without
+    re-running by hand)."""
     from belay.proxy.upstream import connect_stdio
 
     async with connect_stdio(argv[0], argv[1:]) as client:
-        result = await client.call_tool(tool, args)
-    return result.isError is not True
+        return await client.call_tool(tool, args)
 
 
 def run_smoke(
@@ -393,24 +402,27 @@ def run_smoke(
             f"Filesystem upstream's tools -- got {sorted(tool_names)}"
         )
 
-    inside_ok = asyncio.run(
+    inside_result = asyncio.run(
         _call_tool_through_belay(
             recorded_argv, "write_file",
             {"path": str(project / "smoke.txt"), "content": "hello from smoke_connect"},
         )
     )
-    if not inside_ok or not (project / "smoke.txt").is_file():
-        raise SmokeFailure("write inside the connected project directory failed through Belay")
+    if inside_result.isError or not (project / "smoke.txt").is_file():
+        raise SmokeFailure(
+            "write inside the connected project directory failed through Belay -- "
+            f"isError={inside_result.isError} content={inside_result.content!r}"
+        )
 
-    outside_ok = asyncio.run(
+    outside_result = asyncio.run(
         _call_tool_through_belay(
             recorded_argv, "read_file", {"path": str(outside / "secret.txt")}
         )
     )
-    if outside_ok:
+    if not outside_result.isError:
         raise SmokeFailure(
             "directory confinement failed -- Belay's proxy allowed reading a path outside "
-            "the connected project directory"
+            f"the connected project directory -- content={outside_result.content!r}"
         )
 
     disconnect_result = _belay("disconnect", "--project", str(project))
