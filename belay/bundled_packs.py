@@ -15,6 +15,7 @@ must never quietly diverge.
 from __future__ import annotations
 
 import importlib.resources
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import yaml
 
 from belay.contracts.loader import load_contract_set
 from belay.contracts.model import ContractSet
+from belay.supervisor.addressing import belay_home
 
 #: The exact upstream package identity and version this bundled pack was
 #: verified against (spec §11.2 `upstream.identity`/`upstream.verified_version`
@@ -101,3 +103,33 @@ def filesystem_pack() -> BundledFilesystemPack:
         upstream_identity=identity,
         pinned_version=version,
     )
+
+
+def stable_contracts_path(pack: BundledFilesystemPack) -> Path:
+    """`pack.contracts_path` only outlives *this* process for a real
+    installed wheel. A PyInstaller onefile `belay.exe` extracts its bundled
+    data into a fresh `sys._MEIPASS` temp directory on every launch and
+    deletes it again on exit -- confirmed the hard way (E23 Task 3's frozen
+    zero-config smoke): `belay connect` baked its own process's
+    `_MEIPASS`-relative path into `belay.wrap.json`, then the *next*
+    `belay run` process -- a different launch, a different, already-fresh
+    `_MEIPASS` -- tried to read a file that belonged to the first process
+    and no longer existed anywhere on disk.
+
+    Only frozen builds need help: a wheel's `belay.packs` resource path is
+    a real, permanent file, stable across process launches, so this is a
+    no-op there. A frozen build instead gets the bundled contracts copied
+    once into `belay_home()` (outside any project directory, same as every
+    other private state this package owns), keyed by the pinned upstream
+    version so an upgrade can't silently keep serving a stale copy, and
+    re-copied only when the bundled bytes actually differ from what is
+    already there (idempotent -- the common already-up-to-date path costs
+    one read and one comparison, not a write)."""
+    if not getattr(sys, "frozen", False):
+        return pack.contracts_path
+    dest = belay_home() / "packs" / "filesystem" / pack.pinned_version / "contracts.yaml"
+    source_bytes = pack.contracts_path.read_bytes()
+    if not dest.is_file() or dest.read_bytes() != source_bytes:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source_bytes)
+    return dest

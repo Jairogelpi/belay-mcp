@@ -61,3 +61,80 @@ def test_smoke_connect_fails_loudly_when_belay_command_is_broken(tmp_path: Path)
             home=tmp_path / "home",
             project=tmp_path / "project",
         )
+
+
+# --------------------------------------------------------------------------
+# E23 Task 3: frozen-launch assertion
+# --------------------------------------------------------------------------
+
+
+def test_assert_frozen_launch_command_accepts_absolute_binary_with_run_config() -> None:
+    smoke_connect.assert_frozen_launch_command(
+        ["/opt/belay/dist-bin/belay", "run", "--config", "/tmp/belay.wrap.json"]
+    )  # must not raise
+
+
+def test_assert_frozen_launch_command_accepts_windows_exe() -> None:
+    smoke_connect.assert_frozen_launch_command(
+        [r"C:\dist-bin\belay.exe", "run", "--config", r"C:\proj\belay.wrap.json"]
+    )  # must not raise
+
+
+def test_assert_frozen_launch_command_rejects_empty_argv() -> None:
+    with pytest.raises(smoke_connect.SmokeFailure, match="empty command"):
+        smoke_connect.assert_frozen_launch_command([])
+
+
+@pytest.mark.parametrize("interpreter", ["python", "python3", "py"])
+def test_assert_frozen_launch_command_rejects_python_interpreter(interpreter: str) -> None:
+    with pytest.raises(smoke_connect.SmokeFailure, match="python interpreter"):
+        smoke_connect.assert_frozen_launch_command(
+            [interpreter, "-m", "belay.cli.main", "run", "--config", "belay.wrap.json"]
+        )
+
+
+def test_assert_frozen_launch_command_rejects_belay_cli_main_module_argument() -> None:
+    with pytest.raises(smoke_connect.SmokeFailure, match=r"belay\.cli\.main"):
+        smoke_connect.assert_frozen_launch_command(
+            ["/some/interpreter-shaped-path", "-m", "belay.cli.main", "run", "--config", "x"]
+        )
+
+
+def test_assert_frozen_launch_command_rejects_missing_run_or_config() -> None:
+    with pytest.raises(smoke_connect.SmokeFailure, match=r"'run'/'--config'"):
+        smoke_connect.assert_frozen_launch_command(["/opt/belay/dist-bin/belay", "--help"])
+
+
+def test_smoke_connect_frozen_shim_registers_absolute_binary_not_python(tmp_path: Path) -> None:
+    """Drives the real end-to-end smoke against `write_fake_frozen_belay`'s
+    shim (which monkeypatches `sys.frozen`/`sys.executable` the same way a
+    real PyInstaller binary's own bootloader effectively does) -- proves
+    `--expect-frozen` passes for a genuinely frozen-shaped registration,
+    without a real multi-minute PyInstaller build in the fast dev suite."""
+    _require_npx()
+    frozen_bin_dir = tmp_path / "frozen-bin"
+    frozen_belay = smoke_connect.write_fake_frozen_belay(frozen_bin_dir)
+    smoke_connect.run_smoke(
+        belay_cmd=[str(frozen_belay)],
+        bin_dir=tmp_path / "bin",
+        home=tmp_path / "home",
+        project=tmp_path / "project",
+        expect_frozen=True,
+    )  # must not raise
+
+
+def test_smoke_connect_expect_frozen_catches_a_python_dash_m_regression(tmp_path: Path) -> None:
+    """The other side of the previous test: proves `--expect-frozen` is not
+    a vacuous check by pointing it at the genuinely non-frozen dev
+    invocation (`python -m belay.cli.main`) -- which legitimately
+    registers a python-dependent command -- and confirming that is
+    correctly rejected."""
+    _require_npx()
+    with pytest.raises(smoke_connect.SmokeFailure, match="python interpreter"):
+        smoke_connect.run_smoke(
+            belay_cmd=[sys.executable, "-m", "belay.cli.main"],
+            bin_dir=tmp_path / "bin",
+            home=tmp_path / "home",
+            project=tmp_path / "project",
+            expect_frozen=True,
+        )

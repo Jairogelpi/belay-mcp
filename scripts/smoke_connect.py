@@ -21,6 +21,11 @@ What it actually proves, in order:
    MCP `initialize`/`list_tools` THROUGH Belay (never by connecting to the
    Filesystem upstream directly): proves the registered command is
    correct, not just that `connect` claimed success.
+   E23 Task 3: with `--expect-frozen` (CI's `build-binaries` matrix jobs,
+   against a real PyInstaller `dist-bin/belay(.exe)`), that recorded
+   command is additionally asserted to be the absolute binary itself
+   plus `run --config ...` -- never a `python`/`py` interpreter, never
+   `belay.cli.main` spelled out as a module argument.
 4. Through that same Belay-proxied session: an inside-the-project path
    works, an outside path is confined/rejected.
 5. `belay disconnect` removes only Belay's own entry -- a pre-existing,
@@ -28,8 +33,10 @@ What it actually proves, in order:
 
 Any of these failing (including the pinned pack being missing from the
 wheel, wrong official-CLI argv, a wrong recorded launch command, failure
-to list tools through Belay, or failed confinement) exits nonzero with a
-clear message identifying which stage failed.
+to list tools through Belay, failed confinement, or -- with
+`--expect-frozen` -- a frozen binary that quietly registered a
+python-dependent launch command) exits nonzero with a clear message
+identifying which stage failed.
 """
 
 from __future__ import annotations
@@ -44,6 +51,12 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mcp.types import CallToolResult
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SmokeFailure(RuntimeError):
@@ -152,6 +165,116 @@ def run_fake_cli(exe: Path, args: list[str]) -> subprocess.CompletedProcess[str]
 
 
 # --------------------------------------------------------------------------
+# E23 Task 3: a fake FROZEN `belay` -- exercises the exact registration
+# decision `belay/cli/connection.py::belay_launch_argv` makes for a real
+# PyInstaller `dist-bin/belay(.exe)`, without an actual multi-minute
+# PyInstaller build in the fast dev suite.
+#
+# Deliberately does NOT set the real `sys.frozen`/`sys.executable`
+# attributes `belay_launch_argv` itself reads -- confirmed the hard way
+# on Windows: `sys.frozen = True` inside an ordinary (non-frozen)
+# interpreter also flips `pywin32`'s own frozen-app import-path detection,
+# which then fails to locate `pywintypes` and crashes belay's own
+# `mcp`/`anyio` import chain -- a real PyInstaller binary doesn't hit
+# this because ITS bundled pywin32 (if any) is laid out for exactly that
+# frozen case; a plain script pretending to be frozen isn't. Instead this
+# shim monkeypatches `belay_launch_argv` itself (a plain, undecorated
+# module-level function `belay/cli/connection.py`'s `connect` command
+# calls by name at call time) to return frozen-shaped output directly --
+# same observable effect (the registered command IS this shim's own
+# absolute path plus `run --config ...`), none of the real interpreter
+# state that confuses an unrelated library. The genuinely frozen
+# `sys.frozen`/`sys.executable` code path itself is only exercised for
+# real by CI's `build-binaries` matrix jobs, against the actual binary.
+# --------------------------------------------------------------------------
+
+_FAKE_FROZEN_BELAY_BODY = textwrap.dedent(
+    """
+    import sys
+    # This shim's own script lives outside the repo (a throwaway tmp bin
+    # dir), so plain `python this_script.py` puts the SCRIPT's directory
+    # -- not the repo -- at sys.path[0]. Left alone, that can silently
+    # resolve `import belay` to an unrelated `belay` on the rest of
+    # sys.path (e.g. a stale editable install pointing at a different
+    # checkout) instead of this exact repo's own code -- confirmed the
+    # hard way: `connect`/`disconnect` quietly vanished from the CLI when
+    # that happened. Forcing the real repo root to the very front of
+    # sys.path makes this shim behave like `python -m belay.cli.main` run
+    # from the repo root (which puts cwd, not a script dir, at
+    # sys.path[0]) -- the same resolution smoke_connect.py's own dev-mode
+    # invocation already relies on.
+    sys.path.insert(0, REPO_ROOT)
+
+    import belay.cli.connection as _connection
+
+    def _frozen_launch_argv(wrap_path):
+        return (SELF_PATH, "run", "--config", str(wrap_path))
+
+    _connection.belay_launch_argv = _frozen_launch_argv
+
+    from belay.cli.main import main
+    sys.exit(main())
+    """
+)
+
+
+def write_fake_frozen_belay(bin_dir: Path) -> Path:
+    """Real, directly-executable -- CI's `build-binaries` matrix jobs
+    (E23 Task 3 Step 3) instead point `--expect-frozen` smoke runs at the
+    genuine `dist-bin/belay(.exe)` PyInstaller output; this shim exists so
+    the SAME `assert_frozen_launch_command` check has fast, real coverage
+    without needing that build here."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    exe_name = "fake-frozen-belay"
+    exe_path = bin_dir / (f"{exe_name}.cmd" if sys.platform == "win32" else exe_name)
+    script_path = bin_dir / f"_{exe_name}_impl.py"
+    body = (
+        f"SELF_PATH = {json.dumps(str(exe_path))}\n"
+        f"REPO_ROOT = {json.dumps(str(REPO_ROOT))}\n"
+    ) + _FAKE_FROZEN_BELAY_BODY
+    script_path.write_text(body, encoding="utf-8")
+
+    if sys.platform == "win32":
+        exe_path.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script_path}" %*\r\n', encoding="utf-8"
+        )
+        return exe_path
+
+    exe_path.write_text(f"#!{sys.executable}\n" + body, encoding="utf-8")
+    exe_path.chmod(exe_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return exe_path
+
+
+def assert_frozen_launch_command(recorded_argv: list[str]) -> None:
+    """E23 Task 3: a frozen `belay`/`belay.exe` binary must register
+    itself directly -- the absolute path to the binary itself, then
+    `run --config ...` -- never delegate through a `python`/`py`
+    interpreter, and never spell out `belay.cli.main` as a module
+    argument. Either of those would mean the compiled, no-Python-required
+    binary quietly needs Python installed after all to actually run,
+    defeating the entire point of shipping one (plan-v2 E19.5)."""
+    if not recorded_argv:
+        raise SmokeFailure("frozen belay's recorded registration has an empty command")
+    command = recorded_argv[0]
+    stem = Path(command).stem.lower()
+    if stem in ("python", "python3", "py"):
+        raise SmokeFailure(
+            f"frozen belay registered a python interpreter as its launch command "
+            f"({command!r}, argv={recorded_argv!r}) -- expected the absolute belay/belay.exe "
+            f"binary itself"
+        )
+    if "belay.cli.main" in recorded_argv:
+        raise SmokeFailure(
+            f"frozen belay's registration still spells out the 'belay.cli.main' module "
+            f"invocation: {recorded_argv!r}"
+        )
+    if "run" not in recorded_argv or "--config" not in recorded_argv:
+        raise SmokeFailure(
+            f"frozen belay's registration is missing 'run'/'--config': {recorded_argv!r}"
+        )
+
+
+# --------------------------------------------------------------------------
 # The smoke driver itself
 # --------------------------------------------------------------------------
 
@@ -187,19 +310,40 @@ async def _list_tools_through_belay(argv: list[str]) -> list[str]:
     return [t.name for t in tools]
 
 
-async def _call_tool_through_belay(argv: list[str], tool: str, args: dict[str, object]) -> bool:
-    """Returns True if the call succeeded (no MCP-level error)."""
+async def _call_tool_through_belay(
+    argv: list[str], tool: str, args: dict[str, object]
+) -> CallToolResult:
+    """Returns the full MCP result -- callers need `.content` on failure,
+    not just a bool, to say *why* a call was denied (a bare True/False here
+    once made a real E23 CI failure -- a policy/contract rejection, not the
+    frozen-binary bug it looked like at first glance -- unreadable without
+    re-running by hand)."""
     from belay.proxy.upstream import connect_stdio
 
     async with connect_stdio(argv[0], argv[1:]) as client:
-        result = await client.call_tool(tool, args)
-    return result.isError is not True
+        return await client.call_tool(tool, args)
 
 
-def run_smoke(*, belay_cmd: list[str], bin_dir: Path, home: Path, project: Path) -> None:
+def run_smoke(
+    *, belay_cmd: list[str], bin_dir: Path, home: Path, project: Path, expect_frozen: bool = False
+) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     home.mkdir(parents=True, exist_ok=True)
     project.mkdir(parents=True, exist_ok=True)
+    # `belay connect` itself registers the upstream Filesystem server's
+    # allowed-directory root as `project_dir.resolve()` (`connection.py`'s
+    # `build_proposed_runtime`) -- the *canonical* path, e.g. macOS's real
+    # `/private/tmp/...` for a `/tmp/...` symlink, or a Windows long name
+    # for a short `RUNNER~1`-style one CI happens to hand this script.
+    # `write_file`/`read_file` calls below must target that same canonical
+    # form: the upstream server's own confinement check is a literal path
+    # comparison, not a realpath-normalizing one, so a call spelled with an
+    # unresolved alias of an in-bounds path gets a real, correct "access
+    # denied" -- confirmed the hard way against a real frozen build on
+    # macos-latest/windows-latest CI runners (E23 Task 3), where the two
+    # forms differ and ubuntu-latest/most local dev machines' `/tmp`
+    # happens not to.
+    project = project.resolve()
     outside = project.parent / f"{project.name}-outside-confinement-check"
     outside.mkdir(parents=True, exist_ok=True)
     (outside / "secret.txt").write_text("do not read me", encoding="utf-8")
@@ -262,6 +406,9 @@ def run_smoke(*, belay_cmd: list[str], bin_dir: Path, home: Path, project: Path)
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise SmokeFailure(f"could not parse codex's recorded registration: {exc}") from exc
 
+    if expect_frozen:
+        assert_frozen_launch_command(recorded_argv)
+
     tool_names = asyncio.run(_list_tools_through_belay(recorded_argv))
     if "write_file" not in tool_names or "read_file" not in tool_names:
         raise SmokeFailure(
@@ -269,24 +416,27 @@ def run_smoke(*, belay_cmd: list[str], bin_dir: Path, home: Path, project: Path)
             f"Filesystem upstream's tools -- got {sorted(tool_names)}"
         )
 
-    inside_ok = asyncio.run(
+    inside_result = asyncio.run(
         _call_tool_through_belay(
             recorded_argv, "write_file",
             {"path": str(project / "smoke.txt"), "content": "hello from smoke_connect"},
         )
     )
-    if not inside_ok or not (project / "smoke.txt").is_file():
-        raise SmokeFailure("write inside the connected project directory failed through Belay")
+    if inside_result.isError or not (project / "smoke.txt").is_file():
+        raise SmokeFailure(
+            "write inside the connected project directory failed through Belay -- "
+            f"isError={inside_result.isError} content={inside_result.content!r}"
+        )
 
-    outside_ok = asyncio.run(
+    outside_result = asyncio.run(
         _call_tool_through_belay(
             recorded_argv, "read_file", {"path": str(outside / "secret.txt")}
         )
     )
-    if outside_ok:
+    if not outside_result.isError:
         raise SmokeFailure(
             "directory confinement failed -- Belay's proxy allowed reading a path outside "
-            "the connected project directory"
+            f"the connected project directory -- content={outside_result.content!r}"
         )
 
     disconnect_result = _belay("disconnect", "--project", str(project))
@@ -313,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bin-dir", required=True, help="Directory to place the fake codex CLI.")
     parser.add_argument("--home", required=True, help="Isolated HOME/USERPROFILE root.")
     parser.add_argument("--project", required=True, help="Project directory to connect.")
+    parser.add_argument(
+        "--expect-frozen", action="store_true",
+        help="Require the recorded registration to be a bare, absolute belay/belay.exe launch "
+        "(no python/py/belay.cli.main) -- E23 Task 3, use against a real PyInstaller build.",
+    )
     args = parser.parse_args(argv)
 
     # posix=False on Windows: POSIX-mode shlex treats backslash as an escape
@@ -324,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_smoke(
             belay_cmd=belay_cmd, bin_dir=Path(args.bin_dir), home=Path(args.home),
-            project=Path(args.project),
+            project=Path(args.project), expect_frozen=args.expect_frozen,
         )
     except SmokeFailure as exc:
         print(f"smoke_connect: FAILED -- {exc}", file=sys.stderr)

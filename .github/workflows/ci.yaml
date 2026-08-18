@@ -110,6 +110,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       - name: Install
         run: pip install -e ".[build]"
       - name: Build binary
@@ -120,6 +123,30 @@ jobs:
           BIN=dist-bin/belay
           if [ ! -f "$BIN" ]; then BIN=dist-bin/belay.exe; fi
           "$BIN" --help
+      - name: E23 zero-config connect smoke (frozen binary, isolated homes)
+        # scripts/smoke_connect.py --expect-frozen (Task 3): exercises the
+        # just-built, no-Python-required binary itself -- `connect` against
+        # a fake `codex` CLI, a real MCP session THROUGH Belay against the
+        # real pinned Filesystem upstream (list-tools, in-project write,
+        # out-of-project confinement), `disconnect` -- and additionally
+        # asserts the command the fake CLI recorded is the absolute binary
+        # path plus `run --config ...`, never a `python`/`py` interpreter
+        # or `belay.cli.main` spelled out (which would mean this "no
+        # Python required" binary quietly still needed one). Uses the
+        # runner's own `python` (not the frozen binary) to drive the
+        # script -- it imports `belay.*` itself as a verification client,
+        # which the editable install from the step above already provides.
+        shell: bash
+        run: |
+          BIN=dist-bin/belay
+          if [ ! -f "$BIN" ]; then BIN=dist-bin/belay.exe; fi
+          mkdir -p /tmp/smoke-connect-frozen
+          python scripts/smoke_connect.py \
+            --belay "$(pwd)/$BIN" \
+            --bin-dir /tmp/smoke-connect-frozen/bin \
+            --home /tmp/smoke-connect-frozen/home \
+            --project /tmp/smoke-connect-frozen/project \
+            --expect-frozen
       - uses: actions/upload-artifact@v4
         with:
           name: belay-${{ matrix.os }}

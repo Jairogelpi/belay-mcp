@@ -25,7 +25,7 @@ from pathlib import Path
 import anyio
 from mcp.types import Tool
 
-from belay.bundled_packs import filesystem_pack
+from belay.bundled_packs import filesystem_pack, stable_contracts_path
 from belay.cli.client_configs import atomic_write, render_claude_hooks_settings
 from belay.cli.client_registration import (
     ClaudeAdapter,
@@ -175,10 +175,16 @@ class ProposedRuntime:
 
 def build_proposed_runtime(project_dir: Path) -> ProposedRuntime:
     """Compute (never write) the desired runtime for `project_dir`. Uses the
-    bundled, pinned Filesystem pack's own contracts file directly (never a
-    copy) and the *canonicalized* (`.resolve()`d) project directory as both
-    the upstream's allowed-directory argument and the identity this
-    runtime is forever tied to."""
+    bundled, pinned Filesystem pack's own contracts file directly for an
+    ordinary install -- a real, permanent path, stable across process
+    launches. A frozen `belay.exe` gets `stable_contracts_path`'s
+    `belay_home()`-anchored copy instead: the bundled resource's own path
+    lives under that *specific* process's ephemeral `sys._MEIPASS` and is
+    gone by the time a later `belay run` process (registered by this same
+    call, but launched separately) would try to read it. Uses the
+    *canonicalized* (`.resolve()`d) project directory as both the
+    upstream's allowed-directory argument and the identity this runtime is
+    forever tied to."""
     canonical_dir = project_dir.resolve()
     belay_dir = canonical_dir / ".belay"
     wrap_path = belay_dir / "belay.wrap.json"
@@ -192,7 +198,7 @@ def build_proposed_runtime(project_dir: Path) -> ProposedRuntime:
         project_dir=canonical_dir,
         wrap_path=wrap_path,
         db_path=db_path,
-        contracts_path=pack.contracts_path,
+        contracts_path=stable_contracts_path(pack),
         upstream_argv=upstream_argv,
         launch_argv=launch_argv,
     )

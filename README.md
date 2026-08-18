@@ -246,11 +246,24 @@ step is the equivalent E7 actually built and tested — the agent retries with
 a different, narrower filter, which is a new plan the human approves
 instead of the original one.
 
-**Recording:** a VHS tape script (`examples/demo.tape`) is checked in for
-whoever has the `vhs` binary to render a GIF from — `asciinema` and `vhs`
-were not available in the sandbox this entrega was built in, so no
-recording is embedded here yet. This is an honest gap, not a placeholder
-GIF; see ADR 0009.
+**Recording:** a self-contained VHS tape script (`examples/demo.tape`,
+fixed up in E23 — deterministic typing speed/timing, output path, no `cd`
+assumptions) is checked in for whoever has the `vhs` binary to render a
+GIF from:
+
+```bash
+vhs examples/demo.tape   # from the repository root -> docs/assets/belay-demo.gif
+```
+
+`vhs` was not available in either the sandbox E9 was built in or the
+environment E23 was built in, so `docs/assets/belay-demo.gif` still does
+not exist and nothing is embedded here yet. This is an honest gap, not a
+placeholder GIF — the tape itself was re-verified in E23 by running the
+exact command it types (`python examples/demo.py --oops`) directly, which
+produced real `chain: OK` / `coherence: OK` / "session fully compensated"
+output; only the actual VHS render step could not run. See ADR 0009 and
+[ADR 0027](docs/adr/0027-e21-release-truth.md)'s release-truth precedent
+for why this stays stated plainly instead of silently dropped or faked.
 
 ## Advanced setup
 
@@ -581,10 +594,23 @@ clean-clone test run under 60 seconds. See
 not be moved, recreated, or force-updated to change that history.
 
 `main` is currently ahead of `v0.1.0` with E10-E20 (see "What's new since
-v0.1.0" above). `v0.2.0a1` is the planned next GitHub prerelease — see
-[`.github/workflows/release.yaml`](.github/workflows/release.yaml) and
-[`CHANGELOG.md`](CHANGELOG.md); it has not been cut yet, and no GitHub
-Release or PyPI publication should be assumed to exist until it is.
+v0.1.0" above; E21-E23 are release/governance work — quality gates,
+zero-config connect, and this prerelease process itself — tracked in
+[`CHANGELOG.md`](CHANGELOG.md) rather than the entrega table, since they
+don't add spec-numbered product behavior). `v0.2.0a1` is the planned next
+GitHub prerelease — see
+[`.github/workflows/release.yaml`](.github/workflows/release.yaml),
+[`docs/release-runbook.md`](docs/release-runbook.md) (E23 — the exact
+pre-tag gate, immutable-tag recovery procedure, and GitHub settings
+rollout order), and [`CHANGELOG.md`](CHANGELOG.md); it has not been cut
+yet, and no GitHub Release or PyPI publication should be assumed to exist
+until it is. When it is cut, the release will build source + wheel +
+Linux/macOS/Windows binaries from one immutable tagged commit, gated on
+nine required CI checks (`scripts/release_preflight.py
+REQUIRED_CHECK_NAMES`) all green on that exact commit first — see the
+runbook for the full procedure. `main` protection and mandatory checks
+are applied only after that first verified prerelease exists (E23 Task
+9), not before.
 
 An npm wrapper package (`npm/`, also `belay-mcp`) is written and locally
 verified but likewise **not published to npm yet** — same manual step,
